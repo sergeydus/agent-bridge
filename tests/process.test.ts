@@ -75,6 +75,36 @@ test('reports accepted stdout chunks while preserving buffered output', async ()
   assert.equal(result.stdout, 'first\nsecond');
 });
 
+test('bounds captured output while preserving its beginning and end', async () => {
+  const result = await runProcess(
+    process.execPath,
+    ['-e', "process.stdout.write('start-' + 'x'.repeat(10000) + '-end')"],
+    { truncateOutputChars: 100 },
+  );
+
+  assert.equal(result.stdoutTruncated, true);
+  assert.match(result.stdout, /^start-/);
+  assert.match(result.stdout, /output truncated/);
+  assert.match(result.stdout, /-end$/);
+  assert.ok(result.stdout.length <= 100);
+});
+
+test('can stream stdout without retaining it in memory', async () => {
+  const chunks: string[] = [];
+  const result = await runProcess(
+    process.execPath,
+    ['-e', "process.stdout.write('streamed')"],
+    {
+      captureStdout: false,
+      onStdoutChunk: (chunk) => chunks.push(chunk),
+    },
+  );
+
+  assert.equal(chunks.join(''), 'streamed');
+  assert.equal(result.stdout, '');
+  assert.equal(result.stdoutTruncated, false);
+});
+
 test('terminates a subprocess when its stdout consumer fails', async () => {
   await assert.rejects(
     () =>

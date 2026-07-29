@@ -121,6 +121,7 @@ export class CodexProvider implements AgentProvider {
       timeoutMs: options.timeoutMs,
       signal: options.signal,
       maxOutputChars: MAX_PROVIDER_PROCESS_OUTPUT_CHARS,
+      captureStdout: false,
       onStdoutChunk: (chunk) => events.push(chunk),
     });
     events.finish();
@@ -219,6 +220,7 @@ Discover and read applicable AGENTS.md and CLAUDE.md files before analysis.`;
       timeoutMs: options.timeoutMs,
       signal: options.signal,
       maxOutputChars: MAX_PROVIDER_PROCESS_OUTPUT_CHARS,
+      captureStdout: false,
       onStdoutChunk: (chunk) => events.push(chunk),
     });
 

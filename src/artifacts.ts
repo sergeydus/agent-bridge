@@ -28,6 +28,27 @@ async function askForChoice(
   }
 }
 
+export async function patchApplicationRefusalReason({
+  repository,
+  patchPath,
+  baseRevision,
+}: {
+  repository: string;
+  patchPath: string;
+  baseRevision?: string;
+}): Promise<string | undefined> {
+  if (!baseRevision) {
+    return 'This saved run predates base-revision tracking. The patch was not applied automatically.';
+  }
+  if ((await currentCommit(repository)) !== baseRevision) {
+    return 'The original checkout moved to a different commit. The patch was not applied.';
+  }
+  if (!(await canApplyPatch({ repository, patchPath }))) {
+    return 'The patch conflicts with the original checkout. It was not applied.';
+  }
+  return undefined;
+}
+
 export async function finishIsolatedRun({
   repository,
   workspace,
@@ -41,8 +62,11 @@ export async function finishIsolatedRun({
   baseRevision?: string;
   reporter: ProgressReporter;
 }): Promise<{ patchPath?: string; workspace?: string; applied?: boolean }> {
-  const patch = await createPatch({ workspace, destination: patchPath });
-  if (!patch.trim()) {
+  const patchCreated = await createPatch({
+    workspace,
+    destination: patchPath,
+  });
+  if (!patchCreated) {
     reporter.warning('The agents produced no file changes.');
     return { workspace };
   }
@@ -69,16 +93,13 @@ What should happen to the completed changes?
       '1',
     );
     if (choice === '2') {
-      if (baseRevision && (await currentCommit(repository)) !== baseRevision) {
-        reporter.warning(
-          'The original checkout moved to a different commit. The patch was not applied.',
-        );
-        return { patchPath, workspace };
-      }
-      if (!(await canApplyPatch({ repository, patchPath }))) {
-        reporter.warning(
-          'The patch conflicts with the original checkout. It was not applied.',
-        );
+      const refusalReason = await patchApplicationRefusalReason({
+        repository,
+        patchPath,
+        baseRevision,
+      });
+      if (refusalReason) {
+        reporter.warning(refusalReason);
         return { patchPath, workspace };
       }
       await applyPatch({ repository, patchPath });

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { removeIsolatedWorktree } from './git.ts';
 import type { SavedRun } from './state.ts';
 import { RunStateStore } from './state.ts';
+import { sanitizeTerminalText } from './terminal-text.ts';
 
 const ARTIFACT_EXTENSIONS = [
   '.md',
@@ -20,7 +21,9 @@ export function formatRunList(runs: SavedRun[]): string {
   const rows = runs.map((run) => {
     const workflow = run.workflow.kind.padEnd(13);
     const status = run.status.padEnd(12);
-    return `${run.id}  ${status}  ${workflow}  ${run.originalCwd}`;
+    return `${run.id}  ${status}  ${workflow}  ${sanitizeTerminalText(
+      run.originalCwd,
+    )}`;
   });
   return [
     'RUN ID                              STATUS        WORKFLOW       PROJECT',

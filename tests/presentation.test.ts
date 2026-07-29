@@ -130,3 +130,41 @@ test('buffers live text when concurrent providers could interleave', () => {
     /Claude · live update\nOne block\./,
   );
 });
+
+test('plain and screen-reader output neutralize provider terminal controls', () => {
+  for (const screenReader of [false, true]) {
+    const preferences = { screenReader, color: false };
+    const presenter = createProviderEventPresenter({
+      agent: 'codex',
+      preferences,
+      streamText: !screenReader,
+    });
+    const output = [
+      formatAgentStarted({
+        agent: 'codex',
+        model: 'safe\u001B]0;changed-title\u0007-model',
+        preferences,
+      }),
+      presenter.render({
+        type: 'activity',
+        message: 'inspect\u001B[2J-files',
+      }),
+      presenter.render({
+        type: 'text-delta',
+        text: 'answer\u001B]8;;https://example.com\u0007-link',
+      }),
+      presenter.render({ type: 'text-end' }),
+      formatAgentResponse({
+        agent: 'codex',
+        text: 'done\u001B[31m-red',
+        preferences,
+      }),
+    ].join('');
+
+    assert.equal(output.includes('\u001B'), false);
+    assert.match(output, /safe-model/);
+    assert.match(output, /inspect-files/);
+    assert.match(output, /answer-link/);
+    assert.match(output, /done-red/);
+  }
+});

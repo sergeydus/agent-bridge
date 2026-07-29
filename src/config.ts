@@ -1,6 +1,7 @@
-import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+
+import { writePrivateFileAtomic } from './filesystem.ts';
 
 const MAX_RECENT_PROJECTS = 8;
 
@@ -66,12 +67,10 @@ export class UserConfigStore {
   }
 
   async save(config: UserConfig): Promise<void> {
-    await mkdir(dirname(this.#path), { recursive: true, mode: 0o700 });
-    const temporary = `${this.#path}.${randomUUID()}.tmp`;
-    await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, {
-      mode: 0o600,
-    });
-    await rename(temporary, this.#path);
+    await writePrivateFileAtomic(
+      this.#path,
+      `${JSON.stringify(config, null, 2)}\n`,
+    );
   }
 
   async rememberProject(project: string): Promise<UserConfig> {

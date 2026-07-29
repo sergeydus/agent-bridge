@@ -32,6 +32,10 @@ location of Agent Bridge itself.
 - `presentation-model.ts` owns bounded, renderer-neutral terminal state.
 - `presentation.ts` owns accessible plain rendering, presentation control, and
   color resolution.
+- `enhanced-terminal.ts` owns responsive alternate-screen rendering and
+  terminal-text sanitization.
+- `terminal-capabilities.ts` owns UI mode selection and process-free capability
+  checks.
 - `orchestrator.ts` owns the provider-independent state machine.
 - `core.ts` contains shared workflow types and deterministic helpers.
 - `response.ts` owns structured response schemas and parsing.

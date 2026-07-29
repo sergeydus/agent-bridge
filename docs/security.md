@@ -66,6 +66,16 @@ paths, or unknown event payloads. Live text is informational and bounded; the
 separately validated final structured response remains the sole authority for
 workflow decisions.
 
+All terminal presentation modes remove terminal escape sequences, C0/C1
+controls, and Unicode bidirectional embedding, override, and isolate controls
+from untrusted text before displaying it. Direction marks used by ordinary
+mixed left-to-right and right-to-left text remain supported. The enhanced
+renderer does not enable mouse capture or raw input, and it leaves the
+alternate screen before a child workflow inherits the terminal. Its start,
+suspend, resume, redraw, and stop operations cannot update checkpoints or
+workflow decisions. If drawing fails but normal terminal state can be restored,
+presentation falls back to the plain renderer without changing workflow state.
+
 Interactive chat never gives providers write access. Its editing commands
 create an owner-only temporary task file and launch the existing isolated
 workflow without a shell. The task file is removed after the child exits.

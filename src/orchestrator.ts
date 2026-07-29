@@ -12,6 +12,7 @@ import {
 } from './prompts.ts';
 import type { AgentResponse, ResponseKind } from './response.ts';
 import type { PendingReview, SavedRound } from './state.ts';
+import { sanitizeTerminalText } from './terminal-text.ts';
 import type { ProgressReporter } from './ui.ts';
 
 export interface OrchestrationCheckpoint {
@@ -189,8 +190,8 @@ ${task}`;
       reporter.success(`Codex: ${conciseAnswer(codex)}`);
       reporter.success(`Claude: ${conciseAnswer(claude)}`);
       if (reporter.verbose) {
-        console.log('\nCodex plan:\n', codex);
-        console.log('\nClaude plan:\n', claude);
+        console.log('\nCodex plan:\n', sanitizeTerminalText(codex));
+        console.log('\nClaude plan:\n', sanitizeTerminalText(claude));
       }
     }
 
@@ -414,8 +415,8 @@ ${verification}`,
     reporter.success(`Codex: ${conciseAnswer(codex)}`);
     reporter.success(`Claude: ${conciseAnswer(claude)}`);
     if (reporter.verbose) {
-      console.log('\nCodex:\n', codex);
-      console.log('\nClaude:\n', claude);
+      console.log('\nCodex:\n', sanitizeTerminalText(codex));
+      console.log('\nClaude:\n', sanitizeTerminalText(claude));
     }
 
     if (

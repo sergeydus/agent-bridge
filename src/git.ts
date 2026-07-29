@@ -1,5 +1,13 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
@@ -19,11 +27,15 @@ export function execute(
     allowedExitCodes = [0],
     env,
     signal,
+    captureStdout,
+    onStdoutChunk,
   }: {
     cwd: string;
     allowedExitCodes?: number[];
     env?: NodeJS.ProcessEnv;
     signal?: AbortSignal;
+    captureStdout?: boolean;
+    onStdoutChunk?: (chunk: string) => void;
   },
 ): Promise<CommandResult> {
   return runProcess(command, args, {
@@ -31,6 +43,8 @@ export function execute(
     allowedExitCodes,
     env,
     signal,
+    captureStdout,
+    onStdoutChunk,
   });
 }
 
@@ -95,24 +109,40 @@ export async function createPatch({
 }: {
   workspace: string;
   destination: string;
-}): Promise<string> {
-  const patch = await completeWorkspacePatch(workspace);
+}): Promise<boolean> {
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-  if (!patch) {
-    await rm(destination, { force: true });
-    return '';
+  const absoluteDestination = resolve(destination);
+  await writeFile(absoluteDestination, '', { mode: 0o600 });
+  try {
+    await runCompleteWorkspaceDiff(workspace, {
+      outputPath: absoluteDestination,
+    });
+    if ((await stat(absoluteDestination)).size === 0) {
+      await rm(absoluteDestination, { force: true });
+      return false;
+    }
+    await chmod(absoluteDestination, 0o600);
+    return true;
+  } catch (error) {
+    await rm(absoluteDestination, { force: true }).catch(() => {});
+    throw error;
   }
-  await writeFile(destination, patch, { mode: 0o600 });
-  return patch;
 }
 
 /**
- * Builds a complete patch without touching the worktree's real Git index.
+ * Streams a complete diff without touching the worktree's real Git index.
  * An alternate temporary index makes untracked files portable on every OS.
  */
-export async function completeWorkspacePatch(
+async function runCompleteWorkspaceDiff(
   workspace: string,
-): Promise<string> {
+  {
+    outputPath,
+    onStdoutChunk,
+  }: {
+    outputPath?: string;
+    onStdoutChunk?: (chunk: string) => void;
+  },
+): Promise<void> {
   const temporaryDirectory = await mkdtemp(
     join(tmpdir(), 'agent-bridge-index-'),
   );
@@ -121,12 +151,23 @@ export async function completeWorkspacePatch(
   try {
     await execute('git', ['read-tree', 'HEAD'], { cwd: workspace, env });
     await execute('git', ['add', '--all', '--', '.'], { cwd: workspace, env });
-    const result = await execute(
+    await execute(
       'git',
-      ['diff', '--cached', '--binary', '--no-ext-diff', 'HEAD'],
-      { cwd: workspace, env },
+      [
+        'diff',
+        '--cached',
+        '--binary',
+        '--no-ext-diff',
+        ...(outputPath ? [`--output=${outputPath}`] : []),
+        'HEAD',
+      ],
+      {
+        cwd: workspace,
+        env,
+        captureStdout: outputPath === undefined && onStdoutChunk === undefined,
+        onStdoutChunk,
+      },
     );
-    return result.stdout ? `${result.stdout.trimEnd()}\n` : '';
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
@@ -138,8 +179,11 @@ export async function currentCommit(cwd: string): Promise<string> {
 }
 
 export async function workspaceFingerprint(workspace: string): Promise<string> {
-  const patch = await completeWorkspacePatch(workspace);
-  return createHash('sha256').update(patch).digest('hex');
+  const hash = createHash('sha256');
+  await runCompleteWorkspaceDiff(workspace, {
+    onStdoutChunk: (chunk) => hash.update(chunk),
+  });
+  return hash.digest('hex');
 }
 
 export async function canApplyPatch({

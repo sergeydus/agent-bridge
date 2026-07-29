@@ -64,10 +64,12 @@ test('isolates edits and exports tracked and untracked files as a patch', async 
       await symlink('tracked.txt', join(workspace, 'tracked-link'));
     }
 
-    const patch = await createPatch({
+    const patchCreated = await createPatch({
       workspace,
       destination: patchPath,
     });
+    const patch = await readFile(patchPath, 'utf8');
+    assert.equal(patchCreated, true);
     assert.match(patch, /tracked\.txt/);
     assert.match(patch, /new\.txt/);
     assert.match(patch, /new binary file\.bin/);

@@ -1,13 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import {
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  unlink,
-  writeFile,
-} from 'node:fs/promises';
+import { readdir, unlink } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 import {
@@ -20,11 +11,15 @@ import {
   type RunStatus,
   type WorkflowKind,
 } from './core.ts';
+import { acquireFileLock, FileLock } from './file-lock.ts';
+import { readFilePrefixBytes, writePrivateFileAtomic } from './filesystem.ts';
 import {
   isSafeProtectedPath,
   isVerificationCommand,
   type VerificationCommand,
 } from './project-config.ts';
+
+const MAX_RUN_STATE_BYTES = 50_000_000;
 
 export interface SavedRound {
   phase: string;
@@ -88,6 +83,8 @@ export interface SavedRun {
   rounds: SavedRound[];
   error?: string;
 }
+
+export { FileLock as RunLock };
 
 interface SavedRunV1 {
   version: 1;
@@ -388,27 +385,6 @@ function migrateV1(run: SavedRunV1, outputDirectory: string): SavedRun {
   };
 }
 
-export class RunLock {
-  #path: string;
-  #released = false;
-
-  constructor(path: string) {
-    this.#path = path;
-  }
-
-  async release(): Promise<void> {
-    if (this.#released) {
-      return;
-    }
-    this.#released = true;
-    await unlink(this.#path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== 'ENOENT') {
-        throw error;
-      }
-    });
-  }
-}
-
 export class RunStateStore {
   #directory: string;
   #onWarning: (message: string) => void;
@@ -435,78 +411,44 @@ export class RunStateStore {
     return join(this.#directory, `${runId}.lock`);
   }
 
-  async acquireLock(runId: string): Promise<RunLock> {
-    await mkdir(this.#directory, { recursive: true, mode: 0o700 });
-    const path = this.lockPathFor(runId);
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const handle = await open(path, 'wx', 0o600);
-        await handle.writeFile(
-          `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`,
-        );
-        await handle.close();
-        return new RunLock(path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-          throw error;
-        }
-        if (attempt === 0 && (await this.#removeStaleLock(path))) {
-          continue;
-        }
-        throw new Error(
-          `Run ${runId} is already active in another Agent Bridge process.`,
-          { cause: error },
-        );
-      }
-    }
-    throw new Error(`Unable to lock run ${runId}.`);
-  }
-
-  async #removeStaleLock(path: string): Promise<boolean> {
-    try {
-      const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
-      const pid =
-        parsed && typeof parsed === 'object'
-          ? (parsed as { pid?: unknown }).pid
-          : undefined;
-      if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
-        await unlink(path);
-        return true;
-      }
-      try {
-        process.kill(pid, 0);
-        return false;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
-          await unlink(path);
-          return true;
-        }
-        return false;
-      }
-    } catch {
-      await unlink(path).catch(() => {});
-      return true;
-    }
+  acquireLock(runId: string): Promise<FileLock> {
+    return acquireFileLock({
+      path: this.lockPathFor(runId),
+      activeMessage: `Run ${runId} is already active in another Agent Bridge process.`,
+    });
   }
 
   async save(run: SavedRun): Promise<string> {
-    await mkdir(this.#directory, { recursive: true, mode: 0o700 });
     const destination = this.pathFor(run.id);
-    const temporary = `${destination}.${randomUUID()}.tmp`;
     const persisted = { ...run, updatedAt: new Date().toISOString() };
     if (!isSavedRun(persisted)) {
       throw new Error(`Refusing to save invalid run: ${run.id}`);
     }
-    await writeFile(temporary, `${JSON.stringify(persisted, null, 2)}\n`, {
-      mode: 0o600,
-    });
-    await rename(temporary, destination);
+    const serialized = `${JSON.stringify(persisted, null, 2)}\n`;
+    if (Buffer.byteLength(serialized) > MAX_RUN_STATE_BYTES) {
+      throw new Error(`Run checkpoint is larger than 50 MB: ${run.id}`);
+    }
+    await writePrivateFileAtomic(destination, serialized);
     return destination;
   }
 
   async load(runId: string): Promise<SavedRun> {
-    const contents = await readFile(this.pathFor(runId), 'utf8');
-    const parsed: unknown = JSON.parse(contents);
+    let contents: Buffer;
+    try {
+      contents = await readFilePrefixBytes({
+        path: this.pathFor(runId),
+        maxBytes: MAX_RUN_STATE_BYTES + 1,
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error(`Saved run not found: ${runId}`, { cause: error });
+      }
+      throw error;
+    }
+    if (contents.length > MAX_RUN_STATE_BYTES) {
+      throw new Error(`Saved run is larger than 50 MB: ${runId}`);
+    }
+    const parsed: unknown = JSON.parse(contents.toString('utf8'));
     if (isSavedRun(parsed)) {
       return parsed;
     }

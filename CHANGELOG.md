@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- Added the opt-in Phase 3 enhanced chat preview with compact, stacked, and
+  wide terminal layouts.
+- Added conservative `--ui plain|enhanced|auto` capability resolution,
+  screen-reader fallback, resize redraws, and alternate-screen restoration
+  around child workflows and exit.
+- Added Unicode grapheme width handling and terminal-control sanitization for
+  rendered conversation content.
+- Added recoverable enhanced-to-plain renderer fallback, exception-safe chat
+  cleanup, readable supplemental command output, and bidirectional-control
+  sanitization.
+- Prevented a failed chat-lock acquisition from saving over the session owned
+  by another Agent Bridge process.
+- Extended terminal-control sanitization to plain, screen-reader, wizard,
+  diagnostics, and run-management output.
+- Added redirected-input chat sessions, exception-safe terminal cleanup,
+  shared atomic persistence and locking, and lock-owner-safe run recovery.
+- Bounded large instruction, diff, snapshot, task-file, checkpoint, and
+  provider-process reads; patches and workspace fingerprints now stream
+  without buffering the complete diff.
+- Refused legacy patch application when the saved run has no verifiable base
+  revision.
+
 ## 0.5.0
 
 - Added live, provider-neutral progress events from Codex JSONL and Claude

@@ -1,5 +1,6 @@
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+
+import { readTextFilePrefix } from './filesystem.ts';
 
 const INSTRUCTION_FILES = ['AGENTS.md', 'CLAUDE.md'] as const;
 const MAX_INSTRUCTION_CHARS = 40_000;
@@ -17,10 +18,12 @@ export async function loadInstructionContext(
   for (const name of INSTRUCTION_FILES) {
     const path = join(projectRoot, name);
     try {
-      const contents = await readFile(path, 'utf8');
-      const clipped = contents.slice(0, remaining);
-      files.push({ path, contents: clipped });
-      remaining -= clipped.length;
+      const contents = await readTextFilePrefix({
+        path,
+        maxCharacters: remaining,
+      });
+      files.push({ path, contents });
+      remaining -= contents.length;
       if (remaining <= 0) {
         break;
       }
