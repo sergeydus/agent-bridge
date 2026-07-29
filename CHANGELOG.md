@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.0
+
+- Added live, provider-neutral progress events from Codex JSONL and Claude
+  stream-json output.
+- Added readable streaming updates in interactive chat and atomic,
+  speaker-labeled updates where concurrent providers could otherwise
+  interleave.
+- Kept schema-validated final responses authoritative and excluded private
+  reasoning, raw commands, tool inputs, and file paths from live output.
+- Added buffered screen-reader updates, bounded live output, deterministic
+  split-chunk fixtures, and streaming process cancellation tests.
+
 ## 0.4.0
 
 - Added targeted `/ask`, `/both`, and `@agent` interactive turns.

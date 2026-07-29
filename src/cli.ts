@@ -26,6 +26,7 @@ import { loadInstructionContext } from './instructions.ts';
 import { runOrchestration } from './orchestrator.ts';
 import { HELP, parseArgs } from './options.ts';
 import { getAppPaths } from './paths.ts';
+import { createProviderEventPresenter } from './presentation.ts';
 import { ProcessAbortError } from './process.ts';
 import { loadProjectConfig } from './project-config.ts';
 import { isPathInside, resolveProject } from './project.ts';
@@ -402,6 +403,14 @@ continue from its actual state instead of repeating changes blindly.`;
         responseKind: 'turn' | 'synthesis';
       },
     ) => {
+      const eventPresenter = createProviderEventPresenter({
+        agent,
+        preferences: {
+          screenReader: options.screenReader,
+          color: false,
+        },
+        streamText: false,
+      });
       const heartbeat = setInterval(() => {
         reporter.info(
           `${agent === 'codex' ? 'Codex' : 'Claude'} is still working (${reporter.elapsed()})`,
@@ -409,30 +418,41 @@ continue from its actual state instead of repeating changes blindly.`;
       }, 30_000);
       heartbeat.unref();
       try {
-        return await runProviderWithRetry({
-          provider: PROVIDERS[agent],
-          prompt,
-          options: {
-            cwd: options.cwd,
-            tempDirectory,
-            writeAccess,
-            verbose: options.verbose,
-            dryRun: options.dryRun,
-            timeoutMs: options.timeoutMinutes * 60_000,
-            responseKind,
-            isGitRepository: projectKind === 'git',
-            model: agent === 'codex' ? options.codexModel : options.claudeModel,
-            effort:
-              agent === 'codex' ? options.codexEffort : options.claudeEffort,
-            screenReader: options.screenReader,
-            signal: abortController.signal,
-          },
-          retries: options.retries,
-          onRetry: (attempt) =>
-            reporter.warning(
-              `Temporary ${agent} failure; retrying (${attempt}/${options.retries})…`,
-            ),
-        });
+        try {
+          const response = await runProviderWithRetry({
+            provider: PROVIDERS[agent],
+            prompt,
+            options: {
+              cwd: options.cwd,
+              tempDirectory,
+              writeAccess,
+              verbose: options.verbose,
+              dryRun: options.dryRun,
+              timeoutMs: options.timeoutMinutes * 60_000,
+              responseKind,
+              isGitRepository: projectKind === 'git',
+              model:
+                agent === 'codex' ? options.codexModel : options.claudeModel,
+              effort:
+                agent === 'codex' ? options.codexEffort : options.claudeEffort,
+              screenReader: options.screenReader,
+              signal: abortController.signal,
+              onEvent: (event) => reporter.write(eventPresenter.render(event)),
+            },
+            retries: options.retries,
+            onRetry: (attempt) => {
+              reporter.write(eventPresenter.reset());
+              reporter.warning(
+                `Temporary ${agent} failure; retrying (${attempt}/${options.retries})…`,
+              );
+            },
+          });
+          reporter.write(eventPresenter.finish());
+          return response;
+        } catch (error) {
+          reporter.write(eventPresenter.reset());
+          throw error;
+        }
       } finally {
         clearInterval(heartbeat);
       }

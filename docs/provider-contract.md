@@ -14,6 +14,7 @@ Each call receives:
 - Git/non-Git project kind;
 - timeout, cancellation signal, model, and reasoning effort;
 - whether the provider should enable its native screen-reader behavior;
+- an optional provider-neutral live-event sink;
 - a private temporary directory for response schemas and output.
 
 The orchestrator does not construct provider flags. Provider adapters do not
@@ -51,6 +52,28 @@ The response parser accepts the direct object and the documented structured
 wrappers emitted by the supported CLIs. It rejects unstructured, ambiguous, or
 empty output. It never infers a decision from prose.
 
+## Live events
+
+Codex runs with its documented JSONL mode. Claude runs with its documented
+stream-json mode and partial message events. Their adapters normalize output
+to a deliberately small event union:
+
+- safe generic activity;
+- user-facing text deltas or complete text updates;
+- text completion boundaries;
+- token usage metadata.
+
+The normalized stream is informational. The final schema-constrained output
+file or result event remains authoritative, and only that validated response
+may affect decisions, checkpoints, or convergence. The adapters never forward
+reasoning events, thinking deltas, commands, tool inputs, file paths, or raw
+provider events. Unknown event types are ignored for forward compatibility.
+
+The implementation follows the official [Codex non-interactive
+contract](https://developers.openai.com/codex/noninteractive) and [Claude
+streaming output
+contract](https://code.claude.com/docs/en/agent-sdk/streaming-output).
+
 ## Permissions
 
 Read-only provider calls must use the strongest supported read-only mode.
@@ -74,5 +97,7 @@ never retry. Timeout and cancellation must terminate the provider process tree.
 3. Define explicit read and write permission mappings.
 4. Implement independent version and auth diagnostics.
 5. Add dry-run assertions for every generated command.
-6. Test output wrappers, malformed responses, timeout, and cancellation without
-   invoking a real subscription call.
+6. Normalize only safe, documented streaming events and keep the final
+   structured response authoritative.
+7. Test split event chunks, output wrappers, malformed responses, timeout, and
+   cancellation without invoking a real subscription call.

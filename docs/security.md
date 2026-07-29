@@ -13,6 +13,8 @@ small trusted local coordinator.
   its commands.
 - Provider prose is untrusted data. Only schema-validated decisions drive the
   workflow.
+- Provider event streams are untrusted data. They are size-bounded and parsed
+  incrementally; malformed streams terminate the provider call.
 - Interactive-chat messages and linked workflow summaries are untrusted data
   and are JSON-encoded in subsequent prompts.
 - The target checkout may already contain valuable uncommitted work.
@@ -57,6 +59,12 @@ All child processes run with `shell: false` and argument arrays. Timeouts and
 signals terminate the child process tree so provider descendants do not remain
 running after cancellation. Write phases remain checkpointed and preserved
 when an outcome is uncertain.
+
+Live presentation uses an allowlisted normalized event contract. It never
+renders provider reasoning, thinking deltas, raw commands, tool inputs, file
+paths, or unknown event payloads. Live text is informational and bounded; the
+separately validated final structured response remains the sole authority for
+workflow decisions.
 
 Interactive chat never gives providers write access. Its editing commands
 create an owner-only temporary task file and launch the existing isolated

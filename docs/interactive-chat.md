@@ -105,3 +105,15 @@ changing the rest of the standard layout. `NO_COLOR` is also honored.
 Speaker names and structured decisions are always written as text, so color is
 supplemental. Presentation preferences are restored when a chat is resumed
 and forwarded when chat launches an implementation or review workflow.
+
+Provider adapters also emit safe live progress. Standard interactive chat
+streams user-facing text deltas with an explicit speaker heading. Screen-reader
+mode buffers those deltas into complete semantic updates. One-shot workflows
+also buffer each provider's text into atomic labeled blocks because providers
+may run concurrently. Generic activity can describe that an agent is searching,
+reading, editing, or using a tool, but never includes raw commands, tool inputs,
+file paths, or private reasoning.
+
+Live progress is intentionally not conversation memory. Only the final
+schema-validated response is checkpointed, shown as the response, and supplied
+to the next agent.

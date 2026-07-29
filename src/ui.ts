@@ -32,6 +32,12 @@ export class ProgressReporter {
     return this.#verbose;
   }
 
+  write(text: string): void {
+    if (!this.#silent && text) {
+      process.stdout.write(text);
+    }
+  }
+
   heading(title: string): void {
     if (!this.#silent) {
       process.stdout.write(

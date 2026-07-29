@@ -9,6 +9,11 @@ import {
 } from './core.ts';
 import { runProcess, type ProcessResult } from './process.ts';
 import {
+  ClaudeEventStream,
+  CodexEventStream,
+  type ProviderEventSink,
+} from './provider-events.ts';
+import {
   parseProviderResponse,
   schemaFor,
   type AgentResponse,
@@ -31,6 +36,7 @@ export interface ProviderRunOptions {
   signal?: AbortSignal;
   model?: string;
   effort?: ReasoningEffort;
+  onEvent?: ProviderEventSink;
 }
 
 export interface AgentProvider {
@@ -72,6 +78,7 @@ export class CodexProvider implements AgentProvider {
       'never',
       '--cd',
       options.cwd,
+      '--json',
       '--output-last-message',
       outputPath,
       '--output-schema',
@@ -106,6 +113,7 @@ export class CodexProvider implements AgentProvider {
       `${JSON.stringify(schemaFor(options.responseKind), null, 2)}\n`,
       { mode: 0o600 },
     );
+    const events = new CodexEventStream(options.responseKind, options.onEvent);
     await runProcess('codex', args, {
       cwd: options.cwd,
       input: prompt,
@@ -113,7 +121,9 @@ export class CodexProvider implements AgentProvider {
       timeoutMs: options.timeoutMs,
       signal: options.signal,
       maxOutputChars: MAX_PROVIDER_PROCESS_OUTPUT_CHARS,
+      onStdoutChunk: (chunk) => events.push(chunk),
     });
+    events.finish();
     if ((await stat(outputPath)).size > MAX_PROVIDER_RESPONSE_BYTES) {
       throw new Error(
         `Codex response exceeded ${MAX_PROVIDER_RESPONSE_BYTES} bytes.`,
@@ -161,7 +171,9 @@ Discover and read applicable AGENTS.md and CLAUDE.md files before analysis.`;
     const args = [
       '--print',
       '--output-format',
-      'json',
+      'stream-json',
+      '--verbose',
+      '--include-partial-messages',
       '--json-schema',
       JSON.stringify(schemaFor(options.responseKind)),
       '--system-prompt',
@@ -199,16 +211,18 @@ Discover and read applicable AGENTS.md and CLAUDE.md files before analysis.`;
       };
     }
 
-    const { stdout } = await runProcess('claude', args, {
+    const events = new ClaudeEventStream(options.responseKind, options.onEvent);
+    await runProcess('claude', args, {
       cwd: options.cwd,
       input: prompt,
       inheritStderr: options.verbose,
       timeoutMs: options.timeoutMs,
       signal: options.signal,
-      maxOutputChars: MAX_PROVIDER_RESPONSE_BYTES,
+      maxOutputChars: MAX_PROVIDER_PROCESS_OUTPUT_CHARS,
+      onStdoutChunk: (chunk) => events.push(chunk),
     });
 
-    return parseProviderResponse(stdout, options.responseKind);
+    return events.finish();
   }
 }
 

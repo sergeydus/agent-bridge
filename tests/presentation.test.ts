@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  createProviderEventPresenter,
   formatAgentHeartbeat,
   formatAgentResponse,
   formatAgentStarted,
@@ -71,4 +72,61 @@ test('enhanced presentation colors speakers without relying on color', () => {
   assert.equal(output.includes('\u001B['), true);
   assert.match(output, /Claude/);
   assert.match(output, /\[continue\]/);
+});
+
+test('streams labeled live text in an interactive terminal', () => {
+  const presenter = createProviderEventPresenter({
+    agent: 'claude',
+    preferences: { screenReader: false, color: false },
+    streamText: true,
+  });
+  const output = [
+    presenter.render({ type: 'text-delta', text: 'Checking ' }),
+    presenter.beforeStatus(),
+    'Claude is still working.\n',
+    presenter.render({ type: 'text-delta', text: 'files.' }),
+    presenter.render({ type: 'text-end' }),
+    presenter.render({
+      type: 'activity',
+      message: 'running a project command',
+    }),
+    presenter.finish(),
+  ].join('');
+
+  assert.match(
+    output,
+    /Claude · live update\nChecking \nClaude is still working\.\n\nClaude · live update\nfiles\./,
+  );
+  assert.match(output, /Claude · running a project command/);
+});
+
+test('buffers deltas into complete semantic screen-reader updates', () => {
+  const presenter = createProviderEventPresenter({
+    agent: 'codex',
+    preferences: { screenReader: true, color: false },
+    streamText: true,
+  });
+
+  assert.equal(presenter.render({ type: 'text-delta', text: 'Partial ' }), '');
+  assert.equal(presenter.render({ type: 'text-delta', text: 'update.' }), '');
+  assert.equal(presenter.beforeStatus(), '');
+  const output = presenter.render({ type: 'text-end' });
+
+  assert.match(output, /Codex progress update\.\nPartial update\./);
+  assert.doesNotMatch(output, /[─●✓]/);
+});
+
+test('buffers live text when concurrent providers could interleave', () => {
+  const presenter = createProviderEventPresenter({
+    agent: 'claude',
+    preferences: { screenReader: false, color: false },
+    streamText: false,
+  });
+
+  assert.equal(presenter.render({ type: 'text-delta', text: 'One ' }), '');
+  assert.equal(presenter.render({ type: 'text-delta', text: 'block.' }), '');
+  assert.match(
+    presenter.render({ type: 'text-end' }),
+    /Claude · live update\nOne block\./,
+  );
 });

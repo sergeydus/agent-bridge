@@ -65,6 +65,13 @@ function fakeProviders(
     run: async (prompt, options) => {
       prompts.push(prompt);
       optionsSeen.push(options);
+      options.onEvent?.({
+        type: 'activity',
+        message: 'searching the project',
+      });
+      options.onEvent?.({ type: 'text-delta', text: `${name} live ` });
+      options.onEvent?.({ type: 'text-delta', text: 'progress' });
+      options.onEvent?.({ type: 'text-end' });
       calls += 1;
       return {
         text: `${name} answer ${calls}`,
@@ -272,6 +279,14 @@ test('runs a targeted accessible turn without disturbing paired rotation', async
     assert.match(prompts[2] ?? '', /You are Claude/);
     assert.equal(session?.nextFirstAgent, 'claude');
     assert.match(terminal.output.join(''), /Claude response\. Decision:/);
+    assert.match(
+      terminal.output.join(''),
+      /Claude progress update\.\nclaude live progress/,
+    );
+    assert.match(
+      terminal.output.join(''),
+      /Claude status: searching the project/,
+    );
     assert.doesNotMatch(terminal.output.join(''), /─/);
   } finally {
     await rm(project, { recursive: true, force: true });

@@ -1,9 +1,11 @@
 import { formatDuration, type AgentDecision, type AgentName } from './core.ts';
+import type { ProviderEvent } from './provider-events.ts';
 
 const ANSI_RESET = '\u001B[0m';
 const ANSI_BOLD = '\u001B[1m';
 const ANSI_CYAN = '\u001B[36m';
 const ANSI_MAGENTA = '\u001B[35m';
+const MAX_LIVE_TEXT_CHARS = 50_000;
 
 export interface PresentationPreferences {
   screenReader: boolean;
@@ -13,6 +15,13 @@ export interface PresentationPreferences {
 export interface PresentationInput {
   screenReader: boolean;
   noColor: boolean;
+}
+
+export interface ProviderEventPresenter {
+  render(event: ProviderEvent): string;
+  beforeStatus(): string;
+  finish(): string;
+  reset(): string;
 }
 
 function hasNoColor(environment: NodeJS.ProcessEnv): boolean {
@@ -50,6 +59,143 @@ function coloredAgentLabel(
   }
   const color = agent === 'codex' ? ANSI_CYAN : ANSI_MAGENTA;
   return `${ANSI_BOLD}${color}${label}${ANSI_RESET}`;
+}
+
+function progressHeading(
+  agent: AgentName,
+  preferences: PresentationPreferences,
+): string {
+  return preferences.screenReader
+    ? `${agentLabel(agent)} progress update.\n`
+    : `${coloredAgentLabel(agent, preferences)} · live update\n`;
+}
+
+export function createProviderEventPresenter({
+  agent,
+  preferences,
+  streamText,
+}: {
+  agent: AgentName;
+  preferences: PresentationPreferences;
+  streamText: boolean;
+}): ProviderEventPresenter {
+  let bufferedText = '';
+  let liveTextOpen = false;
+  let liveTextChars = 0;
+  let liveTextTruncated = false;
+
+  const appendBuffered = (text: string): void => {
+    const remaining = MAX_LIVE_TEXT_CHARS - bufferedText.length;
+    if (remaining > 0) {
+      bufferedText += text.slice(0, remaining);
+    }
+    if (text.length > remaining) {
+      liveTextTruncated = true;
+    }
+  };
+  const truncationNotice = (): string =>
+    liveTextTruncated
+      ? preferences.screenReader
+        ? 'Live update truncated.\n'
+        : '  …live update truncated\n'
+      : '';
+  const completeBufferedText = (): string => {
+    if (!bufferedText && !liveTextTruncated) {
+      return '';
+    }
+    const text = bufferedText;
+    bufferedText = '';
+    const notice = truncationNotice();
+    liveTextTruncated = false;
+    return `\n${progressHeading(agent, preferences)}${text}${
+      text.endsWith('\n') ? '' : '\n'
+    }${notice}`;
+  };
+  const closeLiveText = (): string => {
+    if (!liveTextOpen) {
+      return '';
+    }
+    liveTextOpen = false;
+    const notice = truncationNotice();
+    liveTextChars = 0;
+    liveTextTruncated = false;
+    return `\n${notice}`;
+  };
+
+  return {
+    render(event): string {
+      if (event.type === 'usage') {
+        return '';
+      }
+      if (event.type === 'activity') {
+        const prefix = closeLiveText();
+        return `${prefix}${
+          preferences.screenReader
+            ? `${agentLabel(agent)} status: ${event.message}.\n`
+            : `  ${agentLabel(agent)} · ${event.message}\n`
+        }`;
+      }
+      if (event.type === 'text-completed') {
+        const prefix =
+          preferences.screenReader || !streamText
+            ? completeBufferedText()
+            : closeLiveText();
+        const text = event.text.slice(0, MAX_LIVE_TEXT_CHARS);
+        if (!text) {
+          return prefix;
+        }
+        const truncated = event.text.length > text.length;
+        return `${prefix}\n${progressHeading(agent, preferences)}${text}${
+          text.endsWith('\n') ? '' : '\n'
+        }${
+          truncated
+            ? preferences.screenReader
+              ? 'Live update truncated.\n'
+              : '  …live update truncated\n'
+            : ''
+        }`;
+      }
+      if (event.type === 'text-delta') {
+        if (preferences.screenReader || !streamText) {
+          appendBuffered(event.text);
+          return '';
+        }
+        const remaining = MAX_LIVE_TEXT_CHARS - liveTextChars;
+        const text = remaining > 0 ? event.text.slice(0, remaining) : '';
+        liveTextChars += text.length;
+        if (text.length < event.text.length) {
+          liveTextTruncated = true;
+        }
+        if (!liveTextOpen) {
+          liveTextOpen = true;
+          return `\n${progressHeading(agent, preferences)}${text}`;
+        }
+        return text;
+      }
+      if (preferences.screenReader || !streamText) {
+        return completeBufferedText();
+      }
+      return closeLiveText();
+    },
+    beforeStatus(): string {
+      return preferences.screenReader || !streamText ? '' : closeLiveText();
+    },
+    finish(): string {
+      return preferences.screenReader || !streamText
+        ? completeBufferedText()
+        : closeLiveText();
+    },
+    reset(): string {
+      bufferedText = '';
+      liveTextTruncated = false;
+      liveTextChars = 0;
+      if (!liveTextOpen) {
+        return '';
+      }
+      liveTextOpen = false;
+      return '\n';
+    },
+  };
 }
 
 function modelLabel(model?: string): string {
