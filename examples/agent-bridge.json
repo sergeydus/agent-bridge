@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "verification": [
+    {
+      "command": "npm",
+      "args": ["run", "check"],
+      "timeoutMinutes": 20
+    }
+  ],
+  "protectedPaths": [".env", "private"]
+}

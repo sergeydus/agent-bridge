@@ -1,0 +1,7 @@
+runs/
+node_modules/
+coverage/
+dist/
+src/graphify-out/
+.DS_Store
+*.log

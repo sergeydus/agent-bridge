@@ -1,0 +1,377 @@
+# Agent Bridge
+
+Agent Bridge is a standalone local coordinator for Codex CLI and Claude Code.
+It supports longer human-guided conversations as well as autonomous workflows:
+the agents can discuss a task, take turns implementing it, review the same code
+revision, refactor in multiple phases, and stop only when both explicitly
+approve that revision.
+
+It can be installed anywhere and can work on any project you select. It has no
+dependency on the repository that happens to contain its source.
+
+## Quick start
+
+Requirements:
+
+- Node.js 22.6 or newer
+- Git for editing workflows
+- Codex CLI authenticated with your ChatGPT account
+- Claude Code authenticated with an eligible Claude account
+
+Authenticate each CLI once:
+
+```sh
+codex login
+claude
+```
+
+The CLIs use their own subscription authentication. Agent Bridge does not need
+an OpenAI or Anthropic API key.
+
+On macOS, double-click **Start Agent Bridge.command**. You can also drag a
+project folder onto it, or run:
+
+```sh
+npm start
+```
+
+To make `agent-bridge` available from any terminal while developing this local
+copy:
+
+```sh
+npm link
+agent-bridge --help
+```
+
+The guided wizard explains every consequential choice, shows an estimated
+number of agent calls, and asks for confirmation before starting.
+
+## Interactive chat
+
+Start a persistent conversation tied to any Git repository or ordinary folder:
+
+```sh
+agent-bridge chat --cwd /path/to/project
+```
+
+From an unlinked source checkout, use:
+
+```sh
+npm run chat -- --cwd /path/to/project
+```
+
+Each message produces one read-only Codex/Claude exchange and then returns
+control to you. The bridge—not either provider—stores bounded conversation
+history, so provider calls remain ephemeral, portable, and independently
+sandboxed.
+
+Inside the chat:
+
+```text
+/auto [1-20]              Continue autonomously until agreement or the limit
+/implement codex|claude   Start safe fixed-role implementation and review
+/collaborate codex|claude Start safe alternating edits; named agent goes first
+/review                   Start a read-only agreement workflow
+/paste                    Enter a multiline message
+/status                   Show session information
+/history [1-50]           Show recent messages
+/pause                    Save and leave
+/done                     Complete and leave
+/help                     Show all commands
+```
+
+`/implement` and `/collaborate` do not grant ad-hoc write access inside the
+chat. They launch the same isolated Git workflow described below, including
+verification, same-revision review, patch handling, and dirty-checkout
+protection. When it finishes, the chat remains open for follow-up discussion.
+
+Pause with `/pause`, Ctrl+D, or Ctrl+C, then reopen any saved session—including
+a completed one—with:
+
+```sh
+agent-bridge chat --resume latest
+agent-bridge chat --resume <chat-id>
+agent-bridge chat --list-chats
+agent-bridge chat --delete-chat <chat-id>
+```
+
+Use `--task` or `--task-file` with `chat` to supply the first message
+immediately. `--no-transcript` keeps only the active recovery checkpoint and
+deletes the chat history after `/done`.
+
+Check your setup:
+
+```sh
+npm run doctor
+```
+
+Agent Bridge has no production npm dependencies. `npm install` is needed only
+to develop, test, or compile it.
+
+## What happens during a collaborative run
+
+1. Codex and Claude independently inspect the task and discuss a plan.
+2. One agent receives write access and implements.
+3. Agent Bridge captures the exact resulting workspace revision.
+4. Configured verification commands run outside the agent.
+5. The other agent reviews that same revision with read-only access.
+6. The roles alternate for another implementation phase when work remains.
+7. The run converges only when the implementer and reviewer both return a
+   structured `done` decision for the same cycle.
+8. A read-only judge writes the final synthesis.
+
+The maximum-cycle limit always remains in force, so disagreement cannot create
+an infinite run.
+
+## Workflows
+
+### Collaborate and alternate edits
+
+This is the recommended implementation workflow. Both agents discuss first,
+then alternate between implementing and reviewing until they agree or reach
+the configured safety cap.
+
+```sh
+agent-bridge \
+  --task "Implement this safely and keep improving it until both agents agree" \
+  --cwd /path/to/project \
+  --collaborative claude \
+  --max-rounds 6
+```
+
+### Fixed roles
+
+One agent remains the implementer while the other remains the reviewer.
+
+```sh
+agent-bridge \
+  --task-file /path/to/task.md \
+  --cwd /path/to/project \
+  --implementer codex \
+  --max-rounds 6
+```
+
+### Review only
+
+Both agents analyze; neither can edit. Review-only mode works with Git
+repositories and ordinary folders.
+
+```sh
+agent-bridge \
+  --task "Review these changes and agree on the safest recommendation" \
+  --cwd /path/to/project \
+  --git-diff working-tree \
+  --until-agreement \
+  --max-rounds 6
+```
+
+Git review sources can be `working-tree`, `last-commit`, or a custom range:
+
+```sh
+agent-bridge \
+  --task "Review this branch against main" \
+  --cwd /path/to/project \
+  --git-diff main...HEAD \
+  --rounds 2
+```
+
+When the executable is not globally linked, replace `agent-bridge` with
+`npm run talk --`.
+
+## Repository safety
+
+Editing workflows require Git and create a detached worktree by default. The
+selected checkout remains untouched while agents work. At completion, Agent
+Bridge creates a binary-safe patch and offers to:
+
+- keep the isolated workspace for inspection;
+- apply the patch after checking that the original base revision is unchanged
+  and `git apply --check` succeeds; or
+- explicitly discard the registered isolated worktree.
+
+Agent Bridge never commits, stages, resets, or silently discards project
+changes.
+
+If the selected checkout is dirty, an isolated workspace cannot include those
+changes. You must commit or stash them, or explicitly acknowledge a committed
+`HEAD` run with `--from-head`.
+
+`--no-isolation` edits the selected checkout directly. It requires a clean
+working tree unless you explicitly pass `--allow-dirty`. Existing dirty files
+are fingerprinted and the run stops if an agent changes them. Before the first
+agent call, Agent Bridge also saves a private, binary-safe recovery patch of
+all pre-existing tracked and untracked work. Direct mode remains less isolated
+than the default and should be reserved for cases that truly require it.
+
+Run output must stay outside a project used for editing, so checkpoints,
+transcripts, and recovery patches are never placed inside the agent workspace.
+
+A `*.preexisting.patch` recovery file represents the original dirty state
+relative to its recorded base commit. Inspect it first; the safest restoration
+path is to apply it to a clean checkout of that base, not blindly over a
+partially edited working tree.
+
+Only the current implementer receives write access. Claude's write phase uses
+an explicit file-tool allowlist without Bash. Agent Bridge, not the agent, runs
+the verification commands you approve. Write calls are never retried because a
+failed call may already have edited files.
+
+## Project configuration
+
+A project may define `.agent-bridge.json`:
+
+```json
+{
+  "version": 1,
+  "verification": [
+    {
+      "command": "npm",
+      "args": ["test"],
+      "timeoutMinutes": 15
+    },
+    {
+      "command": "npm",
+      "args": ["run", "typecheck"]
+    }
+  ],
+  "protectedPaths": [".env", "secrets"]
+}
+```
+
+Commands are executable-and-argument arrays, never shell strings. Executable
+names cannot contain path separators. This prevents shell interpolation but
+does not make an untrusted command safe: project configuration can still run
+local package scripts or programs found on `PATH`.
+
+For that reason, project verification is disabled unless you approve it in the
+wizard or pass:
+
+```sh
+agent-bridge ... --trust-project-config
+```
+
+Use `--project-config /path/to/config.json` to select another file. Protected
+paths are fingerprinted before agent work and verified after every edit.
+
+See [Project configuration](docs/project-configuration.md) for the exact
+contract.
+
+## Recovery and run history
+
+Agent Bridge saves an atomic checkpoint around every workflow transition. A
+run lock prevents two processes from resuming the same run concurrently.
+`Ctrl+C` cancels safely and preserves an isolated workspace.
+
+```sh
+agent-bridge --resume latest
+agent-bridge --list-runs
+agent-bridge --discard-workspace <run-id>
+agent-bridge --delete-run <run-id>
+agent-bridge --prune-runs 30
+```
+
+Resume uses the task, limits, provider settings, trusted verification commands,
+protected paths, and workspace recorded in the checkpoint. It does not silently
+adopt a changed project configuration.
+
+Discarding a workspace validates and removes the exact Git-registered worktree
+while retaining run history. Deleting a run removes its checkpoint and
+transcript artifacts but preserves an editable worktree. Pruning removes only
+completed or cancelled runs older than the requested age and skips every
+retained worktree.
+
+Use `--no-transcript` when you do not want completed Markdown, JSON, or context
+artifacts retained. A temporary checkpoint still exists while the run is
+active so interruption remains recoverable; it is deleted after success.
+Interactive chats use an independent owner-only checkpoint and Markdown
+transcript. Their lock prevents two terminals from reopening the same chat.
+
+## Data sent to providers
+
+Codex and Claude are separate services. Material needed for the selected task
+may be sent to both providers, including:
+
+- the task text and shared root `AGENTS.md` or `CLAUDE.md` instructions;
+- Git diffs, bounded workspace snapshots, and verification output;
+- the other agent's prior response and review findings;
+- bounded interactive-chat history when chat mode is active.
+
+Do not place secrets in task text. Keep sensitive files outside the selected
+project. `protectedPaths` detects writes but does not prevent provider
+visibility. Provider retention and training behavior is governed by the
+accounts and policies used by each CLI.
+
+## Local data
+
+Recent projects, checkpoints, transcripts, patches, and isolated worktrees are
+stored outside the installation:
+
+- macOS: `~/Library/Application Support/Agent Bridge`
+- Linux: `${XDG_STATE_HOME:-~/.local/state}/agent-bridge`
+- Windows: `%LOCALAPPDATA%\Agent Bridge`
+
+Set `AGENT_BRIDGE_HOME` to override this location. Files are written with
+owner-only permissions where the platform supports them.
+
+## Command-line options
+
+Run `agent-bridge --help` for the authoritative list:
+
+```text
+--wizard                 Start guided setup
+chat                     Open interactive human-guided chat mode
+--list-chats             List saved interactive chats
+--delete-chat <id>       Delete an exact saved chat
+--task <text>            Task text; otherwise read stdin
+--task-file <path>       Read the task from a file
+--cwd <path>             Project visible to the agents
+--git-diff <source>      working-tree, last-commit, or a Git range
+--rounds <n>             Fixed review rounds
+--until-agreement        Continue until both agents approve
+--require-agreement      Exit non-zero if the cap is reached without agreement
+--max-rounds <n>         Agreement-mode safety cap
+--implementer <agent>    Fixed codex or claude implementer
+--collaborative <agent>  Alternating workflow and first implementer
+--from-head              Acknowledge ignoring dirty changes in isolation
+--no-isolation           Edit the selected checkout directly
+--allow-dirty            Permit direct editing beside existing changes
+--resume <id|latest>     Continue a run, or reopen a chat in chat mode
+--retries <n>            Retry transient read-only calls
+--timeout-minutes <n>    Per-agent timeout
+--judge <agent>          Read-only synthesis agent
+--codex-model <name>     Codex model override
+--claude-model <name>    Claude model override
+--codex-effort <level>   Codex reasoning effort
+--claude-effort <level>  Claude reasoning effort
+--project-config <path>  Alternate project configuration
+--trust-project-config   Run configured verification commands
+--output <directory>     Override run-data storage
+--no-transcript          Do not retain completed transcripts
+--list-runs              List checkpoints
+--delete-run <id>        Delete exact run artifacts
+--discard-workspace <id> Safely remove a completed run's isolated worktree
+--prune-runs <days>      Prune old safe-to-delete runs
+--dry-run                Show provider commands without calling agents
+--verbose                Show raw provider output
+--doctor                 Check versions, auth, storage, and required features
+```
+
+## Development
+
+```sh
+npm install
+npm run check
+npm run test:coverage
+npm pack --dry-run
+```
+
+The test suite uses temporary repositories, fake providers, and isolated
+application-data locations. It never invokes real agents or uses subscription
+calls.
+
+Start with [AGENTS.md](AGENTS.md), then see
+[Architecture](docs/architecture.md),
+[Workflow state machine](docs/workflow-state-machine.md),
+[Interactive chat](docs/interactive-chat.md),
+[Provider contract](docs/provider-contract.md), and
+[Security](docs/security.md).

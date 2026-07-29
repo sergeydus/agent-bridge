@@ -1,0 +1,220 @@
+import { spawn } from 'node:child_process';
+
+export class ProcessAbortError extends Error {
+  constructor(message = 'Process was cancelled') {
+    super(message);
+    this.name = 'AbortError';
+  }
+}
+
+export interface ProcessResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+export function runProcess(
+  command: string,
+  args: string[],
+  {
+    cwd,
+    input = '',
+    inheritStderr = false,
+    allowedExitCodes = [0],
+    timeoutMs,
+    signal,
+    env = process.env,
+    killGraceMs = 2_000,
+    maxOutputChars,
+  }: {
+    cwd?: string;
+    input?: string;
+    inheritStderr?: boolean;
+    allowedExitCodes?: number[];
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    env?: NodeJS.ProcessEnv;
+    killGraceMs?: number;
+    maxOutputChars?: number;
+  } = {},
+): Promise<ProcessResult> {
+  return new Promise<ProcessResult>((resolvePromise, rejectPromise) => {
+    if (signal?.aborted) {
+      rejectPromise(new ProcessAbortError());
+      return;
+    }
+
+    const usesProcessGroup = process.platform !== 'win32';
+    const child = spawn(command, args, {
+      cwd,
+      env,
+      detached: usesProcessGroup,
+      shell: false,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let aborted = false;
+    let exceededOutput: 'stdout' | 'stderr' | undefined;
+    let settled = false;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    let terminating = false;
+
+    const kill = (processSignal: NodeJS.Signals): void => {
+      if (!child.pid) {
+        return;
+      }
+      try {
+        if (usesProcessGroup) {
+          process.kill(-child.pid, processSignal);
+        } else if (processSignal === 'SIGKILL') {
+          const treeKill = spawn(
+            'taskkill',
+            ['/pid', String(child.pid), '/t', '/f'],
+            {
+              shell: false,
+              stdio: 'ignore',
+              windowsHide: true,
+            },
+          );
+          treeKill.once('error', () => {
+            // taskkill is best-effort during cancellation.
+          });
+        } else {
+          child.kill(processSignal);
+        }
+      } catch {
+        // The process may have exited between the state check and the signal.
+      }
+    };
+    const terminate = (): void => {
+      if (terminating) {
+        return;
+      }
+      terminating = true;
+      if (!usesProcessGroup) {
+        kill('SIGKILL');
+        return;
+      }
+      kill('SIGTERM');
+      forceKillTimer = setTimeout(() => kill('SIGKILL'), killGraceMs);
+      forceKillTimer.unref();
+    };
+    const timeout =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            timedOut = true;
+            terminate();
+          }, timeoutMs);
+    timeout?.unref();
+    const onAbort = (): void => {
+      aborted = true;
+      terminate();
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+
+    const cleanup = (): void => {
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      if (forceKillTimer) {
+        clearTimeout(forceKillTimer);
+      }
+      signal?.removeEventListener('abort', onAbort);
+    };
+    const rejectOnce = (error: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      rejectPromise(error);
+    };
+    const resolveOnce = (result: ProcessResult): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolvePromise(result);
+    };
+
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => {
+      if (
+        maxOutputChars !== undefined &&
+        stdout.length + chunk.length > maxOutputChars
+      ) {
+        stdout += chunk.slice(0, Math.max(0, maxOutputChars - stdout.length));
+        exceededOutput ??= 'stdout';
+        terminate();
+      } else {
+        stdout += chunk;
+      }
+    });
+    child.stderr.on('data', (chunk: string) => {
+      if (
+        maxOutputChars !== undefined &&
+        stderr.length + chunk.length > maxOutputChars
+      ) {
+        stderr += chunk.slice(0, Math.max(0, maxOutputChars - stderr.length));
+        exceededOutput ??= 'stderr';
+        terminate();
+      } else {
+        stderr += chunk;
+      }
+      if (inheritStderr) {
+        process.stderr.write(chunk);
+      }
+    });
+    child.on('error', (error) => {
+      rejectOnce(error);
+    });
+    child.on('close', (code) => {
+      if (terminating && usesProcessGroup) {
+        // The direct child may exit before descendants that ignored SIGTERM.
+        kill('SIGKILL');
+      }
+      if (aborted) {
+        rejectOnce(new ProcessAbortError());
+        return;
+      }
+      if (timedOut) {
+        rejectOnce(
+          new Error(`${command} timed out after ${timeoutMs} milliseconds`),
+        );
+        return;
+      }
+      if (exceededOutput) {
+        rejectOnce(
+          new Error(
+            `${command} exceeded the ${maxOutputChars}-character ${exceededOutput} limit`,
+          ),
+        );
+        return;
+      }
+      const exitCode = code ?? -1;
+      if (!allowedExitCodes.includes(exitCode)) {
+        rejectOnce(
+          new Error(
+            `${command} exited with ${exitCode}\n${
+              stderr.trim() || stdout.trim()
+            }`,
+          ),
+        );
+        return;
+      }
+
+      resolveOnce({ stdout, stderr, exitCode });
+    });
+
+    child.stdin.on('error', () => {
+      // EPIPE is expected when a subprocess exits before reading all input.
+    });
+    child.stdin.end(input);
+  });
+}

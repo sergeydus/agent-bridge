@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-bridge.local/schemas/transcript.schema.json",
+  "title": "Agent Bridge transcript",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["metadata", "task", "rounds", "synthesis"],
+  "properties": {
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "startedAt",
+        "cwd",
+        "agentCwd",
+        "workspace",
+        "roundCount",
+        "judge",
+        "untilAgreement",
+        "converged",
+        "implementer",
+        "collaborative",
+        "projectKind",
+        "baseRevision",
+        "finalRevision"
+      ],
+      "properties": {
+        "startedAt": { "type": "string", "format": "date-time" },
+        "cwd": { "type": "string" },
+        "agentCwd": { "type": "string" },
+        "workspace": { "type": ["string", "null"] },
+        "roundCount": { "type": "integer", "minimum": 0 },
+        "judge": { "enum": ["codex", "claude"] },
+        "untilAgreement": { "type": "boolean" },
+        "converged": { "type": ["boolean", "null"] },
+        "implementer": {
+          "type": ["string", "null"],
+          "enum": ["codex", "claude", null]
+        },
+        "collaborative": {
+          "type": ["string", "null"],
+          "enum": ["codex", "claude", null]
+        },
+        "projectKind": { "enum": ["git", "directory"] },
+        "baseRevision": { "type": ["string", "null"] },
+        "finalRevision": { "type": ["string", "null"] }
+      }
+    },
+    "task": { "type": "string" },
+    "rounds": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["phase", "round", "codex", "claude"],
+        "properties": {
+          "phase": { "type": "string" },
+          "round": { "type": "integer", "minimum": 1 },
+          "codex": { "type": "string" },
+          "claude": { "type": "string" },
+          "codexDecision": { "enum": ["done", "continue"] },
+          "claudeDecision": { "enum": ["done", "continue"] },
+          "revision": { "type": "string" }
+        }
+      }
+    },
+    "synthesis": { "type": "string" }
+  }
+}

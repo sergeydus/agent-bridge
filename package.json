@@ -1,0 +1,60 @@
+{
+  "name": "agent-bridge",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Local interactive Codex and Claude collaboration coordinator",
+  "bin": {
+    "agent-bridge": "bin/agent-bridge.mjs"
+  },
+  "files": [
+    "bin",
+    "docs",
+    "dist",
+    "schemas",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "CLAUDE.md",
+    "examples",
+    "README.md",
+    "Start Agent Bridge.command",
+    "src/*.ts",
+    "tests",
+    ".editorconfig",
+    "eslint.config.mjs",
+    "tsconfig.json",
+    "tsconfig.build.json"
+  ],
+  "packageManager": "npm@11.12.1",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "start": "node --experimental-strip-types src/cli.ts --wizard",
+    "chat": "node --experimental-strip-types src/cli.ts chat",
+    "talk": "node --experimental-strip-types src/cli.ts",
+    "doctor": "node --experimental-strip-types src/cli.ts --doctor",
+    "build": "tsc -p tsconfig.build.json",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint .",
+    "pretest": "npm run build",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "test:coverage": "node --experimental-strip-types --experimental-test-coverage --test-coverage-exclude=\"dist/**\" --test-coverage-exclude=\"bin/**\" --test-coverage-exclude=\"tests/**\" --test-coverage-lines=60 --test-coverage-branches=60 --test-coverage-functions=65 --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm test",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.0.0",
+    "eslint": "^10.8.0",
+    "prettier": "^3.9.6",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.65.0"
+  },
+  "prettier": {
+    "singleQuote": true,
+    "trailingComma": "all"
+  }
+}
