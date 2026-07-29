@@ -89,6 +89,7 @@ test('parses chat mode and keeps editing roles inside the interactive session', 
 });
 
 test('parses accessible presentation and validates model names', () => {
+  const temporaryDirectory = tmpdir();
   const options = parseArgs(
     [
       'chat',
@@ -99,8 +100,8 @@ test('parses accessible presentation and validates model names', () => {
       'claude-test',
     ],
     {
-      initialCwd: '/tmp',
-      defaultOutput: '/tmp/runs',
+      initialCwd: temporaryDirectory,
+      defaultOutput: join(temporaryDirectory, 'runs'),
     },
   );
   assert.equal(options.screenReader, true);
@@ -111,8 +112,8 @@ test('parses accessible presentation and validates model names', () => {
   assert.throws(
     () =>
       parseArgs(['--codex-model', 'invalid model'], {
-        initialCwd: '/tmp',
-        defaultOutput: '/tmp/runs',
+        initialCwd: temporaryDirectory,
+        defaultOutput: join(temporaryDirectory, 'runs'),
       }),
     /without spaces/,
   );

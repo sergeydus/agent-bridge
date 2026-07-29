@@ -123,36 +123,42 @@ test('parses interactive commands without accepting arbitrary actions', () => {
 });
 
 test('builds an isolated child workflow as argument arrays', () => {
+  const temporaryDirectory = tmpdir();
+  const taskPath = join(temporaryDirectory, 'private-task.md');
+  const launcher = join(temporaryDirectory, 'agent-bridge', 'dist', 'cli.js');
   const options = parseArgs(
     [
       'chat',
       '--cwd',
-      '/tmp',
+      temporaryDirectory,
       '--from-head',
       '--trust-project-config',
       '--screen-reader',
       '--max-rounds',
       '7',
     ],
-    { initialCwd: '/', defaultOutput: '/tmp/bridge-runs' },
+    {
+      initialCwd: temporaryDirectory,
+      defaultOutput: join(temporaryDirectory, 'bridge-runs'),
+    },
   );
   const args = buildWorkflowArguments(
     {
       mode: 'collaborative',
       firstAgent: 'claude',
       task: 'context',
-      projectRoot: '/tmp',
+      projectRoot: temporaryDirectory,
       options,
     },
-    '/tmp/private-task.md',
-    '/opt/agent-bridge/dist/cli.js',
+    taskPath,
+    launcher,
   );
   assert.deepEqual(args.slice(0, 5), [
-    '/opt/agent-bridge/dist/cli.js',
+    launcher,
     '--task-file',
-    '/tmp/private-task.md',
+    taskPath,
     '--cwd',
-    '/tmp',
+    temporaryDirectory,
   ]);
   assert.ok(args.includes('--collaborative'));
   assert.ok(args.includes('--from-head'));
