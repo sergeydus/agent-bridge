@@ -13,10 +13,13 @@ Each call receives:
 - response kind (`turn` or `synthesis`);
 - Git/non-Git project kind;
 - timeout, cancellation signal, model, and reasoning effort;
+- whether the provider should enable its native screen-reader behavior;
 - a private temporary directory for response schemas and output.
 
 The orchestrator does not construct provider flags. Provider adapters do not
-decide workflow order.
+decide workflow order. A provider that has no native accessibility flag may
+ignore the screen-reader capability; Agent Bridge still renders its response
+semantically.
 
 Interactive chat uses the same `turn` response contract and always requests
 read-only access. Provider-native session persistence remains disabled; the

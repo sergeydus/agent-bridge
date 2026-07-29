@@ -29,6 +29,7 @@ location of Agent Bridge itself.
 - `chat-state.ts` owns chat validation, locking, persistence, and transcripts.
 - `wizard.ts` owns novice-facing interactive setup.
 - `options.ts` owns CLI types, help, parsing, and validation.
+- `presentation.ts` owns accessible chat formatting and color resolution.
 - `orchestrator.ts` owns the provider-independent state machine.
 - `core.ts` contains shared workflow types and deterministic helpers.
 - `response.ts` owns structured response schemas and parsing.
@@ -49,7 +50,7 @@ location of Agent Bridge itself.
 - `doctor.ts` probes versions, auth, storage, and provider capabilities.
 - `process.ts` owns subprocess lifetime, timeouts, and process-tree shutdown.
 - `config.ts` and `paths.ts` own preferences and platform data locations.
-- `ui.ts` owns terminal presentation.
+- `ui.ts` owns one-shot workflow progress and completion presentation.
 - `schemas/` documents persisted and provider-facing JSON.
 
 ## Non-negotiable invariants

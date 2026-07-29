@@ -87,3 +87,33 @@ test('parses chat mode and keeps editing roles inside the interactive session', 
     /always uses the isolated workflow/,
   );
 });
+
+test('parses accessible presentation and validates model names', () => {
+  const options = parseArgs(
+    [
+      'chat',
+      '--screen-reader',
+      '--codex-model',
+      'codex-test',
+      '--claude-model',
+      'claude-test',
+    ],
+    {
+      initialCwd: '/tmp',
+      defaultOutput: '/tmp/runs',
+    },
+  );
+  assert.equal(options.screenReader, true);
+  assert.equal(options.noColor, true);
+  assert.equal(options.codexModel, 'codex-test');
+  assert.equal(options.claudeModel, 'claude-test');
+
+  assert.throws(
+    () =>
+      parseArgs(['--codex-model', 'invalid model'], {
+        initialCwd: '/tmp',
+        defaultOutput: '/tmp/runs',
+      }),
+    /without spaces/,
+  );
+});

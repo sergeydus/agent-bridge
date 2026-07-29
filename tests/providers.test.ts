@@ -18,6 +18,7 @@ const dryRunOptions: ProviderRunOptions = {
   timeoutMs: 1_000,
   responseKind: 'turn',
   isGitRepository: false,
+  screenReader: false,
 };
 
 test('provider commands require structured output and keep Claude shell-free', async () => {
@@ -29,6 +30,14 @@ test('provider commands require structured output and keep Claude shell-free', a
   assert.doesNotMatch(claude.text, /Bash/);
   assert.equal(codex.decision, 'continue');
   assert.equal(claude.decision, 'continue');
+});
+
+test('Claude receives its native screen-reader flag when requested', async () => {
+  const claude = await new ClaudeProvider().run('task', {
+    ...dryRunOptions,
+    screenReader: true,
+  });
+  assert.match(claude.text, /--ax-screen-reader/);
 });
 
 test('retries transient read-only provider failures through the provider interface', async () => {
@@ -60,6 +69,7 @@ test('retries transient read-only provider failures through the provider interfa
       timeoutMs: 1_000,
       responseKind: 'turn',
       isGitRepository: true,
+      screenReader: false,
     },
     retries: 1,
     sleep: async (milliseconds) => {
@@ -98,6 +108,7 @@ test('never retries a write provider after a possibly partial edit', async () =>
         timeoutMs: 1_000,
         responseKind: 'turn',
         isGitRepository: true,
+        screenReader: false,
       },
       retries: 3,
     }),

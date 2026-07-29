@@ -12,13 +12,20 @@ export class ProgressReporter {
   readonly #startedAt = Date.now();
   readonly #verbose: boolean;
   readonly #silent: boolean;
+  readonly #screenReader: boolean;
 
   constructor({
     verbose = false,
     silent = false,
-  }: { verbose?: boolean; silent?: boolean } = {}) {
+    screenReader = false,
+  }: {
+    verbose?: boolean;
+    silent?: boolean;
+    screenReader?: boolean;
+  } = {}) {
     this.#verbose = verbose;
     this.#silent = silent;
+    this.#screenReader = screenReader;
   }
 
   get verbose(): boolean {
@@ -27,19 +34,27 @@ export class ProgressReporter {
 
   heading(title: string): void {
     if (!this.#silent) {
-      process.stdout.write(`\n${title}\n${'─'.repeat(title.length)}\n`);
+      process.stdout.write(
+        this.#screenReader
+          ? `\n${title}\n`
+          : `\n${title}\n${'─'.repeat(title.length)}\n`,
+      );
     }
   }
 
   phase(message: string): void {
     if (!this.#silent) {
-      process.stdout.write(`● ${message}\n`);
+      process.stdout.write(
+        this.#screenReader ? `Phase: ${message}\n` : `● ${message}\n`,
+      );
     }
   }
 
   success(message: string): void {
     if (!this.#silent) {
-      process.stdout.write(`✓ ${message}\n`);
+      process.stdout.write(
+        this.#screenReader ? `Success: ${message}\n` : `✓ ${message}\n`,
+      );
     }
   }
 
@@ -51,7 +66,9 @@ export class ProgressReporter {
 
   warning(message: string): void {
     if (!this.#silent) {
-      process.stdout.write(`! ${message}\n`);
+      process.stdout.write(
+        this.#screenReader ? `Warning: ${message}\n` : `! ${message}\n`,
+      );
     }
   }
 
@@ -64,20 +81,26 @@ export class ProgressReporter {
   }
 }
 
-export function printChangeSummary(summary: ChangeSummary): void {
+export function printChangeSummary(
+  summary: ChangeSummary,
+  screenReader = false,
+): void {
   console.log(`
 Changes
-───────
-Files: ${summary.files.length}
+${screenReader ? '' : '───────\n'}Files: ${summary.files.length}
 Modified: ${summary.modifiedFiles}
 Staged: ${summary.stagedFiles}
 New: ${summary.untrackedFiles}`);
 
   for (const file of summary.files.slice(0, 12)) {
-    console.log(`  • ${file}`);
+    console.log(screenReader ? `  File: ${file}` : `  • ${file}`);
   }
   if (summary.files.length > 12) {
-    console.log(`  • …and ${summary.files.length - 12} more`);
+    console.log(
+      screenReader
+        ? `  Additional files: ${summary.files.length - 12}`
+        : `  • …and ${summary.files.length - 12} more`,
+    );
   }
 }
 
@@ -89,6 +112,7 @@ export function printCompletion({
   transcript,
   patch,
   recoveryPatch,
+  screenReader = false,
 }: {
   outcome: RunOutcome;
   cycles: number;
@@ -97,18 +121,26 @@ export function printCompletion({
   transcript?: string;
   patch?: string;
   recoveryPatch?: string;
+  screenReader?: boolean;
 }): void {
-  const outcomeLabel = {
+  const visualOutcomeLabel = {
     agreed: '✓ Both agents approved the result',
     'completed-fixed-rounds': '✓ Requested review rounds completed',
     'agreement-cap-reached': '! Review cap reached without full agreement',
     failed: '✗ Agent Bridge failed',
     cancelled: '! Agent Bridge was cancelled',
   }[outcome];
+  const plainOutcomeLabel = {
+    agreed: 'Both agents approved the result',
+    'completed-fixed-rounds': 'Requested review rounds completed',
+    'agreement-cap-reached': 'Review cap reached without full agreement',
+    failed: 'Agent Bridge failed',
+    cancelled: 'Agent Bridge was cancelled',
+  }[outcome];
+  const outcomeLabel = screenReader ? plainOutcomeLabel : visualOutcomeLabel;
   console.log(`
 ${outcomeLabel}
-${'═'.repeat(42)}
-Review cycles: ${cycles}
+${screenReader ? '' : `${'═'.repeat(42)}\n`}Review cycles: ${cycles}
 Elapsed: ${elapsed}${workspace ? `\nWorkspace: ${workspace}` : ''}${
     transcript ? `\nTranscript: ${transcript}` : ''
   }${patch ? `\nPatch: ${patch}` : ''}

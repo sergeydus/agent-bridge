@@ -4,7 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { parseChatInput, type ChatTerminal } from '../src/chat-input.ts';
+import {
+  completeChatInput,
+  parseChatInput,
+  type ChatTerminal,
+} from '../src/chat-input.ts';
 import { ChatSessionStore } from '../src/chat-state.ts';
 import { runInteractiveChat } from '../src/chat.ts';
 import {
@@ -77,6 +81,21 @@ test('parses interactive commands without accepting arbitrary actions', () => {
     text: 'hello',
   });
   assert.deepEqual(parseChatInput('/auto 4'), { kind: 'auto', rounds: 4 });
+  assert.deepEqual(parseChatInput('/ask claude inspect this carefully'), {
+    kind: 'message',
+    target: 'claude',
+    text: 'inspect this carefully',
+  });
+  assert.deepEqual(parseChatInput('@codex explain this'), {
+    kind: 'message',
+    target: 'codex',
+    text: 'explain this',
+  });
+  assert.deepEqual(parseChatInput('/both compare the approaches'), {
+    kind: 'message',
+    target: 'both',
+    text: 'compare the approaches',
+  });
   assert.deepEqual(parseChatInput('/implement claude'), {
     kind: 'workflow',
     mode: 'fixed',
@@ -91,6 +110,9 @@ test('parses interactive commands without accepting arbitrary actions', () => {
   assert.equal(parseChatInput('/paste now').kind, 'invalid');
   assert.equal(parseChatInput('/auto 21').kind, 'invalid');
   assert.equal(parseChatInput('/shell rm').kind, 'invalid');
+  assert.equal(parseChatInput('/ask codex').kind, 'invalid');
+  assert.ok(completeChatInput('/ask c')[0].includes('/ask codex '));
+  assert.deepEqual(completeChatInput('ordinary message')[0], []);
 });
 
 test('builds an isolated child workflow as argument arrays', () => {
@@ -101,6 +123,7 @@ test('builds an isolated child workflow as argument arrays', () => {
       '/tmp',
       '--from-head',
       '--trust-project-config',
+      '--screen-reader',
       '--max-rounds',
       '7',
     ],
@@ -127,6 +150,7 @@ test('builds an isolated child workflow as argument arrays', () => {
   assert.ok(args.includes('--collaborative'));
   assert.ok(args.includes('--from-head'));
   assert.ok(args.includes('--trust-project-config'));
+  assert.ok(args.includes('--screen-reader'));
   assert.ok(!args.includes('chat'));
   assert.ok(!args.includes('--no-isolation'));
 });
@@ -206,6 +230,49 @@ test('no-transcript chat deletes its successful local checkpoint', async () => {
       await new ChatSessionStore(paths.chatsDirectory).latest(),
       null,
     );
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('runs a targeted accessible turn without disturbing paired rotation', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const prompts: string[] = [];
+  const optionsSeen: ProviderRunOptions[] = [];
+  const terminal = new ScriptedTerminal([
+    '/ask claude Inspect this only',
+    'Now ask both',
+    '/done',
+  ]);
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const options = parseArgs(['chat', '--cwd', project, '--screen-reader'], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+    await runInteractiveChat({
+      options,
+      appPaths: paths,
+      providers: fakeProviders(prompts, optionsSeen),
+      terminal,
+    });
+
+    const session = await new ChatSessionStore(paths.chatsDirectory).latest();
+    assert.deepEqual(
+      session?.messages.map((message) => message.role),
+      ['user', 'claude', 'user', 'codex', 'claude'],
+    );
+    assert.match(session?.messages[0]?.text ?? '', /Addressed to Claude/);
+    assert.equal(optionsSeen.length, 3);
+    assert.equal(optionsSeen[0]?.screenReader, true);
+    assert.match(prompts[0] ?? '', /You are Claude/);
+    assert.match(prompts[1] ?? '', /You are Codex/);
+    assert.match(prompts[2] ?? '', /You are Claude/);
+    assert.equal(session?.nextFirstAgent, 'claude');
+    assert.match(terminal.output.join(''), /Claude response\. Decision:/);
+    assert.doesNotMatch(terminal.output.join(''), /─/);
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

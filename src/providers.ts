@@ -27,6 +27,7 @@ export interface ProviderRunOptions {
   timeoutMs: number;
   responseKind: ResponseKind;
   isGitRepository: boolean;
+  screenReader: boolean;
   signal?: AbortSignal;
   model?: string;
   effort?: ReasoningEffort;
@@ -184,6 +185,9 @@ Discover and read applicable AGENTS.md and CLAUDE.md files before analysis.`;
     }
     if (options.effort) {
       args.push('--effort', options.effort);
+    }
+    if (options.screenReader) {
+      args.push('--ax-screen-reader');
     }
 
     if (options.dryRun) {

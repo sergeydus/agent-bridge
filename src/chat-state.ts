@@ -63,10 +63,13 @@ export interface ChatSession {
   retries: number;
   timeoutMinutes: number;
   noTranscript: boolean;
+  screenReader?: boolean;
+  noColor?: boolean;
   codexModel?: string;
   claudeModel?: string;
   codexEffort?: ReasoningEffort;
   claudeEffort?: ReasoningEffort;
+  nextFirstAgent?: AgentName;
   pendingExchange?: PendingChatExchange;
   messages: ChatMessage[];
   workflows: ChatWorkflowEvent[];
@@ -203,10 +206,13 @@ export function isChatSession(value: unknown): value is ChatSession {
       'retries',
       'timeoutMinutes',
       'noTranscript',
+      'screenReader',
+      'noColor',
       'codexModel',
       'claudeModel',
       'codexEffort',
       'claudeEffort',
+      'nextFirstAgent',
       'pendingExchange',
       'messages',
       'workflows',
@@ -236,12 +242,16 @@ export function isChatSession(value: unknown): value is ChatSession {
     (session.timeoutMinutes ?? 0) >= 1 &&
     (session.timeoutMinutes ?? 181) <= 180 &&
     typeof session.noTranscript === 'boolean' &&
+    (session.screenReader === undefined ||
+      typeof session.screenReader === 'boolean') &&
+    (session.noColor === undefined || typeof session.noColor === 'boolean') &&
     (session.codexModel === undefined ||
       typeof session.codexModel === 'string') &&
     (session.claudeModel === undefined ||
       typeof session.claudeModel === 'string') &&
     (session.codexEffort === undefined || isEffort(session.codexEffort)) &&
     (session.claudeEffort === undefined || isEffort(session.claudeEffort)) &&
+    (session.nextFirstAgent === undefined || isAgent(session.nextFirstAgent)) &&
     Array.isArray(session.messages) &&
     session.messages.length <= MAX_CHAT_MESSAGES &&
     session.messages.every(isMessage) &&

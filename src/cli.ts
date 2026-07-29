@@ -236,7 +236,10 @@ async function main(): Promise<void> {
   const startedAt = resumedRun?.createdAt ?? new Date().toISOString();
   const runId = resumedRun?.id ?? makeRunId(new Date(startedAt));
   let runLock: RunLock | undefined;
-  const reporter = new ProgressReporter({ verbose: options.verbose });
+  const reporter = new ProgressReporter({
+    verbose: options.verbose,
+    screenReader: options.screenReader,
+  });
   const abortController = new AbortController();
   const onSignal = (): void => abortController.abort();
   process.once('SIGINT', onSignal);
@@ -421,6 +424,7 @@ continue from its actual state instead of repeating changes blindly.`;
             model: agent === 'codex' ? options.codexModel : options.claudeModel,
             effort:
               agent === 'codex' ? options.codexEffort : options.claudeEffort,
+            screenReader: options.screenReader,
             signal: abortController.signal,
           },
           retries: options.retries,
@@ -584,6 +588,7 @@ continue from its actual state instead of repeating changes blindly.`;
       printChangeSummary(
         isolatedSummary ??
           summarizePorcelainStatus(await workingTreeStatus(options)),
+        options.screenReader,
       );
     }
 
@@ -592,7 +597,8 @@ continue from its actual state instead of repeating changes blindly.`;
         ? 'agreed'
         : 'agreement-cap-reached'
       : 'completed-fixed-rounds';
-    console.log(`\nFinal result\n────────────\n${result.synthesis}\n`);
+    reporter.heading('Final result');
+    console.log(`${result.synthesis}\n`);
     printCompletion({
       outcome,
       cycles: result.rounds.filter((round) => round.phase !== 'Planning')
@@ -602,6 +608,7 @@ continue from its actual state instead of repeating changes blindly.`;
       transcript: transcriptPath,
       patch: patchPath,
       recoveryPatch: options.noTranscript ? undefined : recoveryPatchPath,
+      screenReader: options.screenReader,
     });
     await saveState('completed');
     if (options.noTranscript) {

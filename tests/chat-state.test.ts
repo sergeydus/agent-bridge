@@ -72,6 +72,8 @@ test('validates chat sequences, limits, and unexpected properties', () => {
     false,
   );
   assert.equal(isChatSession({ ...session, maxAutoRounds: 21 }), false);
+  assert.equal(isChatSession({ ...session, screenReader: 'yes' }), false);
+  assert.equal(isChatSession({ ...session, nextFirstAgent: 'other' }), false);
   assert.equal(isChatSession({ ...session, unexpected: true }), false);
 });
 

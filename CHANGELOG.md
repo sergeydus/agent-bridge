@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Added targeted `/ask`, `/both`, and `@agent` interactive turns.
+- Added Tab completion and bounded, deduplicated in-process input history.
+- Added screen-reader-friendly, append-only terminal presentation and
+  `--no-color`/`NO_COLOR` support.
+- Added guided Codex and Claude model and reasoning-effort selection.
+- Added clearer live agent, model, elapsed-time, and structured-decision
+  status while responses are running.
+
 ## 0.3.0
 
 - Added durable `agent-bridge chat` sessions with alternating read-only
