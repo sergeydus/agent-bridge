@@ -43,9 +43,22 @@ npm link
 agent-bridge --help
 ```
 
-The guided wizard explains every consequential choice, shows an estimated
-number of agent calls, offers model and reasoning-effort selection, and asks
-for confirmation before starting.
+On first use, the wizard asks whether you need screen-reader-friendly output
+before showing any complex menu, then remembers that choice. Select a project
+by number or paste/drag its folder, and choose one plain-language intent:
+**Discuss**, **Make changes**, or **Review**. Provider roles, models, interface
+style, and limits stay under Advanced settings. Non-Git folders simply omit
+the editing option.
+
+The default path is short:
+
+1. Answer the accessibility question once.
+2. Pick or paste a project.
+3. Choose **Discuss**, **Make changes**, or **Review**.
+
+**Discuss can edit later:** ordinary chat messages never edit files, but
+typing `/edit` opens a complete safety preview and confirmation before a
+separate editing workflow begins.
 
 ## Interactive chat
 
@@ -80,6 +93,7 @@ Inside the chat:
 /both <text>              Explicitly ask both agents
 @codex|@claude|@both ... Short form for a targeted message
 /auto [1-20]              Continue autonomously until agreement or the limit
+/edit [codex|claude]      Preview and start safe alternating edits
 /implement codex|claude   Start safe fixed-role implementation and review
 /collaborate codex|claude Start safe alternating edits; named agent goes first
 /review                   Start a read-only agreement workflow
@@ -99,14 +113,17 @@ Ordinary messages and `/both` produce the normal two-agent exchange. `/ask`
 and the `@codex` or `@claude` forms call only the selected agent, which is
 useful for a focused follow-up without paying for an unnecessary peer call.
 The targeted message and response remain part of the shared bounded history.
+These conversational turns are read-only: they cannot edit project files.
 
-`/implement` and `/collaborate` do not grant ad-hoc write access inside the
-chat. They launch the same isolated Git workflow described below, including
-verification, same-revision review, patch handling, and dirty-checkout
-protection. When it finishes, the chat remains open for follow-up discussion.
+`/edit` is the recommended editing command. It chooses alternating
+implementation and review with Claude first; `/edit codex` changes the first
+writer. Before anything can edit, Agent Bridge shows the project, roles,
+isolated workspace, dirty-tree handling, verification commands, cycle and
+provider-call limits, and asks once for confirmation. `/implement` and
+`/collaborate` remain advanced role controls and use the same preflight.
 
-Pause with `/pause`, Ctrl+D, or Ctrl+C, then reopen any saved session—including
-a completed one—with:
+Pause with `/pause` or Ctrl+D, then reopen any saved session—including a
+completed one—with:
 
 ```sh
 agent-bridge chat --resume latest
@@ -115,14 +132,18 @@ agent-bridge chat --list-chats
 agent-bridge chat --delete-chat <chat-id>
 ```
 
+During an active provider response, Ctrl+C cancels that work, saves the
+checkpoint, and returns to the chat. Press Ctrl+C again while idle to pause and
+leave safely.
+
 Use `--task` or `--task-file` with `chat` to supply the first message
 immediately. `--no-transcript` keeps only the active recovery checkpoint and
 deletes the chat history after `/done`.
 
 ## Accessible terminal output
 
-Choose screen-reader-friendly presentation in the wizard, or start any mode
-with:
+The wizard remembers screen-reader and interface preferences for later runs.
+You can also start any mode explicitly with:
 
 ```sh
 agent-bridge chat --screen-reader --cwd /path/to/project
@@ -153,6 +174,9 @@ normal terminal state is restored, the chat continues with plain output. Use
 or `--ui plain` to retain append-only output. Plain remains the default during
 the preview. Screen-reader mode, redirected streams, `TERM=dumb`, and terminals
 that are too small use the complete plain interface.
+
+Enhanced mode is available under Advanced settings in the wizard and falls
+back to standard output if the current terminal cannot support it.
 
 Check your setup:
 
@@ -395,6 +419,7 @@ chat                     Open interactive human-guided chat mode
 --until-agreement        Continue until both agents approve
 --require-agreement      Exit non-zero if the cap is reached without agreement
 --max-rounds <n>         Agreement-mode safety cap
+--max-auto-rounds <n>    Interactive automatic-exchange cap
 --implementer <agent>    Fixed codex or claude implementer
 --collaborative <agent>  Alternating workflow and first implementer
 --from-head              Acknowledge ignoring dirty changes in isolation

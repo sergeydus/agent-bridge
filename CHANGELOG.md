@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- Reworked first-run setup around project-first Discuss, Make changes, and
+  Review intents, with provider roles and model/interface tuning under
+  Advanced settings.
+- Added a persisted first-run accessibility choice and restored chat UI mode
+  across resumes, with safe migrations for existing local configuration and
+  chat checkpoints.
+- Added the recommended `/edit` command and a shared workflow preview covering
+  roles, isolation, dirty changes, verification, limits, and provider-call
+  estimates before any chat-launched workflow starts.
+- Separated automatic-chat exchange limits from editing-workflow cycle limits,
+  added `/auto` cost confirmation, and made Ctrl+C cancel active provider work
+  while keeping the chat open.
+- Simplified first-run setup by accepting pasted or dragged project folders
+  directly, hiding unavailable resume actions, and offering the safe automatic
+  enhanced chat presentation in the wizard. Workflow descriptions and chat
+  onboarding now explicitly distinguish read-only discussion from commands
+  that start safe code editing.
 - Added the opt-in Phase 3 enhanced chat preview with compact, stacked, and
   wide terminal layouts.
 - Added conservative `--ui plain|enhanced|auto` capability resolution,

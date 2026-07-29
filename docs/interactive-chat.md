@@ -38,10 +38,10 @@ If interruption occurs after the first response, the checkpoint records the
 pending peer and exact saved message. Resume calls only that missing peer; it
 does not repeat the already completed provider call.
 
-`/auto N` repeats paired exchanges until both providers return `done` for the
-same exchange or the requested limit is reached. This agreement applies only
-to the current answer; it never authorizes edits and never prevents a later
-human follow-up.
+`/auto N` first previews its maximum exchanges and provider calls, then repeats
+paired exchanges until both providers return `done` for the same exchange or
+the requested limit is reached. This agreement applies only to the current
+answer; it never authorizes edits and never prevents a later human follow-up.
 
 ## Conversation memory
 
@@ -56,13 +56,15 @@ Every active session has:
 - an owner-only Markdown transcript;
 - an exclusive lock;
 - saved project type, provider settings, retry limit, and timeout;
-- saved screen-reader and color presentation preferences;
+- saved screen-reader, color, and interface preferences;
+- independent automatic-chat and editing-workflow limits;
 - linked workflow results.
 
-Completed sessions remain reopenable. `/pause`, Ctrl+D, and interruption leave
-the session resumable. `/done` marks it complete. With `--no-transcript`, the
-active checkpoint still exists for recovery but both files are deleted after
-successful completion.
+Completed sessions remain reopenable. `/pause`, Ctrl+D, and idle interruption
+leave the session resumable. Ctrl+C during active provider work cancels that
+operation and returns to the saved chat; a second idle Ctrl+C pauses it.
+`/done` marks it complete. With `--no-transcript`, the active checkpoint still
+exists for recovery but both files are deleted after successful completion.
 
 ## Editing and review commands
 
@@ -72,6 +74,13 @@ Bridge child workflow using the bounded conversation as its task:
 - `/implement codex|claude` — fixed implementer and reviewer;
 - `/collaborate codex|claude` — planning followed by alternating writers;
 - `/review` — read-only agreement workflow.
+
+`/edit` is the recommended path: it selects collaborative alternating edits
+with Claude first. `/edit codex` overrides the first writer. Every workflow
+command uses one shared preflight with the direct wizard. It handles dirty
+repositories and project verification trust, shows roles, isolation, cycle and
+provider-call limits, states that agents do not commit/stage/push, and requires
+confirmation before an editing child process starts.
 
 The child receives the existing options for models, effort, timeouts, output,
 privacy, presentation, and trusted project configuration. Editing still
@@ -107,6 +116,12 @@ uses it only when stdin and stdout are interactive, `TERM` is usable, and the
 terminal meets the minimum dimensions. `--ui plain` remains the release
 default. Screen-reader mode always selects plain output and explains the
 override when combined with an explicit enhanced request.
+
+The wizard asks about screen-reader output before its first complex menu and
+persists the answer. Standard and automatic enhanced output remain available
+under Advanced settings. Project folders can be pasted or dragged directly
+into its project prompt; saved project numbers remain shortcuts when
+available.
 
 Redirected stdin is also supported in plain mode. Each input line is handled as
 the next chat message or slash command, and end-of-input pauses and saves the

@@ -21,7 +21,7 @@ test('persists recent projects privately, uniquely, and most-recent first', asyn
       resolve(directory, 'second'),
     ]);
     assert.deepEqual(await store.load(), config);
-    assert.match(await readFile(configPath, 'utf8'), /"version": 1/);
+    assert.match(await readFile(configPath, 'utf8'), /"version": 2/);
     if (process.platform !== 'win32') {
       assert.equal((await stat(privateDirectory)).mode & 0o777, 0o700);
       assert.equal((await stat(configPath)).mode & 0o777, 0o600);
@@ -36,7 +36,7 @@ test('recovers safely from invalid configuration', async () => {
   const configPath = join(directory, 'config.json');
   try {
     const store = new UserConfigStore(configPath);
-    assert.deepEqual(await store.load(), { version: 1, recentProjects: [] });
+    assert.deepEqual(await store.load(), { version: 2, recentProjects: [] });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -55,8 +55,47 @@ test('ignores configuration with unexpected properties', async () => {
       }),
     );
     assert.deepEqual(await new UserConfigStore(path).load(), {
-      version: 1,
+      version: 2,
       recentProjects: [],
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('persists presentation preferences without losing recent projects', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-config-ui-'));
+  const configPath = join(directory, 'config.json');
+  try {
+    const store = new UserConfigStore(configPath);
+    await store.rememberProject(join(directory, 'project'));
+    const config = await store.rememberPresentation({
+      screenReader: true,
+      noColor: true,
+      ui: 'plain',
+    });
+    assert.equal(config.recentProjects.length, 1);
+    assert.deepEqual(config.presentation, {
+      screenReader: true,
+      noColor: true,
+      ui: 'plain',
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('migrates version 1 configuration when it is loaded', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-config-v1-'));
+  const configPath = join(directory, 'config.json');
+  try {
+    await writeFile(
+      configPath,
+      JSON.stringify({ version: 1, recentProjects: ['/project'] }),
+    );
+    assert.deepEqual(await new UserConfigStore(configPath).load(), {
+      version: 2,
+      recentProjects: ['/project'],
     });
   } finally {
     await rm(directory, { recursive: true, force: true });

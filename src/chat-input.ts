@@ -7,20 +7,23 @@ export const MAX_USER_MESSAGE_CHARS = 200_000;
 
 export const CHAT_HELP = `Interactive chat commands
 
-  Type a message                 Ask both agents; then return to the prompt
+  Type a message                 Discuss with both agents; files stay unchanged
   /ask codex|claude <message>    Ask only one agent
   /both <message>                Explicitly ask both agents
   @codex|@claude|@both <message> Short form for a targeted message
   /auto [1-20]                   Let them continue until agreement or the limit
-  /implement codex|claude       Start a safe fixed-role implementation workflow
-  /collaborate codex|claude     Start alternating edits; named agent goes first
-  /review                       Start a read-only agreement workflow
+  /edit [codex|claude]           Safely alternate editing and review
+  /implement codex|claude        Named agent edits; the other agent reviews
+  /collaborate codex|claude      Plan, then alternate editing and reviewing
+  /review                        Review to agreement without changing files
   /paste                        Enter a multiline message; finish with "." alone
   /status                       Show session and project information
   /history [1-50]               Show recent messages
   /help                         Show these commands
   /pause                        Save and leave; resume with chat --resume <id>
   /done                         Complete and leave the session
+
+  Ctrl+C cancels active agent work; press it at the prompt to save and leave.
 `;
 
 export interface ChatTerminal {
@@ -163,6 +166,17 @@ export function parseChatInput(input: string): ChatCommand {
   if (command === '/review' && rawArgument === undefined) {
     return { kind: 'workflow', mode: 'review' };
   }
+  if (command === '/edit') {
+    const firstAgent =
+      rawArgument === undefined ? 'claude' : parseAgent(rawArgument);
+    if (!firstAgent) {
+      return {
+        kind: 'invalid',
+        message: '/edit accepts codex or claude as an optional first editor.',
+      };
+    }
+    return { kind: 'workflow', mode: 'collaborative', firstAgent };
+  }
   if (command === '/implement' || command === '/collaborate') {
     const firstAgent = parseAgent(rawArgument);
     if (!firstAgent) {
@@ -188,6 +202,9 @@ const CHAT_COMPLETIONS = [
   '/ask claude ',
   '/both ',
   '/auto ',
+  '/edit',
+  '/edit codex',
+  '/edit claude',
   '/implement codex',
   '/implement claude',
   '/collaborate codex',
@@ -246,6 +263,9 @@ export function createChatTerminal(): ChatTerminal {
       current.removeAbortListener();
       current.resolve(null);
     }
+  });
+  interface_.on('SIGINT', () => {
+    process.emit('SIGINT');
   });
 
   return {

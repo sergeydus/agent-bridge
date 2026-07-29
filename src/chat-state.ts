@@ -10,6 +10,7 @@ import {
 } from './core.ts';
 import { acquireFileLock, FileLock } from './file-lock.ts';
 import { readFilePrefixBytes, writePrivateFileAtomic } from './filesystem.ts';
+import type { UiMode } from './terminal-capabilities.ts';
 import { sanitizeTerminalText } from './terminal-text.ts';
 
 const MAX_CHAT_FILE_BYTES = 50_000_000;
@@ -44,7 +45,7 @@ export interface PendingChatExchange {
 }
 
 export interface ChatSession {
-  version: 1;
+  version: 2;
   id: string;
   createdAt: string;
   updatedAt: string;
@@ -52,11 +53,13 @@ export interface ChatSession {
   projectRoot: string;
   projectKind: ProjectKind;
   maxAutoRounds: number;
+  maxWorkflowRounds: number;
   retries: number;
   timeoutMinutes: number;
   noTranscript: boolean;
   screenReader?: boolean;
   noColor?: boolean;
+  ui: UiMode;
   codexModel?: string;
   claudeModel?: string;
   codexEffort?: ReasoningEffort;
@@ -197,11 +200,13 @@ export function isChatSession(value: unknown): value is ChatSession {
       'projectRoot',
       'projectKind',
       'maxAutoRounds',
+      'maxWorkflowRounds',
       'retries',
       'timeoutMinutes',
       'noTranscript',
       'screenReader',
       'noColor',
+      'ui',
       'codexModel',
       'claudeModel',
       'codexEffort',
@@ -216,7 +221,7 @@ export function isChatSession(value: unknown): value is ChatSession {
   }
   const session = value as Partial<ChatSession>;
   return (
-    session.version === 1 &&
+    session.version === 2 &&
     typeof session.id === 'string' &&
     isSafeRunId(session.id) &&
     isIsoDateTime(session.createdAt) &&
@@ -227,8 +232,11 @@ export function isChatSession(value: unknown): value is ChatSession {
     isAbsolute(session.projectRoot) &&
     (session.projectKind === 'git' || session.projectKind === 'directory') &&
     Number.isInteger(session.maxAutoRounds) &&
-    (session.maxAutoRounds ?? 0) >= 2 &&
+    (session.maxAutoRounds ?? 0) >= 1 &&
     (session.maxAutoRounds ?? 21) <= 20 &&
+    Number.isInteger(session.maxWorkflowRounds) &&
+    (session.maxWorkflowRounds ?? 0) >= 1 &&
+    (session.maxWorkflowRounds ?? 21) <= 20 &&
     Number.isInteger(session.retries) &&
     (session.retries ?? -1) >= 0 &&
     (session.retries ?? 4) <= 3 &&
@@ -239,6 +247,7 @@ export function isChatSession(value: unknown): value is ChatSession {
     (session.screenReader === undefined ||
       typeof session.screenReader === 'boolean') &&
     (session.noColor === undefined || typeof session.noColor === 'boolean') &&
+    ['plain', 'enhanced', 'auto'].includes(String(session.ui)) &&
     (session.codexModel === undefined ||
       typeof session.codexModel === 'string') &&
     (session.claudeModel === undefined ||
@@ -258,6 +267,18 @@ export function isChatSession(value: unknown): value is ChatSession {
     session.workflows.every(isWorkflowEvent) &&
     session.workflows.every((event, index) => event.sequence === index + 1)
   );
+}
+
+function migrateChatSession(value: unknown): unknown {
+  if (!isRecord(value) || value.version !== 1) {
+    return value;
+  }
+  return {
+    ...value,
+    version: 2,
+    maxWorkflowRounds: value.maxAutoRounds,
+    ui: 'plain',
+  };
 }
 
 export function formatChatTranscript(session: ChatSession): string {
@@ -400,7 +421,9 @@ export class ChatSessionStore {
     if (contents.length > MAX_CHAT_FILE_BYTES) {
       throw new Error(`Saved chat is larger than 50 MB: ${id}`);
     }
-    const parsed: unknown = JSON.parse(contents.toString('utf8'));
+    const parsed: unknown = migrateChatSession(
+      JSON.parse(contents.toString('utf8')),
+    );
     if (!isChatSession(parsed)) {
       throw new Error(`Invalid saved chat: ${id}`);
     }
