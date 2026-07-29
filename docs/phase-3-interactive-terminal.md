@@ -1,6 +1,6 @@
 # Phase 3 specification: enhanced interactive terminal
 
-Status: In progress — Slice 1 implemented
+Status: In progress — Slices 1 and 2 implemented
 
 Target release: 0.6.0
 

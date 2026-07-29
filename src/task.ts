@@ -1,7 +1,8 @@
-import { readFile, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { isAbsolute, resolve } from 'node:path';
 
 import type { ProjectKind } from './core.ts';
+import { readFilePrefixBytes } from './filesystem.ts';
 import type { BridgeOptions } from './options.ts';
 import { runProcess } from './process.ts';
 import { clip, MAX_CONTEXT_CHARS } from './prompts.ts';
@@ -50,7 +51,16 @@ export async function resolveTask(options: BridgeOptions): Promise<string> {
         `Task file exceeds ${MAX_TASK_BYTES.toLocaleString()} bytes: ${path}`,
       );
     }
-    return validateTaskSize(await readFile(path, 'utf8'));
+    const contents = await readFilePrefixBytes({
+      path,
+      maxBytes: MAX_TASK_BYTES + 1,
+    });
+    if (contents.length > MAX_TASK_BYTES) {
+      throw new Error(
+        `Task file exceeds ${MAX_TASK_BYTES.toLocaleString()} bytes: ${path}`,
+      );
+    }
+    return validateTaskSize(contents.toString('utf8'));
   }
   if (options.task) {
     return validateTaskSize(options.task);
@@ -77,6 +87,7 @@ export async function appendGitDiff(
   }
 
   let evidence: string;
+  let evidenceWasTruncated = false;
   if (options.gitDiff === 'working-tree') {
     if (!(await workingTreeStatus(options))) {
       throw new Error('--git-diff produced no changes: working-tree');
@@ -86,25 +97,33 @@ export async function appendGitDiff(
     const result = await runProcess(
       'git',
       ['show', '--format=', '--binary', '--no-ext-diff', 'HEAD'],
-      { cwd: options.cwd },
+      {
+        cwd: options.cwd,
+        truncateOutputChars: MAX_CONTEXT_CHARS,
+      },
     );
     evidence = result.stdout.trim();
+    evidenceWasTruncated = Boolean(result.stdoutTruncated);
   } else {
     const result = await runProcess(
       'git',
       ['diff', '--no-ext-diff', '--no-textconv', options.gitDiff],
-      { cwd: options.cwd },
+      {
+        cwd: options.cwd,
+        truncateOutputChars: MAX_CONTEXT_CHARS,
+      },
     );
     evidence = result.stdout.trim();
+    evidenceWasTruncated = Boolean(result.stdoutTruncated);
   }
   if (!evidence.trim()) {
     throw new Error(`--git-diff produced no changes: ${options.gitDiff}`);
   }
 
-  if (evidence.length > MAX_CONTEXT_CHARS) {
+  if (evidenceWasTruncated || evidence.length > MAX_CONTEXT_CHARS) {
     console.warn(
-      `Review evidence is ${evidence.length.toLocaleString()} characters; ` +
-        'the prompt preserves its beginning and end. Agents can inspect the project.',
+      'Review evidence exceeds the prompt budget; its beginning and end are ' +
+        'preserved. Agents can inspect the project.',
     );
   }
   return `${task}

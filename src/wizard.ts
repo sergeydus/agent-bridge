@@ -13,6 +13,7 @@ import { loadProjectConfig } from './project-config.ts';
 import { resolveProject, type SelectedProject } from './project.ts';
 import { workingTreeStatus } from './snapshot.ts';
 import { RunStateStore } from './state.ts';
+import { sanitizeTerminalText } from './terminal-text.ts';
 
 interface Questioner {
   question(prompt: string): Promise<string>;
@@ -213,7 +214,9 @@ async function chooseProject(
   console.log('\nWhich project should the agents work on?');
   candidates.forEach((project, index) => {
     const kind = project.kind === 'git' ? 'Git' : 'folder';
-    console.log(`  ${index + 1}) ${project.root} (${kind})`);
+    console.log(
+      `  ${index + 1}) ${sanitizeTerminalText(project.root)} (${kind})`,
+    );
   });
   const customChoice = String(candidates.length + 1);
   console.log(`  ${customChoice}) Enter or drag in another project folder`);
@@ -238,7 +241,11 @@ async function chooseProject(
         project = await resolveProject(input);
         break;
       } catch (error) {
-        console.log(error instanceof Error ? error.message : String(error));
+        console.log(
+          sanitizeTerminalText(
+            error instanceof Error ? error.message : String(error),
+          ),
+        );
       }
     }
   } else {
@@ -378,20 +385,21 @@ Project material needed for the task may be sent to both providers.
       interface_,
       options,
       new UserConfigStore(appPaths.configFile, (message) =>
-        console.warn(message),
+        console.warn(sanitizeTerminalText(message)),
       ),
       installRoot,
     );
     options.cwd = project.root;
     await configureModels(interface_, options);
-    console.log(`\nProject: ${project.root}`);
+    console.log(`\nProject: ${sanitizeTerminalText(project.root)}`);
     if (mode === '1') {
       options.chat = true;
       options.maxRounds = await askForMaxRounds(
         interface_,
         'Maximum automatic exchanges',
       );
-      console.log(`
+      console.log(
+        sanitizeTerminalText(`
 Ready to chat${options.screenReader ? '' : '\n-------------'}
 Project: ${project.root}
 Automatic exchange limit: ${options.maxRounds}
@@ -401,7 +409,8 @@ Presentation: ${presentationLabel(options)}
 Each message first returns control to you. Use /auto when you want Codex and
 Claude to continue without waiting, or /implement and /collaborate when you
 want the existing safe editing workflow.
-`);
+`),
+      );
       const confirmed = await askForChoice(
         interface_,
         'Open the chat now? [Y/n]: ',
@@ -482,7 +491,11 @@ committed HEAD, so agents will not see those changes.`);
     if (projectConfig.path && projectConfig.config.verification.length > 0) {
       console.log('\nProject verification commands:');
       for (const command of projectConfig.config.verification) {
-        console.log(`  • ${[command.command, ...command.args].join(' ')}`);
+        console.log(
+          `  • ${sanitizeTerminalText(
+            [command.command, ...command.args].join(' '),
+          )}`,
+        );
       }
       const trust = await askForChoice(
         interface_,
@@ -503,24 +516,26 @@ committed HEAD, so agents will not see those changes.`);
       firstAgent: options.collaborative ?? options.implementer,
       maxRounds: options.maxRounds,
     });
-    console.log(`
+    console.log(
+      sanitizeTerminalText(`
 Ready to start${options.screenReader ? '' : '\n--------------'}
 Mode: ${workflowKind}
 Project: ${project.root}
 Workspace: ${
-      workflowKind === 'review'
-        ? 'Selected project (read-only)'
-        : options.isolation
-          ? 'New isolated Git worktree'
-          : 'Selected checkout'
-    }
+        workflowKind === 'review'
+          ? 'Selected project (read-only)'
+          : options.isolation
+            ? 'New isolated Git worktree'
+            : 'Selected checkout'
+      }
 Maximum cycles: ${options.maxRounds}
 Estimated calls: ${estimate.minimum}–${estimate.maximum}
 Codex model: ${options.codexModel ?? 'provider default'}
 Claude model: ${options.claudeModel ?? 'provider default'}
 Presentation: ${presentationLabel(options)}
 Task: ${options.task}
-`);
+`),
+    );
     const confirmed = await askForChoice(
       interface_,
       'Start now? [Y/n]: ',

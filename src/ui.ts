@@ -4,6 +4,7 @@ import {
   type ChangeSummary,
   type RunOutcome,
 } from './core.ts';
+import { sanitizeTerminalText } from './terminal-text.ts';
 
 const agentLabel = (agent: AgentName): string =>
   agent === 'codex' ? 'Codex' : 'Claude';
@@ -40,40 +41,44 @@ export class ProgressReporter {
 
   heading(title: string): void {
     if (!this.#silent) {
+      const safeTitle = sanitizeTerminalText(title);
       process.stdout.write(
         this.#screenReader
-          ? `\n${title}\n`
-          : `\n${title}\n${'─'.repeat(title.length)}\n`,
+          ? `\n${safeTitle}\n`
+          : `\n${safeTitle}\n${'─'.repeat(safeTitle.length)}\n`,
       );
     }
   }
 
   phase(message: string): void {
     if (!this.#silent) {
+      const safeMessage = sanitizeTerminalText(message);
       process.stdout.write(
-        this.#screenReader ? `Phase: ${message}\n` : `● ${message}\n`,
+        this.#screenReader ? `Phase: ${safeMessage}\n` : `● ${safeMessage}\n`,
       );
     }
   }
 
   success(message: string): void {
     if (!this.#silent) {
+      const safeMessage = sanitizeTerminalText(message);
       process.stdout.write(
-        this.#screenReader ? `Success: ${message}\n` : `✓ ${message}\n`,
+        this.#screenReader ? `Success: ${safeMessage}\n` : `✓ ${safeMessage}\n`,
       );
     }
   }
 
   info(message: string): void {
     if (!this.#silent) {
-      process.stdout.write(`  ${message}\n`);
+      process.stdout.write(`  ${sanitizeTerminalText(message)}\n`);
     }
   }
 
   warning(message: string): void {
     if (!this.#silent) {
+      const safeMessage = sanitizeTerminalText(message);
       process.stdout.write(
-        this.#screenReader ? `Warning: ${message}\n` : `! ${message}\n`,
+        this.#screenReader ? `Warning: ${safeMessage}\n` : `! ${safeMessage}\n`,
       );
     }
   }
@@ -99,7 +104,8 @@ Staged: ${summary.stagedFiles}
 New: ${summary.untrackedFiles}`);
 
   for (const file of summary.files.slice(0, 12)) {
-    console.log(screenReader ? `  File: ${file}` : `  • ${file}`);
+    const safeFile = sanitizeTerminalText(file);
+    console.log(screenReader ? `  File: ${safeFile}` : `  • ${safeFile}`);
   }
   if (summary.files.length > 12) {
     console.log(
@@ -144,12 +150,14 @@ export function printCompletion({
     cancelled: 'Agent Bridge was cancelled',
   }[outcome];
   const outcomeLabel = screenReader ? plainOutcomeLabel : visualOutcomeLabel;
-  console.log(`
+  console.log(
+    sanitizeTerminalText(`
 ${outcomeLabel}
 ${screenReader ? '' : `${'═'.repeat(42)}\n`}Review cycles: ${cycles}
 Elapsed: ${elapsed}${workspace ? `\nWorkspace: ${workspace}` : ''}${
-    transcript ? `\nTranscript: ${transcript}` : ''
-  }${patch ? `\nPatch: ${patch}` : ''}
+      transcript ? `\nTranscript: ${transcript}` : ''
+    }${patch ? `\nPatch: ${patch}` : ''}
 ${recoveryPatch ? `Recovery patch: ${recoveryPatch}` : ''}
-`);
+`),
+  );
 }

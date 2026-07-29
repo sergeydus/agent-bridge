@@ -50,6 +50,7 @@ import {
   runVerificationCommands,
 } from './verification.ts';
 import { runWizard } from './wizard.ts';
+import { sanitizeTerminalText } from './terminal-text.ts';
 
 const APP_PATHS = getAppPaths();
 const PROVIDERS = createDefaultProviders();
@@ -62,7 +63,7 @@ function errorMessage(error: unknown): string {
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   const stateStore = new RunStateStore(APP_PATHS.stateDirectory, (message) =>
-    console.warn(message),
+    console.warn(sanitizeTerminalText(message)),
   );
 
   if (options.help) {
@@ -74,7 +75,7 @@ async function main(): Promise<void> {
       appPaths: APP_PATHS,
       providers: PROVIDERS,
     });
-    report.lines.forEach((line) => console.log(line));
+    report.lines.forEach((line) => console.log(sanitizeTerminalText(line)));
     if (!report.passed) {
       process.exitCode = 1;
     }
@@ -237,6 +238,7 @@ async function main(): Promise<void> {
   const startedAt = resumedRun?.createdAt ?? new Date().toISOString();
   const runId = resumedRun?.id ?? makeRunId(new Date(startedAt));
   let runLock: RunLock | undefined;
+  let ownsRunState = options.dryRun;
   const reporter = new ProgressReporter({
     verbose: options.verbose,
     screenReader: options.screenReader,
@@ -333,6 +335,7 @@ continue from its actual state instead of repeating changes blindly.`;
   try {
     if (!options.dryRun) {
       runLock = await stateStore.acquireLock(runId);
+      ownsRunState = true;
     }
     if (needsDirectDirtyRecoveryPatch && !options.dryRun) {
       recoveryPatchPath = join(options.output, `${runId}.preexisting.patch`);
@@ -618,7 +621,7 @@ continue from its actual state instead of repeating changes blindly.`;
         : 'agreement-cap-reached'
       : 'completed-fixed-rounds';
     reporter.heading('Final result');
-    console.log(`${result.synthesis}\n`);
+    console.log(`${sanitizeTerminalText(result.synthesis)}\n`);
     printCompletion({
       outcome,
       cycles: result.rounds.filter((round) => round.phase !== 'Planning')
@@ -642,14 +645,18 @@ continue from its actual state instead of repeating changes blindly.`;
     }
   } catch (error) {
     if (abortController.signal.aborted || error instanceof ProcessAbortError) {
-      await saveState('cancelled', 'Cancelled by user');
+      if (ownsRunState) {
+        await saveState('cancelled', 'Cancelled by user');
+      }
       reporter.warning(
         `Cancelled safely.${workspace ? ` Workspace preserved: ${workspace}` : ''}`,
       );
       process.exitCode = 130;
       return;
     }
-    await saveState('failed', errorMessage(error));
+    if (ownsRunState) {
+      await saveState('failed', errorMessage(error));
+    }
     throw error;
   } finally {
     process.removeListener('SIGINT', onSignal);
@@ -660,6 +667,6 @@ continue from its actual state instead of repeating changes blindly.`;
 }
 
 main().catch((error: unknown) => {
-  console.error(`agent-bridge: ${errorMessage(error)}`);
+  console.error(`agent-bridge: ${sanitizeTerminalText(errorMessage(error))}`);
   process.exitCode = 1;
 });

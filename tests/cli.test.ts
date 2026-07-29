@@ -6,6 +6,9 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { getAppPaths } from '../src/paths.ts';
+import { RunStateStore, type SavedRun } from '../src/state.ts';
+
 const bridgeRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 test('collaborative dry run plans read-only and alternates write access', () => {
@@ -182,6 +185,115 @@ test('compiled CLI exposes chat management without calling providers', () => {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /No saved Agent Bridge chats/);
   } finally {
+    rmSync(bridgeHome, { recursive: true, force: true });
+  }
+});
+
+test('redirected chat input pauses cleanly at end of input', () => {
+  const directory = mkdtempSync(`${tmpdir()}/agent-bridge-chat-script-`);
+  const bridgeHome = mkdtempSync(`${tmpdir()}/agent-bridge-home-`);
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [
+        'bin/agent-bridge.mjs',
+        'chat',
+        '--cwd',
+        directory,
+        '--ui',
+        'plain',
+        '--no-color',
+      ],
+      {
+        cwd: bridgeRoot,
+        encoding: 'utf8',
+        input: '',
+        env: { ...process.env, AGENT_BRIDGE_HOME: bridgeHome },
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Chat saved\. Resume with:/);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(bridgeHome, { recursive: true, force: true });
+  }
+});
+
+test('a failed run-lock acquisition does not overwrite the active owner state', async () => {
+  const directory = mkdtempSync(`${tmpdir()}/agent-bridge-lock-project-`);
+  const bridgeHome = mkdtempSync(`${tmpdir()}/agent-bridge-home-`);
+  const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: bridgeHome } });
+  const store = new RunStateStore(paths.stateDirectory);
+  const now = new Date().toISOString();
+  const savedRun: SavedRun = {
+    version: 2,
+    id: 'run-20260730-active123',
+    createdAt: now,
+    updatedAt: now,
+    status: 'reviewing',
+    task: 'Review without overwriting the owner.',
+    originalCwd: directory,
+    agentCwd: directory,
+    projectKind: 'directory',
+    outputDirectory: paths.runsDirectory,
+    workflow: { kind: 'review', maxRounds: 1 },
+    judge: 'codex',
+    retries: 0,
+    timeoutMinutes: 1,
+    untilAgreement: false,
+    requireAgreement: false,
+    noTranscript: false,
+    verification: [],
+    protectedPaths: [],
+    protectedPathFingerprints: {},
+    completedCycles: 0,
+    codexPrevious: '',
+    claudePrevious: '',
+    handoff: '',
+    converged: false,
+    rounds: [],
+  };
+  let lock: Awaited<ReturnType<RunStateStore['acquireLock']>> | undefined;
+  try {
+    await store.save(savedRun);
+    const persistedBeforeResume = await store.load(savedRun.id);
+    lock = await store.acquireLock(savedRun.id);
+    const result = spawnSync(
+      process.execPath,
+      ['bin/agent-bridge.mjs', '--resume', savedRun.id],
+      {
+        cwd: bridgeRoot,
+        encoding: 'utf8',
+        env: { ...process.env, AGENT_BRIDGE_HOME: bridgeHome },
+      },
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /already active in another Agent Bridge process/,
+    );
+    assert.deepEqual(await store.load(savedRun.id), persistedBeforeResume);
+
+    const deletion = spawnSync(
+      process.execPath,
+      ['bin/agent-bridge.mjs', '--delete-run', savedRun.id],
+      {
+        cwd: bridgeRoot,
+        encoding: 'utf8',
+        env: { ...process.env, AGENT_BRIDGE_HOME: bridgeHome },
+      },
+    );
+    assert.equal(deletion.status, 1);
+    assert.match(
+      deletion.stderr,
+      /already active in another Agent Bridge process/,
+    );
+    assert.deepEqual(await store.load(savedRun.id), persistedBeforeResume);
+  } finally {
+    await lock?.release();
+    rmSync(directory, { recursive: true, force: true });
     rmSync(bridgeHome, { recursive: true, force: true });
   }
 });

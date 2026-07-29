@@ -6,6 +6,7 @@ import {
   type TerminalViewModel,
 } from './presentation-model.ts';
 import type { ProviderEvent } from './provider-events.ts';
+import { sanitizeTerminalText } from './terminal-text.ts';
 
 const ANSI_RESET = '\u001B[0m';
 const ANSI_BOLD = '\u001B[1m';
@@ -31,25 +32,40 @@ export interface ProviderEventPresenter {
 }
 
 export interface TerminalRenderer {
+  start(model: TerminalViewModel): string;
   render(event: PresentationModelEvent, model: TerminalViewModel): string;
+  redraw(model: TerminalViewModel): string;
+  suspend(): string;
+  resume(model: TerminalViewModel): string;
+  stop(): string;
+}
+
+export interface RendererFallback {
+  renderer: TerminalRenderer;
+  notice: string;
 }
 
 export class PresentationController {
   #model: TerminalViewModel;
   #renderer: TerminalRenderer;
+  #fallback: RendererFallback | undefined;
+  #usingFallback = false;
   #write: (text: string) => void;
 
   constructor({
     initialModel,
     renderer,
+    fallback,
     write,
   }: {
     initialModel: TerminalViewModel;
     renderer: TerminalRenderer;
+    fallback?: RendererFallback;
     write: (text: string) => void;
   }) {
     this.#model = initialModel;
     this.#renderer = renderer;
+    this.#fallback = fallback;
     this.#write = write;
   }
 
@@ -57,12 +73,100 @@ export class PresentationController {
     return this.#model;
   }
 
+  get usingFallback(): boolean {
+    return this.#usingFallback;
+  }
+
+  start(): void {
+    this.#renderWithFallback(
+      (renderer) => renderer.start(this.#model),
+      () => '',
+    );
+  }
+
   dispatch(event: PresentationModelEvent): void {
     this.#model = reducePresentationModel(this.#model, event);
-    const output = this.#renderer.render(event, this.#model);
+    this.#renderWithFallback(
+      (renderer) => renderer.render(event, this.#model),
+      (renderer) => renderer.render(event, this.#model),
+    );
+  }
+
+  redraw(): void {
+    this.#renderWithFallback(
+      (renderer) => renderer.redraw(this.#model),
+      (renderer) => renderer.redraw(this.#model),
+    );
+  }
+
+  suspend(): void {
+    this.#renderWithFallback(
+      (renderer) => renderer.suspend(),
+      (renderer) => renderer.suspend(),
+    );
+  }
+
+  resume(): void {
+    this.#renderWithFallback(
+      (renderer) => renderer.resume(this.#model),
+      (renderer) => renderer.resume(this.#model),
+    );
+  }
+
+  stop(): void {
+    this.#emit(this.#renderer.stop());
+  }
+
+  #emit(output: string): void {
     if (output) {
       this.#write(output);
     }
+  }
+
+  #renderWithFallback(
+    render: (renderer: TerminalRenderer) => string,
+    renderAfterFallback: (renderer: TerminalRenderer) => string,
+  ): void {
+    let output: string;
+    try {
+      output = render(this.#renderer);
+    } catch (error) {
+      this.#activateFallback(error, renderAfterFallback);
+      return;
+    }
+    this.#emit(output);
+  }
+
+  #activateFallback(
+    renderError: unknown,
+    renderAfterFallback: (renderer: TerminalRenderer) => string,
+  ): void {
+    const fallback = this.#fallback;
+    if (!fallback) {
+      throw renderError;
+    }
+
+    let restoration: string;
+    try {
+      restoration = this.#renderer.stop();
+    } catch (restorationError) {
+      throw new AggregateError(
+        [renderError, restorationError],
+        'Enhanced terminal rendering failed and normal terminal state could not be restored',
+        { cause: restorationError },
+      );
+    }
+
+    this.#renderer = fallback.renderer;
+    this.#fallback = undefined;
+    this.#usingFallback = true;
+
+    // Writes are deliberately outside the renderer try/catch. A broken output
+    // stream cannot be repaired by changing renderers and must stay fatal.
+    this.#emit(restoration);
+    this.#emit(fallback.notice);
+    this.#emit(this.#renderer.start(this.#model));
+    this.#emit(renderAfterFallback(this.#renderer));
   }
 }
 
@@ -127,11 +231,12 @@ export function createProviderEventPresenter({
   let liveTextTruncated = false;
 
   const appendBuffered = (text: string): void => {
+    const safeText = sanitizeTerminalText(text);
     const remaining = MAX_LIVE_TEXT_CHARS - bufferedText.length;
     if (remaining > 0) {
-      bufferedText += text.slice(0, remaining);
+      bufferedText += safeText.slice(0, remaining);
     }
-    if (text.length > remaining) {
+    if (safeText.length > remaining) {
       liveTextTruncated = true;
     }
   };
@@ -171,10 +276,11 @@ export function createProviderEventPresenter({
       }
       if (event.type === 'activity') {
         const prefix = closeLiveText();
+        const message = sanitizeTerminalText(event.message);
         return `${prefix}${
           preferences.screenReader
-            ? `${agentLabel(agent)} status: ${event.message}.\n`
-            : `  ${agentLabel(agent)} · ${event.message}\n`
+            ? `${agentLabel(agent)} status: ${message}.\n`
+            : `  ${agentLabel(agent)} · ${message}\n`
         }`;
       }
       if (event.type === 'text-completed') {
@@ -182,11 +288,12 @@ export function createProviderEventPresenter({
           preferences.screenReader || !streamText
             ? completeBufferedText()
             : closeLiveText();
-        const text = event.text.slice(0, MAX_LIVE_TEXT_CHARS);
+        const safeEventText = sanitizeTerminalText(event.text);
+        const text = safeEventText.slice(0, MAX_LIVE_TEXT_CHARS);
         if (!text) {
           return prefix;
         }
-        const truncated = event.text.length > text.length;
+        const truncated = safeEventText.length > text.length;
         return `${prefix}\n${progressHeading(agent, preferences)}${text}${
           text.endsWith('\n') ? '' : '\n'
         }${
@@ -202,10 +309,11 @@ export function createProviderEventPresenter({
           appendBuffered(event.text);
           return '';
         }
+        const safeEventText = sanitizeTerminalText(event.text);
         const remaining = MAX_LIVE_TEXT_CHARS - liveTextChars;
-        const text = remaining > 0 ? event.text.slice(0, remaining) : '';
+        const text = remaining > 0 ? safeEventText.slice(0, remaining) : '';
         liveTextChars += text.length;
-        if (text.length < event.text.length) {
+        if (text.length < safeEventText.length) {
           liveTextTruncated = true;
         }
         if (!liveTextOpen) {
@@ -241,7 +349,9 @@ export function createProviderEventPresenter({
 }
 
 function modelLabel(model?: string): string {
-  return model ? `model ${model}` : 'provider default model';
+  return model
+    ? `model ${sanitizeTerminalText(model)}`
+    : 'provider default model';
 }
 
 export function formatAgentStarted({
@@ -292,13 +402,14 @@ export function formatAgentResponse({
   preferences: PresentationPreferences;
 }): string {
   const decisionText = decision ? ` Decision: ${decision}.` : '';
+  const safeText = sanitizeTerminalText(text);
   if (preferences.screenReader) {
-    return `\n${agentLabel(agent)} response.${decisionText}\n${text}\n`;
+    return `\n${agentLabel(agent)} response.${decisionText}\n${safeText}\n`;
   }
   const title = `${coloredAgentLabel(agent, preferences)}${
     decision ? ` [${decision}]` : ''
   }`;
-  return `\n${title}\n${'─'.repeat(agentLabel(agent).length)}\n${text}\n`;
+  return `\n${title}\n${'─'.repeat(agentLabel(agent).length)}\n${safeText}\n`;
 }
 
 export function createPlainTerminalRenderer(
@@ -317,6 +428,19 @@ export function createPlainTerminalRenderer(
     active?.agent === agent ? active.presenter : undefined;
 
   return {
+    start(model): string {
+      active = model.activity
+        ? {
+            agent: model.activity.agent,
+            presenter: createProviderEventPresenter({
+              agent: model.activity.agent,
+              preferences,
+              streamText: !preferences.screenReader,
+            }),
+          }
+        : undefined;
+      return '';
+    },
     render(event, model): string {
       if (event.type === 'agent-started') {
         active = {
@@ -372,6 +496,18 @@ export function createPlainTerminalRenderer(
           preferences,
         });
       }
+      return '';
+    },
+    redraw(): string {
+      return '';
+    },
+    suspend(): string {
+      return '';
+    },
+    resume(): string {
+      return '';
+    },
+    stop(): string {
       return '';
     },
   };

@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { lstat, readFile, readdir } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 
 import { runProcess } from './process.ts';
+
+const MAX_SNAPSHOT_SECTION_CHARS = 80_000;
 
 export interface WorkingTreeStatusEntry {
   indexStatus: string;
@@ -47,7 +50,7 @@ export async function workingTreePaths({
   const { stdout } = await runProcess(
     'git',
     ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
-    { cwd },
+    { cwd, maxOutputChars: 5_000_000 },
   );
   return [
     ...new Set(
@@ -64,7 +67,7 @@ export async function workingTreeStatus({
   const { stdout } = await runProcess(
     'git',
     ['status', '--porcelain=v1', '--untracked-files=all'],
-    { cwd },
+    { cwd, truncateOutputChars: MAX_SNAPSHOT_SECTION_CHARS },
   );
   return stdout.trim();
 }
@@ -76,14 +79,17 @@ export async function workingTreeSnapshot({
 }): Promise<string> {
   const [status, unstaged, staged, untrackedResult] = await Promise.all([
     workingTreeStatus({ cwd }),
-    runProcess('git', ['diff', '--no-ext-diff', '--no-textconv'], { cwd }).then(
-      (result) => result.stdout.trim(),
-    ),
+    runProcess('git', ['diff', '--no-ext-diff', '--no-textconv'], {
+      cwd,
+      truncateOutputChars: MAX_SNAPSHOT_SECTION_CHARS,
+    }).then((result) => result.stdout.trim()),
     runProcess('git', ['diff', '--cached', '--no-ext-diff', '--no-textconv'], {
       cwd,
+      truncateOutputChars: MAX_SNAPSHOT_SECTION_CHARS,
     }).then((result) => result.stdout.trim()),
     runProcess('git', ['ls-files', '--others', '--exclude-standard', '-z'], {
       cwd,
+      maxOutputChars: 1_000_000,
     }),
   ]);
 
@@ -104,6 +110,12 @@ export async function workingTreeSnapshot({
       if (details.isSymbolicLink()) {
         untrackedSections.push(
           `--- untracked: ${path}\n[contents omitted: symbolic link]`,
+        );
+        continue;
+      }
+      if (details.size > 20_000) {
+        untrackedSections.push(
+          `--- untracked: ${path}\n[contents omitted: binary or too large]`,
         );
         continue;
       }
@@ -189,7 +201,9 @@ export async function pathFingerprint({
       }
       return;
     }
-    hash.update(await readFile(current));
+    for await (const chunk of createReadStream(current)) {
+      hash.update(chunk as Buffer);
+    }
   };
 
   await visit(absolutePath, path);

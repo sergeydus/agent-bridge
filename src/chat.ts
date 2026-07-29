@@ -46,6 +46,14 @@ import {
   type ProviderMap,
 } from './providers.ts';
 import { resolveTask } from './task.ts';
+import { createEnhancedTerminalRenderer } from './enhanced-terminal.ts';
+import {
+  detectTerminalCapabilities,
+  resolveUiMode,
+  type ResolvedUiMode,
+  type TerminalCapabilities,
+} from './terminal-capabilities.ts';
+import { sanitizeTerminalText } from './terminal-text.ts';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -78,10 +86,33 @@ function presentedMessage(message: ChatMessage): PresentedMessage {
   };
 }
 
+function chatIntroduction(
+  session: ChatSession,
+  presentation: PresentationPreferences,
+): string {
+  const projectRoot = sanitizeTerminalText(session.projectRoot);
+  return presentation.screenReader
+    ? `
+Agent Bridge interactive chat.
+Session: ${session.id}
+Project: ${projectRoot}
+Type a message or /help. Ctrl+D and /pause save the conversation.
+`
+    : `
+Agent Bridge interactive chat
+=============================
+Session: ${session.id}
+Project: ${projectRoot}
+
+Type a message or /help. Ctrl+D and /pause save the conversation.
+`;
+}
+
 function createChatPresentation(
   session: ChatSession,
   preferences: PresentationPreferences,
   terminal: ChatTerminal,
+  uiMode: ResolvedUiMode,
 ): PresentationController {
   return new PresentationController({
     initialModel: createTerminalViewModel({
@@ -94,7 +125,21 @@ function createChatPresentation(
         .slice(-MAX_PRESENTED_MESSAGES)
         .map(presentedMessage),
     }),
-    renderer: createPlainTerminalRenderer(preferences),
+    renderer:
+      uiMode === 'enhanced'
+        ? createEnhancedTerminalRenderer()
+        : createPlainTerminalRenderer(preferences),
+    ...(uiMode === 'enhanced'
+      ? {
+          fallback: {
+            renderer: createPlainTerminalRenderer(preferences),
+            notice: `\nEnhanced terminal rendering failed. Continuing in plain mode.\n${chatIntroduction(
+              session,
+              preferences,
+            )}`,
+          },
+        }
+      : {}),
     write: (text) => terminal.write(text),
   });
 }
@@ -135,7 +180,7 @@ function recentHistory(session: ChatSession, count: number): string {
           : message.role === 'system'
             ? 'Agent Bridge'
             : agentLabel(message.role)
-      }${decision}: ${message.text}`;
+      }${decision}: ${sanitizeTerminalText(message.text)}`;
     })
     .join('\n\n');
 }
@@ -143,21 +188,24 @@ function recentHistory(session: ChatSession, count: number): string {
 function chatStatus(
   session: ChatSession,
   presentation: PresentationPreferences,
+  uiMode: ResolvedUiMode,
 ): string {
   return `Session: ${session.id}
 Status: ${session.status}
-Project: ${session.projectRoot} (${session.projectKind})
+Project: ${sanitizeTerminalText(session.projectRoot)} (${session.projectKind})
 Messages: ${session.messages.length}
 Linked workflows: ${session.workflows.length}
 Automatic exchange limit: ${session.maxAutoRounds}
-Codex model: ${session.codexModel ?? 'provider default'}
-Claude model: ${session.claudeModel ?? 'provider default'}
+Codex model: ${sanitizeTerminalText(session.codexModel ?? 'provider default')}
+Claude model: ${sanitizeTerminalText(session.claudeModel ?? 'provider default')}
 Presentation: ${
     presentation.screenReader
       ? 'screen-reader-friendly'
-      : presentation.color
-        ? 'enhanced'
-        : 'plain, no color'
+      : uiMode === 'enhanced'
+        ? 'enhanced terminal'
+        : presentation.color
+          ? 'standard, color'
+          : 'plain, no color'
   }`;
 }
 
@@ -354,279 +402,259 @@ export async function runInteractiveChat({
   appPaths,
   providers = createDefaultProviders(),
   terminal: providedTerminal,
+  terminalCapabilities,
   launchWorkflow = launchBridgeWorkflow,
 }: {
   options: BridgeOptions;
   appPaths: AppPaths;
   providers?: ProviderMap;
   terminal?: ChatTerminal;
+  terminalCapabilities?: TerminalCapabilities;
   launchWorkflow?: WorkflowLauncher;
 }): Promise<void> {
-  if (
-    !process.stdin.isTTY &&
-    !providedTerminal &&
-    !options.listChats &&
-    !options.deleteChat
-  ) {
-    throw new Error('Interactive chat requires a terminal');
-  }
   const terminal = providedTerminal ?? createChatTerminal();
-  const store = new ChatSessionStore(appPaths.chatsDirectory, (message) =>
-    console.warn(message),
-  );
-  if (options.listChats) {
-    terminal.write(`${formatChatList(await store.list())}\n`);
-    terminal.close();
-    return;
-  }
-  if (options.deleteChat) {
-    const session = await store.load(options.deleteChat);
-    const deletionLock = await store.acquireLock(session.id);
-    try {
-      await store.delete(session.id);
-    } finally {
-      await deletionLock.release();
-    }
-    terminal.write(`Deleted chat ${session.id}.\n`);
-    terminal.close();
-    return;
-  }
-  let session: ChatSession;
-  if (options.resume) {
-    const resumed =
-      options.resume === 'latest'
-        ? await store.latest()
-        : await store.load(options.resume);
-    if (!resumed) {
-      throw new Error('There is no saved chat to resume.');
-    }
-    session = resumed;
-    options.screenReader ||= session.screenReader ?? false;
-    options.noColor ||= session.noColor ?? false;
-    session.screenReader = options.screenReader;
-    session.noColor = options.noColor;
-    await refreshProjectKind(session);
-    session.status = 'active';
-  } else {
-    session = createSession(options, await resolveProject(options.cwd));
-  }
-  const presentation = resolvePresentation({
-    screenReader: options.screenReader,
-    noColor: options.noColor,
-  });
-  const presenter = createChatPresentation(session, presentation, terminal);
-
-  let lock: ChatLock | undefined;
-  const abortController = new AbortController();
-  const abort = (): void => abortController.abort();
-  process.once('SIGINT', abort);
-  process.once('SIGTERM', abort);
-  const tempDirectory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-'));
-  let completed = false;
-
   try {
-    lock = await store.acquireLock(session.id);
-    await store.save(session);
-    const instructions = async (): Promise<string> =>
-      (await loadInstructionContext(session.projectRoot)).prompt;
-    terminal.write(
-      presentation.screenReader
-        ? `
-Agent Bridge interactive chat.
-Session: ${session.id}
-Project: ${session.projectRoot}
-Type a message or /help. Ctrl+D and /pause save the conversation.
-`
-        : `
-Agent Bridge interactive chat
-=============================
-Session: ${session.id}
-Project: ${session.projectRoot}
-
-Type a message or /help. Ctrl+D and /pause save the conversation.
-`,
+    const store = new ChatSessionStore(appPaths.chatsDirectory, (message) =>
+      console.warn(sanitizeTerminalText(message)),
     );
-
-    if (session.pendingExchange) {
-      terminal.write('\nResuming the interrupted peer response…\n');
-      await runExchange({
-        session,
-        store,
-        providers,
-        presenter,
-        tempDirectory,
-        instructions: await instructions(),
-        options,
-        signal: abortController.signal,
-        presentation,
-      });
+    if (options.listChats) {
+      terminal.write(`${formatChatList(await store.list())}\n`);
+      return;
     }
-    const initialMessage =
-      options.task || options.taskFile ? await resolveTask(options) : undefined;
-    if (initialMessage) {
-      addPresentedMessage(session, presenter, 'user', initialMessage);
+    if (options.deleteChat) {
+      const session = await store.load(options.deleteChat);
+      const deletionLock = await store.acquireLock(session.id);
+      try {
+        await store.delete(session.id);
+      } finally {
+        await deletionLock.release();
+      }
+      terminal.write(`Deleted chat ${session.id}.\n`);
+      return;
+    }
+    let session: ChatSession;
+    if (options.resume) {
+      const resumed =
+        options.resume === 'latest'
+          ? await store.latest()
+          : await store.load(options.resume);
+      if (!resumed) {
+        throw new Error('There is no saved chat to resume.');
+      }
+      session = resumed;
+      options.screenReader ||= session.screenReader ?? false;
+      options.noColor ||= session.noColor ?? false;
+      session.screenReader = options.screenReader;
+      session.noColor = options.noColor;
+      await refreshProjectKind(session);
+      session.status = 'active';
+    } else {
+      session = createSession(options, await resolveProject(options.cwd));
+    }
+    const presentation = resolvePresentation({
+      screenReader: options.screenReader,
+      noColor: options.noColor,
+    });
+    const uiResolution = resolveUiMode(
+      {
+        requested: options.ui,
+        screenReader: options.screenReader,
+      },
+      terminalCapabilities ?? detectTerminalCapabilities(),
+    );
+    const presenter = createChatPresentation(
+      session,
+      presentation,
+      terminal,
+      uiResolution.mode,
+    );
+    const activeUiMode = (): ResolvedUiMode =>
+      uiResolution.mode === 'enhanced' && !presenter.usingFallback
+        ? 'enhanced'
+        : 'plain';
+
+    let lock: ChatLock | undefined;
+    const abortController = new AbortController();
+    const abort = (): void => abortController.abort();
+    let terminalFailure: unknown;
+    const redraw = (): void => {
+      if (activeUiMode() !== 'enhanced') {
+        return;
+      }
+      try {
+        presenter.redraw();
+        terminal.redrawPrompt();
+      } catch (error) {
+        terminalFailure =
+          error instanceof Error
+            ? error
+            : new Error('Terminal redraw failed', { cause: error });
+        abortController.abort(terminalFailure);
+      }
+    };
+    const tempDirectory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-'));
+    process.once('SIGINT', abort);
+    process.once('SIGTERM', abort);
+    process.once('SIGHUP', abort);
+    if (uiResolution.mode === 'enhanced') {
+      process.stdout.on('resize', redraw);
+    }
+    let completed = false;
+    let supplementalOutputOpen = false;
+    const writeSupplemental = (text: string): void => {
+      if (activeUiMode() === 'enhanced' && !supplementalOutputOpen) {
+        presenter.suspend();
+        supplementalOutputOpen = activeUiMode() === 'enhanced';
+      }
+      terminal.write(sanitizeTerminalText(text));
+    };
+    const resumeAfterSupplementalOutput = (): void => {
+      if (!supplementalOutputOpen) {
+        return;
+      }
+      supplementalOutputOpen = false;
+      presenter.resume();
+    };
+
+    try {
+      lock = await store.acquireLock(session.id);
       await store.save(session);
-      await runExchange({
-        session,
-        store,
-        providers,
-        presenter,
-        tempDirectory,
-        instructions: await instructions(),
-        options,
-        signal: abortController.signal,
-        presentation,
-      });
-    }
-
-    while (!abortController.signal.aborted) {
-      const input = await terminal.prompt(
-        presentation.screenReader ? '\nYour message: ' : '\nYou > ',
-        abortController.signal,
-      );
-      const command = parseChatInput(input ?? '/pause');
-      if (command.kind === 'empty') {
-        continue;
+      const instructions = async (): Promise<string> =>
+        (await loadInstructionContext(session.projectRoot)).prompt;
+      if (uiResolution.notice) {
+        terminal.write(`${uiResolution.notice}. Continuing in plain mode.\n`);
       }
-      if (command.kind === 'invalid') {
-        terminal.write(`${command.message}\n`);
-        continue;
-      }
-      if (command.kind === 'help') {
-        terminal.write(`\n${CHAT_HELP}`);
-        continue;
-      }
-      if (command.kind === 'status') {
-        if (await refreshProjectKind(session)) {
-          await store.save(session);
-        }
-        terminal.write(`\n${chatStatus(session, presentation)}\n`);
-        continue;
-      }
-      if (command.kind === 'history') {
-        terminal.write(`\n${recentHistory(session, command.count)}\n`);
-        continue;
-      }
-      if (command.kind === 'paste') {
+      if (uiResolution.mode === 'enhanced') {
+        presenter.start();
+      } else {
         terminal.write(
-          '\nPaste or type multiple lines. Enter a single "." line to send.\n',
+          sanitizeTerminalText(chatIntroduction(session, presentation)),
         );
-        const lines: string[] = [];
-        let characters = 0;
-        let tooLong = false;
-        while (true) {
-          const line = await terminal.prompt(
-            presentation.screenReader ? 'Next line: ' : '… ',
-            abortController.signal,
-          );
-          if (line === null) {
-            setPresentedStatus(session, presenter, 'paused');
+      }
+
+      if (session.pendingExchange) {
+        terminal.write('\nResuming the interrupted peer response…\n');
+        await runExchange({
+          session,
+          store,
+          providers,
+          presenter,
+          tempDirectory,
+          instructions: await instructions(),
+          options,
+          signal: abortController.signal,
+          presentation,
+        });
+      }
+      const initialMessage =
+        options.task || options.taskFile
+          ? await resolveTask(options)
+          : undefined;
+      if (initialMessage) {
+        addPresentedMessage(session, presenter, 'user', initialMessage);
+        await store.save(session);
+        await runExchange({
+          session,
+          store,
+          providers,
+          presenter,
+          tempDirectory,
+          instructions: await instructions(),
+          options,
+          signal: abortController.signal,
+          presentation,
+        });
+      }
+
+      while (!abortController.signal.aborted) {
+        const input = await terminal.prompt(
+          presentation.screenReader ? '\nYour message: ' : '\nYou > ',
+          abortController.signal,
+        );
+        if (terminalFailure) {
+          throw terminalFailure;
+        }
+        if (input !== null) {
+          resumeAfterSupplementalOutput();
+        }
+        const command = parseChatInput(input ?? '/pause');
+        if (command.kind === 'empty') {
+          continue;
+        }
+        if (command.kind === 'invalid') {
+          writeSupplemental(`${command.message}\n`);
+          continue;
+        }
+        if (command.kind === 'help') {
+          writeSupplemental(`\n${CHAT_HELP}`);
+          continue;
+        }
+        if (command.kind === 'status') {
+          if (await refreshProjectKind(session)) {
             await store.save(session);
-            terminal.write(
-              `\nChat saved. Resume with:\n  agent-bridge chat --resume ${session.id}\n`,
-            );
-            return;
           }
-          if (line === '.') {
-            break;
+          writeSupplemental(
+            `\n${chatStatus(session, presentation, activeUiMode())}\n`,
+          );
+          continue;
+        }
+        if (command.kind === 'history') {
+          writeSupplemental(`\n${recentHistory(session, command.count)}\n`);
+          continue;
+        }
+        if (command.kind === 'paste') {
+          writeSupplemental(
+            '\nPaste or type multiple lines. Enter a single "." line to send.\n',
+          );
+          const lines: string[] = [];
+          let characters = 0;
+          let tooLong = false;
+          while (true) {
+            const line = await terminal.prompt(
+              presentation.screenReader ? 'Next line: ' : '… ',
+              abortController.signal,
+            );
+            if (line === null) {
+              setPresentedStatus(session, presenter, 'paused');
+              await store.save(session);
+              presenter.stop();
+              terminal.write(
+                `\nChat saved. Resume with:\n  agent-bridge chat --resume ${session.id}\n`,
+              );
+              return;
+            }
+            if (line === '.') {
+              break;
+            }
+            if (tooLong) {
+              continue;
+            }
+            characters += line.length + (lines.length > 0 ? 1 : 0);
+            if (characters > MAX_USER_MESSAGE_CHARS) {
+              tooLong = true;
+              lines.length = 0;
+              terminal.write(
+                `Message exceeds ${MAX_USER_MESSAGE_CHARS.toLocaleString()} characters; discarding input until the "." line.\n`,
+              );
+              continue;
+            }
+            lines.push(line);
           }
           if (tooLong) {
             continue;
           }
-          characters += line.length + (lines.length > 0 ? 1 : 0);
-          if (characters > MAX_USER_MESSAGE_CHARS) {
-            tooLong = true;
-            lines.length = 0;
-            terminal.write(
-              `Message exceeds ${MAX_USER_MESSAGE_CHARS.toLocaleString()} characters; discarding input until the "." line.\n`,
-            );
+          const text = lines.join('\n').trim();
+          if (!text) {
+            terminal.write('No message sent.\n');
             continue;
           }
-          lines.push(line);
-        }
-        if (tooLong) {
-          continue;
-        }
-        const text = lines.join('\n').trim();
-        if (!text) {
-          terminal.write('No message sent.\n');
-          continue;
-        }
-        if (await refreshProjectKind(session)) {
+          resumeAfterSupplementalOutput();
+          if (await refreshProjectKind(session)) {
+            await store.save(session);
+          }
+          addPresentedMessage(session, presenter, 'user', text);
           await store.save(session);
-        }
-        addPresentedMessage(session, presenter, 'user', text);
-        await store.save(session);
-        await runExchange({
-          session,
-          store,
-          providers,
-          presenter,
-          tempDirectory,
-          instructions: await instructions(),
-          options,
-          signal: abortController.signal,
-          presentation,
-        });
-        continue;
-      }
-      if (command.kind === 'pause') {
-        setPresentedStatus(session, presenter, 'paused');
-        await store.save(session);
-        terminal.write(
-          `\nChat saved. Resume with:\n  agent-bridge chat --resume ${session.id}\n`,
-        );
-        return;
-      }
-      if (command.kind === 'done') {
-        setPresentedStatus(session, presenter, 'completed');
-        await store.save(session);
-        completed = true;
-        terminal.write(`\nChat ${session.id} completed.\n`);
-        return;
-      }
-      if (command.kind === 'message') {
-        if (await refreshProjectKind(session)) {
-          await store.save(session);
-        }
-        const addressedText =
-          command.target && command.target !== 'both'
-            ? `Addressed to ${agentLabel(command.target)}:\n${command.text}`
-            : command.text;
-        addPresentedMessage(session, presenter, 'user', addressedText);
-        await store.save(session);
-        await runExchange({
-          session,
-          store,
-          providers,
-          presenter,
-          tempDirectory,
-          instructions: await instructions(),
-          options,
-          signal: abortController.signal,
-          presentation,
-          participants:
-            command.target && command.target !== 'both'
-              ? [command.target]
-              : undefined,
-        });
-        continue;
-      }
-      if (command.kind === 'auto') {
-        if (!session.messages.some((message) => message.role === 'user')) {
-          terminal.write(
-            '\nSend a message first so the agents know what to discuss.\n',
-          );
-          continue;
-        }
-        if (await refreshProjectKind(session)) {
-          await store.save(session);
-        }
-        const rounds = command.rounds ?? session.maxAutoRounds;
-        let agreed = false;
-        for (let round = 1; round <= rounds; round += 1) {
-          terminal.write(`\nAutomatic exchange ${round}/${rounds}\n`);
-          agreed = await runExchange({
+          await runExchange({
             session,
             store,
             providers,
@@ -637,117 +665,213 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
             signal: abortController.signal,
             presentation,
           });
-          if (agreed) {
-            terminal.write('\nCodex and Claude agree on the current answer.\n');
-            break;
-          }
-        }
-        if (!agreed) {
-          terminal.write(
-            `\nAutomatic exchange limit reached; you remain in control.\n`,
-          );
-        }
-        continue;
-      }
-      if (command.kind === 'workflow') {
-        if (!session.messages.some((message) => message.role === 'user')) {
-          terminal.write(
-            '\nDescribe the task in a message before starting a workflow.\n',
-          );
           continue;
         }
-        if (await refreshProjectKind(session)) {
+        if (command.kind === 'pause') {
+          setPresentedStatus(session, presenter, 'paused');
           await store.save(session);
-        }
-        if (session.projectKind === 'directory' && command.mode !== 'review') {
+          presenter.stop();
           terminal.write(
-            '\nSafe editing requires Git. Initialize this folder with `git init`, or use /review.\n',
+            `\nChat saved. Resume with:\n  agent-bridge chat --resume ${session.id}\n`,
+          );
+          return;
+        }
+        if (command.kind === 'done') {
+          setPresentedStatus(session, presenter, 'completed');
+          await store.save(session);
+          completed = true;
+          presenter.stop();
+          terminal.write(`\nChat ${session.id} completed.\n`);
+          return;
+        }
+        if (command.kind === 'message') {
+          if (await refreshProjectKind(session)) {
+            await store.save(session);
+          }
+          const addressedText =
+            command.target && command.target !== 'both'
+              ? `Addressed to ${agentLabel(command.target)}:\n${command.text}`
+              : command.text;
+          addPresentedMessage(session, presenter, 'user', addressedText);
+          await store.save(session);
+          await runExchange({
+            session,
+            store,
+            providers,
+            presenter,
+            tempDirectory,
+            instructions: await instructions(),
+            options,
+            signal: abortController.signal,
+            presentation,
+            participants:
+              command.target && command.target !== 'both'
+                ? [command.target]
+                : undefined,
+          });
+          continue;
+        }
+        if (command.kind === 'auto') {
+          if (!session.messages.some((message) => message.role === 'user')) {
+            writeSupplemental(
+              '\nSend a message first so the agents know what to discuss.\n',
+            );
+            continue;
+          }
+          if (await refreshProjectKind(session)) {
+            await store.save(session);
+          }
+          const rounds = command.rounds ?? session.maxAutoRounds;
+          let agreed = false;
+          for (let round = 1; round <= rounds; round += 1) {
+            terminal.write(`\nAutomatic exchange ${round}/${rounds}\n`);
+            agreed = await runExchange({
+              session,
+              store,
+              providers,
+              presenter,
+              tempDirectory,
+              instructions: await instructions(),
+              options,
+              signal: abortController.signal,
+              presentation,
+            });
+            if (agreed) {
+              break;
+            }
+          }
+          writeSupplemental(
+            agreed
+              ? '\nCodex and Claude agree on the current answer.\n'
+              : '\nAutomatic exchange limit reached; you remain in control.\n',
           );
           continue;
         }
-        const startedAt = new Date().toISOString();
-        terminal.write(
-          `\nStarting ${command.mode} workflow. The existing Git isolation and verification rules apply.\n`,
-        );
-        terminal.pause();
-        let exitCode = 1;
-        let launchError: string | undefined;
-        try {
-          exitCode = await launchWorkflow({
+        if (command.kind === 'workflow') {
+          if (!session.messages.some((message) => message.role === 'user')) {
+            writeSupplemental(
+              '\nDescribe the task in a message before starting a workflow.\n',
+            );
+            continue;
+          }
+          if (await refreshProjectKind(session)) {
+            await store.save(session);
+          }
+          if (
+            session.projectKind === 'directory' &&
+            command.mode !== 'review'
+          ) {
+            writeSupplemental(
+              '\nSafe editing requires Git. Initialize this folder with `git init`, or use /review.\n',
+            );
+            continue;
+          }
+          const startedAt = new Date().toISOString();
+          presenter.suspend();
+          terminal.write(
+            `\nStarting ${command.mode} workflow. The existing Git isolation and verification rules apply.\n`,
+          );
+          terminal.pause();
+          let exitCode = 1;
+          let launchError: string | undefined;
+          try {
+            exitCode = await launchWorkflow({
+              mode: command.mode,
+              firstAgent: command.firstAgent,
+              task: buildChatWorkflowTask(
+                session,
+                command.mode,
+                command.firstAgent,
+              ),
+              projectRoot: session.projectRoot,
+              options: {
+                ...options,
+                maxRounds: session.maxAutoRounds,
+                retries: session.retries,
+                timeoutMinutes: session.timeoutMinutes,
+                codexModel: session.codexModel,
+                claudeModel: session.claudeModel,
+                codexEffort: session.codexEffort,
+                claudeEffort: session.claudeEffort,
+                noTranscript: session.noTranscript,
+              },
+            });
+          } catch (error) {
+            launchError = errorMessage(error);
+          } finally {
+            terminal.resume();
+            presenter.resume();
+          }
+          session.workflows.push({
+            sequence: session.workflows.length + 1,
+            startedAt,
+            completedAt: new Date().toISOString(),
             mode: command.mode,
             firstAgent: command.firstAgent,
-            task: buildChatWorkflowTask(
-              session,
-              command.mode,
-              command.firstAgent,
-            ),
-            projectRoot: session.projectRoot,
-            options: {
-              ...options,
-              maxRounds: session.maxAutoRounds,
-              retries: session.retries,
-              timeoutMinutes: session.timeoutMinutes,
-              codexModel: session.codexModel,
-              claudeModel: session.claudeModel,
-              codexEffort: session.codexEffort,
-              claudeEffort: session.claudeEffort,
-              noTranscript: session.noTranscript,
-            },
+            exitCode,
           });
-        } catch (error) {
-          launchError = errorMessage(error);
-        } finally {
-          terminal.resume();
+          addPresentedMessage(
+            session,
+            presenter,
+            'system',
+            `${command.mode} workflow finished with exit code ${exitCode}${
+              launchError ? `: ${launchError}` : ''
+            }. The next exchange should inspect the current project state before drawing conclusions.`,
+          );
+          await store.save(session);
+          writeSupplemental(
+            exitCode === 0 && !launchError
+              ? '\nWorkflow finished. You can continue the conversation.\n'
+              : `\nWorkflow did not complete successfully${
+                  launchError ? `: ${launchError}` : ` (exit ${exitCode})`
+                }. The chat is still active.\n`,
+          );
         }
-        session.workflows.push({
-          sequence: session.workflows.length + 1,
-          startedAt,
-          completedAt: new Date().toISOString(),
-          mode: command.mode,
-          firstAgent: command.firstAgent,
-          exitCode,
-        });
-        addPresentedMessage(
-          session,
-          presenter,
-          'system',
-          `${command.mode} workflow finished with exit code ${exitCode}${
-            launchError ? `: ${launchError}` : ''
-          }. The next exchange should inspect the current project state before drawing conclusions.`,
-        );
-        await store.save(session);
+      }
+      throw new ProcessAbortError('Interactive chat interrupted');
+    } catch (error) {
+      if (terminalFailure) {
+        throw terminalFailure;
+      }
+      if (
+        abortController.signal.aborted ||
+        error instanceof ProcessAbortError
+      ) {
+        setPresentedStatus(session, presenter, 'paused');
+        await store.save(session).catch(() => {});
+        presenter.stop();
         terminal.write(
-          exitCode === 0 && !launchError
-            ? '\nWorkflow finished. You can continue the conversation.\n'
-            : `\nWorkflow did not complete successfully${
-                launchError ? `: ${launchError}` : ` (exit ${exitCode})`
-              }. The chat is still active.\n`,
+          `\nChat paused safely. Resume with:\n  agent-bridge chat --resume ${session.id}\n`,
         );
+        return;
+      }
+      throw error;
+    } finally {
+      process.removeListener('SIGINT', abort);
+      process.removeListener('SIGTERM', abort);
+      process.removeListener('SIGHUP', abort);
+      process.stdout.removeListener('resize', redraw);
+      try {
+        presenter.stop();
+      } finally {
+        try {
+          if (lock && !completed && session.status === 'active') {
+            setPresentedStatus(session, presenter, 'paused');
+            await store.save(session).catch(() => {});
+          }
+          if (lock && completed && session.noTranscript) {
+            await store.delete(session.id);
+          }
+        } finally {
+          try {
+            await lock?.release();
+          } finally {
+            await rm(tempDirectory, { recursive: true, force: true });
+          }
+        }
       }
     }
-    throw new ProcessAbortError('Interactive chat interrupted');
-  } catch (error) {
-    if (abortController.signal.aborted || error instanceof ProcessAbortError) {
-      setPresentedStatus(session, presenter, 'paused');
-      await store.save(session).catch(() => {});
-      terminal.write(
-        `\nChat paused safely. Resume with:\n  agent-bridge chat --resume ${session.id}\n`,
-      );
-      return;
-    }
-    throw error;
   } finally {
-    process.removeListener('SIGINT', abort);
-    process.removeListener('SIGTERM', abort);
-    if (!completed && session.status === 'active') {
-      setPresentedStatus(session, presenter, 'paused');
-      await store.save(session).catch(() => {});
-    }
-    if (completed && session.noTranscript) {
-      await store.delete(session.id);
-    }
-    await lock?.release();
     terminal.close();
-    await rm(tempDirectory, { recursive: true, force: true });
   }
 }

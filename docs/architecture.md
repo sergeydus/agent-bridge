@@ -22,7 +22,8 @@ bin/agent-bridge.mjs
   └─ CLI composition (cli.ts)
       ├─ options + wizard ───────── options.ts, wizard.ts
       ├─ terminal presentation ──── presentation-model.ts,
-      │                           presentation.ts, ui.ts
+      │                           presentation.ts, enhanced-terminal.ts,
+      │                           terminal-capabilities.ts, ui.ts
       ├─ interactive chat ──────── chat.ts, chat-input.ts,
       │                           chat-state.ts, chat-workflow.ts
       ├─ task + review evidence ── task.ts
@@ -62,6 +63,16 @@ renderer-neutral view model. The current plain renderer consumes those same
 events to preserve append-only and screen-reader output. The model is bounded,
 contains only presentation-safe state, and has no authority over persistence,
 permissions, workflow transitions, or convergence.
+
+The enhanced renderer owns only alternate-screen presentation. Readline keeps
+input ownership until the later enhanced-input phase. Capability resolution is
+deterministic and process-free; screen-reader mode and unsupported terminals
+select the complete plain renderer. The presentation controller suspends the
+enhanced renderer before child workflows inherit the terminal. It also contains
+enhanced drawing failures: after successful terminal restoration, it switches
+to the plain renderer over the same authoritative view model. Supplemental
+append-only command output temporarily uses the normal screen instead of
+scrolling the full-screen frame.
 
 Provider stdout follows two paths. Normalized safe events feed presentation
 for live progress, while a separate schema-constrained final response feeds

@@ -11,6 +11,65 @@ export interface ProcessResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  stdoutTruncated?: boolean;
+  stderrTruncated?: boolean;
+}
+
+const TRUNCATION_MARKER = '\n…[output truncated]…\n';
+
+class OutputCapture {
+  private complete = '';
+  private readonly enabled: boolean;
+  private head = '';
+  private readonly limit?: number;
+  private tail = '';
+  private wasTruncated = false;
+
+  constructor(enabled: boolean, limit?: number) {
+    this.enabled = enabled;
+    this.limit = limit;
+  }
+
+  append(chunk: string): void {
+    if (!this.enabled || !chunk) {
+      return;
+    }
+    if (this.limit === undefined) {
+      this.complete += chunk;
+      return;
+    }
+    const retainedCharacters = Math.max(
+      0,
+      this.limit - TRUNCATION_MARKER.length,
+    );
+    const headLimit = Math.ceil(retainedCharacters / 2);
+    const tailLimit = Math.floor(retainedCharacters / 2);
+    if (!this.wasTruncated) {
+      const combined = this.complete + chunk;
+      if (combined.length <= this.limit) {
+        this.complete = combined;
+        return;
+      }
+      this.wasTruncated = true;
+      this.head = combined.slice(0, headLimit);
+      this.tail = tailLimit > 0 ? combined.slice(-tailLimit) : '';
+      this.complete = '';
+      return;
+    }
+    if (tailLimit > 0) {
+      this.tail = `${this.tail}${chunk}`.slice(-tailLimit);
+    }
+  }
+
+  get truncated(): boolean {
+    return this.wasTruncated;
+  }
+
+  text(): string {
+    return this.wasTruncated
+      ? `${this.head}${TRUNCATION_MARKER}${this.tail}`
+      : this.complete;
+  }
 }
 
 export function runProcess(
@@ -26,6 +85,8 @@ export function runProcess(
     env = process.env,
     killGraceMs = 2_000,
     maxOutputChars,
+    truncateOutputChars,
+    captureStdout = true,
     onStdoutChunk,
   }: {
     cwd?: string;
@@ -37,6 +98,8 @@ export function runProcess(
     env?: NodeJS.ProcessEnv;
     killGraceMs?: number;
     maxOutputChars?: number;
+    truncateOutputChars?: number;
+    captureStdout?: boolean;
     onStdoutChunk?: (chunk: string) => void;
   } = {},
 ): Promise<ProcessResult> {
@@ -55,8 +118,10 @@ export function runProcess(
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    let stdout = '';
-    let stderr = '';
+    const stdoutCapture = new OutputCapture(captureStdout, truncateOutputChars);
+    const stderrCapture = new OutputCapture(true, truncateOutputChars);
+    let stdoutCharacters = 0;
+    let stderrCharacters = 0;
     let timedOut = false;
     let aborted = false;
     let exceededOutput: 'stdout' | 'stderr' | undefined;
@@ -151,17 +216,19 @@ export function runProcess(
       let acceptedChunk = chunk;
       if (
         maxOutputChars !== undefined &&
-        stdout.length + chunk.length > maxOutputChars
+        stdoutCharacters + chunk.length > maxOutputChars
       ) {
         acceptedChunk = chunk.slice(
           0,
-          Math.max(0, maxOutputChars - stdout.length),
+          Math.max(0, maxOutputChars - stdoutCharacters),
         );
-        stdout += acceptedChunk;
+        stdoutCharacters += acceptedChunk.length;
+        stdoutCapture.append(acceptedChunk);
         exceededOutput ??= 'stdout';
         terminate();
       } else {
-        stdout += chunk;
+        stdoutCharacters += chunk.length;
+        stdoutCapture.append(chunk);
       }
       if (acceptedChunk && onStdoutChunk && !stdoutCallbackError) {
         try {
@@ -176,13 +243,19 @@ export function runProcess(
     child.stderr.on('data', (chunk: string) => {
       if (
         maxOutputChars !== undefined &&
-        stderr.length + chunk.length > maxOutputChars
+        stderrCharacters + chunk.length > maxOutputChars
       ) {
-        stderr += chunk.slice(0, Math.max(0, maxOutputChars - stderr.length));
+        const acceptedChunk = chunk.slice(
+          0,
+          Math.max(0, maxOutputChars - stderrCharacters),
+        );
+        stderrCharacters += acceptedChunk.length;
+        stderrCapture.append(acceptedChunk);
         exceededOutput ??= 'stderr';
         terminate();
       } else {
-        stderr += chunk;
+        stderrCharacters += chunk.length;
+        stderrCapture.append(chunk);
       }
       if (inheritStderr) {
         process.stderr.write(chunk);
@@ -219,6 +292,8 @@ export function runProcess(
         return;
       }
       const exitCode = code ?? -1;
+      const stdout = stdoutCapture.text();
+      const stderr = stderrCapture.text();
       if (!allowedExitCodes.includes(exitCode)) {
         rejectOnce(
           new Error(
@@ -230,7 +305,13 @@ export function runProcess(
         return;
       }
 
-      resolveOnce({ stdout, stderr, exitCode });
+      resolveOnce({
+        stdout,
+        stderr,
+        exitCode,
+        stdoutTruncated: stdoutCapture.truncated,
+        stderrTruncated: stderrCapture.truncated,
+      });
     });
 
     child.stdin.on('error', () => {

@@ -26,6 +26,7 @@ export const CHAT_HELP = `Interactive chat commands
 export interface ChatTerminal {
   prompt(label: string, signal?: AbortSignal): Promise<string | null>;
   write(text: string): void;
+  redrawPrompt(): void;
   pause(): void;
   resume(): void;
   close(): void;
@@ -249,14 +250,16 @@ export function createChatTerminal(): ChatTerminal {
 
   return {
     prompt(label, signal) {
-      process.stdout.write(label);
       const queued = queuedLines.shift();
       if (queued !== undefined) {
+        process.stdout.write(label);
         return Promise.resolve(queued);
       }
       if (closed || signal?.aborted) {
         return Promise.resolve(null);
       }
+      interface_.setPrompt(label);
+      interface_.prompt();
       return new Promise<string | null>((resolvePromise) => {
         const onAbort = (): void => {
           if (pending?.resolve !== resolvePromise) {
@@ -275,6 +278,11 @@ export function createChatTerminal(): ChatTerminal {
     },
     write(text) {
       process.stdout.write(text);
+    },
+    redrawPrompt() {
+      if (pending) {
+        interface_.prompt(true);
+      }
     },
     pause() {
       interface_.pause();

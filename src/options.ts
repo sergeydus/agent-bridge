@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 
 import type { AgentName, ReasoningEffort } from './core.ts';
 import { getAppPaths } from './paths.ts';
+import type { UiMode } from './terminal-capabilities.ts';
 
 export interface BridgeOptions {
   chat: boolean;
@@ -24,6 +25,7 @@ export interface BridgeOptions {
   noTranscript: boolean;
   screenReader: boolean;
   noColor: boolean;
+  ui: UiMode;
   trustProjectConfig: boolean;
   doctor: boolean;
   wizard: boolean;
@@ -86,6 +88,7 @@ Options:
   --no-transcript         Remove completed run or chat transcripts
   --screen-reader         Use append-only, screen-reader-friendly presentation
   --no-color              Disable Agent Bridge color output
+  --ui <mode>             Chat interface: plain, enhanced, or auto
   --project-config <path> Use a specific .agent-bridge.json configuration
   --trust-project-config  Run verification commands from project configuration
   --list-runs             List saved runs and exit
@@ -129,6 +132,7 @@ export function parseArgs(
     noTranscript: false,
     screenReader: false,
     noColor: false,
+    ui: 'plain',
     trustProjectConfig: false,
     doctor: false,
     wizard: false,
@@ -189,6 +193,9 @@ export function parseArgs(
     },
     'project-config': (value) => {
       options.projectConfigPath = value;
+    },
+    ui: (value) => {
+      options.ui = value as UiMode;
     },
     'delete-run': (value) => {
       options.deleteRun = value;
@@ -352,6 +359,12 @@ export function parseArgs(
   }
   if (options.claudeEffort && !validEfforts.includes(options.claudeEffort)) {
     throw new Error('--claude-effort must be low, medium, high, xhigh, or max');
+  }
+  if (!['plain', 'enhanced', 'auto'].includes(options.ui)) {
+    throw new Error('--ui must be plain, enhanced, or auto');
+  }
+  if (!options.chat && options.ui !== 'plain') {
+    throw new Error('--ui enhanced and --ui auto currently require chat mode');
   }
   for (const [flag, model] of [
     ['--codex-model', options.codexModel],

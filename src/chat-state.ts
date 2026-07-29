@@ -1,15 +1,4 @@
-import { randomUUID } from 'node:crypto';
-import {
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  stat,
-  unlink,
-  writeFile,
-} from 'node:fs/promises';
+import { readdir, rm } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 
 import {
@@ -19,6 +8,9 @@ import {
   type ProjectKind,
   type ReasoningEffort,
 } from './core.ts';
+import { acquireFileLock, FileLock } from './file-lock.ts';
+import { readFilePrefixBytes, writePrivateFileAtomic } from './filesystem.ts';
+import { sanitizeTerminalText } from './terminal-text.ts';
 
 const MAX_CHAT_FILE_BYTES = 50_000_000;
 const MAX_CHAT_MESSAGES = 10_000;
@@ -74,6 +66,8 @@ export interface ChatSession {
   messages: ChatMessage[];
   workflows: ChatWorkflowEvent[];
 }
+
+export { FileLock as ChatLock };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -317,30 +311,9 @@ export function formatChatList(sessions: ChatSession[]): string {
       (session) =>
         `${session.id.padEnd(42)} ${session.status.padEnd(11)} ${String(
           session.messages.length,
-        ).padEnd(9)} ${session.projectRoot}`,
+        ).padEnd(9)} ${sanitizeTerminalText(session.projectRoot)}`,
     ),
   ].join('\n');
-}
-
-export class ChatLock {
-  #path: string;
-  #released = false;
-
-  constructor(path: string) {
-    this.#path = path;
-  }
-
-  async release(): Promise<void> {
-    if (this.#released) {
-      return;
-    }
-    this.#released = true;
-    await unlink(this.#path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== 'ENOENT') {
-        throw error;
-      }
-    });
-  }
 }
 
 export class ChatSessionStore {
@@ -376,58 +349,11 @@ export class ChatSessionStore {
     return join(this.#directory, `${id}.lock`);
   }
 
-  async acquireLock(id: string): Promise<ChatLock> {
-    await mkdir(this.#directory, { recursive: true, mode: 0o700 });
-    const path = this.lockPathFor(id);
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      try {
-        const handle = await open(path, 'wx', 0o600);
-        await handle.writeFile(
-          `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`,
-        );
-        await handle.close();
-        return new ChatLock(path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-          throw error;
-        }
-        if (attempt === 0 && (await this.#removeStaleLock(path))) {
-          continue;
-        }
-        throw new Error(
-          `Chat ${id} is already open in another Agent Bridge process.`,
-          { cause: error },
-        );
-      }
-    }
-    throw new Error(`Unable to lock chat ${id}.`);
-  }
-
-  async #removeStaleLock(path: string): Promise<boolean> {
-    try {
-      const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
-      const pid =
-        isRecord(parsed) && Number.isInteger(parsed.pid)
-          ? Number(parsed.pid)
-          : undefined;
-      if (!pid || pid <= 0) {
-        await unlink(path);
-        return true;
-      }
-      try {
-        process.kill(pid, 0);
-        return false;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ESRCH') {
-          await unlink(path);
-          return true;
-        }
-        return false;
-      }
-    } catch {
-      await unlink(path).catch(() => {});
-      return true;
-    }
+  acquireLock(id: string): Promise<FileLock> {
+    return acquireFileLock({
+      path: this.lockPathFor(id),
+      activeMessage: `Chat ${id} is already open in another Agent Bridge process.`,
+    });
   }
 
   async save(session: ChatSession): Promise<void> {
@@ -444,18 +370,14 @@ export class ChatSessionStore {
         'This chat reached the 50 MB local history limit. Complete it and start a new chat.',
       );
     }
-    await mkdir(this.#directory, { recursive: true, mode: 0o700 });
     const destination = this.pathFor(session.id);
-    const temporary = `${destination}.${randomUUID()}.tmp`;
-    await writeFile(temporary, serialized, { mode: 0o600 });
-    await rename(temporary, destination);
+    await writePrivateFileAtomic(destination, serialized);
     if (session.noTranscript) {
       await rm(this.transcriptPathFor(session.id), { force: true });
     } else {
-      await writeFile(
+      await writePrivateFileAtomic(
         this.transcriptPathFor(session.id),
         formatChatTranscript(persisted),
-        { mode: 0o600 },
       );
     }
     Object.assign(session, persisted);
@@ -463,10 +385,22 @@ export class ChatSessionStore {
 
   async load(id: string): Promise<ChatSession> {
     const path = this.pathFor(id);
-    if ((await stat(path)).size > MAX_CHAT_FILE_BYTES) {
+    let contents: Buffer;
+    try {
+      contents = await readFilePrefixBytes({
+        path,
+        maxBytes: MAX_CHAT_FILE_BYTES + 1,
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error(`Saved chat not found: ${id}`, { cause: error });
+      }
+      throw error;
+    }
+    if (contents.length > MAX_CHAT_FILE_BYTES) {
       throw new Error(`Saved chat is larger than 50 MB: ${id}`);
     }
-    const parsed: unknown = JSON.parse(await readFile(path, 'utf8'));
+    const parsed: unknown = JSON.parse(contents.toString('utf8'));
     if (!isChatSession(parsed)) {
       throw new Error(`Invalid saved chat: ${id}`);
     }

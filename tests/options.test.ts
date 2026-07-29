@@ -117,4 +117,26 @@ test('parses accessible presentation and validates model names', () => {
       }),
     /without spaces/,
   );
+
+  const enhanced = parseArgs(['chat', '--ui', 'enhanced'], {
+    initialCwd: temporaryDirectory,
+    defaultOutput: join(temporaryDirectory, 'runs'),
+  });
+  assert.equal(enhanced.ui, 'enhanced');
+  assert.throws(
+    () =>
+      parseArgs(['chat', '--ui', 'unknown'], {
+        initialCwd: temporaryDirectory,
+        defaultOutput: join(temporaryDirectory, 'runs'),
+      }),
+    /plain, enhanced, or auto/,
+  );
+  assert.throws(
+    () =>
+      parseArgs(['--ui', 'enhanced'], {
+        initialCwd: temporaryDirectory,
+        defaultOutput: join(temporaryDirectory, 'runs'),
+      }),
+    /require chat mode/,
+  );
 });

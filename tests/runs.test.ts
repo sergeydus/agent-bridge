@@ -72,7 +72,7 @@ test('deletes exact run artifacts while preserving editable workspaces', async (
       () => readFile(join(root, 'delete-me.preexisting.patch')),
       /ENOENT/,
     );
-    await assert.rejects(() => store.load('delete-me'), /ENOENT/);
+    await assert.rejects(() => store.load('delete-me'), /Saved run not found/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

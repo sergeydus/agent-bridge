@@ -6,6 +6,7 @@ import {
   pruneCompletedRuns,
 } from './runs.ts';
 import type { RunStateStore } from './state.ts';
+import { sanitizeTerminalText } from './terminal-text.ts';
 
 export async function handleRunManagement(
   options: BridgeOptions,
@@ -17,17 +18,35 @@ export async function handleRunManagement(
   }
   if (options.deleteRun) {
     const run = await store.load(options.deleteRun);
-    const result = await deleteRun({ run, store });
+    const lock = await store.acquireLock(run.id);
+    let result: Awaited<ReturnType<typeof deleteRun>>;
+    try {
+      result = await deleteRun({ run, store });
+    } finally {
+      await lock.release();
+    }
     console.log(`Deleted saved artifacts for ${run.id}.`);
     if (result.workspacePreserved) {
-      console.log(`Preserved editable workspace: ${result.workspacePreserved}`);
+      console.log(
+        `Preserved editable workspace: ${sanitizeTerminalText(
+          result.workspacePreserved,
+        )}`,
+      );
     }
     return true;
   }
   if (options.discardWorkspace) {
     const run = await store.load(options.discardWorkspace);
-    const removed = await discardRunWorkspace({ run, store });
-    console.log(`Discarded isolated workspace: ${removed}`);
+    const lock = await store.acquireLock(run.id);
+    let removed: string;
+    try {
+      removed = await discardRunWorkspace({ run, store });
+    } finally {
+      await lock.release();
+    }
+    console.log(
+      `Discarded isolated workspace: ${sanitizeTerminalText(removed)}`,
+    );
     return true;
   }
   if (options.pruneRunsDays !== undefined) {

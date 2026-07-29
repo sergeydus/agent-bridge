@@ -15,6 +15,7 @@ import {
   formatAgentResponse,
   formatAgentStarted,
   PresentationController,
+  type TerminalRenderer,
 } from '../src/presentation.ts';
 
 function message(sequence: number): PresentedMessage {
@@ -236,4 +237,104 @@ test('controller preserves plain streaming output while updating the model', () 
   assert.match(rendered, /Claude \[done\]\n/);
   assert.equal(controller.model.activity, undefined);
   assert.equal(controller.model.messages[0]?.text, 'Finished safely.');
+});
+
+test('controller restores the terminal and continues with the plain renderer after an enhanced rendering failure', () => {
+  const output: string[] = [];
+  let stopCalls = 0;
+  const failingRenderer: TerminalRenderer = {
+    start: () => '<enter-enhanced>',
+    render: () => {
+      throw new Error('layout failed');
+    },
+    redraw: () => '',
+    suspend: () => '',
+    resume: () => '',
+    stop: () => {
+      stopCalls += 1;
+      return '<leave-enhanced>';
+    },
+  };
+  const preferences = { screenReader: false, color: false };
+  const controller = new PresentationController({
+    initialModel: initialModel(),
+    renderer: failingRenderer,
+    fallback: {
+      renderer: createPlainTerminalRenderer(preferences),
+      notice: '\nEnhanced terminal failed. Continuing in plain mode.\n',
+    },
+    write: (text) => output.push(text),
+  });
+
+  controller.start();
+  controller.dispatch({
+    type: 'agent-started',
+    agent: 'codex',
+    model: 'test-model',
+    startedAt: 0,
+  });
+  controller.dispatch({
+    type: 'agent-response',
+    agent: 'codex',
+    message: {
+      sequence: 1,
+      createdAt: new Date(1_000).toISOString(),
+      role: 'codex',
+      text: 'Recovered response.',
+      decision: 'done',
+    },
+  });
+
+  assert.equal(controller.usingFallback, true);
+  assert.equal(stopCalls, 1);
+  assert.equal(output[0], '<enter-enhanced>');
+  assert.match(
+    output.join(''),
+    /<leave-enhanced>\nEnhanced terminal failed\. Continuing in plain mode\./,
+  );
+  assert.match(output.join(''), /Codex · model test-model · thinking/);
+  assert.match(output.join(''), /Recovered response\./);
+});
+
+test('controller treats failed terminal restoration as fatal', () => {
+  const renderError = new Error('layout failed');
+  const restorationError = new Error('restoration failed');
+  const renderer: TerminalRenderer = {
+    start: () => '',
+    render: () => {
+      throw renderError;
+    },
+    redraw: () => '',
+    suspend: () => '',
+    resume: () => '',
+    stop: () => {
+      throw restorationError;
+    },
+  };
+  const controller = new PresentationController({
+    initialModel: initialModel(),
+    renderer,
+    fallback: {
+      renderer: createPlainTerminalRenderer({
+        screenReader: false,
+        color: false,
+      }),
+      notice: 'fallback',
+    },
+    write: () => {},
+  });
+
+  assert.throws(
+    () =>
+      controller.dispatch({
+        type: 'agent-started',
+        agent: 'codex',
+        startedAt: 0,
+      }),
+    (error) =>
+      error instanceof AggregateError &&
+      error.errors[0] === renderError &&
+      error.errors[1] === restorationError,
+  );
+  assert.equal(controller.usingFallback, false);
 });
