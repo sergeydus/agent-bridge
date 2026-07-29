@@ -29,7 +29,9 @@ location of Agent Bridge itself.
 - `chat-state.ts` owns chat validation, locking, persistence, and transcripts.
 - `wizard.ts` owns novice-facing interactive setup.
 - `options.ts` owns CLI types, help, parsing, and validation.
-- `presentation.ts` owns accessible chat formatting and color resolution.
+- `presentation-model.ts` owns bounded, renderer-neutral terminal state.
+- `presentation.ts` owns accessible plain rendering, presentation control, and
+  color resolution.
 - `orchestrator.ts` owns the provider-independent state machine.
 - `core.ts` contains shared workflow types and deterministic helpers.
 - `response.ts` owns structured response schemas and parsing.

@@ -146,6 +146,16 @@ npm run doctor
 Agent Bridge has no production npm dependencies. `npm install` is needed only
 to develop, test, or compile it.
 
+## Roadmap
+
+Phase 3 is specified as an optional enhanced interactive terminal with a live
+conversation view, workflow status, discoverable controls, responsive layouts,
+and a complete plain/screen-reader fallback. It is a presentation layer over
+the existing state machines and does not change editing permissions or
+agreement rules.
+
+See [the Phase 3 enhanced interactive terminal specification](docs/phase-3-interactive-terminal.md).
+
 ## What happens during a collaborative run
 
 1. Codex and Claude independently inspect the task and discuss a plan.

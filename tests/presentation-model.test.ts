@@ -1,0 +1,239 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import {
+  MAX_PRESENTED_LIVE_TEXT_CHARS,
+  MAX_PRESENTED_MESSAGES,
+  createTerminalViewModel,
+  reducePresentationModel,
+  type PresentedMessage,
+} from '../src/presentation-model.ts';
+import {
+  createProviderEventPresenter,
+  createPlainTerminalRenderer,
+  formatAgentHeartbeat,
+  formatAgentResponse,
+  formatAgentStarted,
+  PresentationController,
+} from '../src/presentation.ts';
+
+function message(sequence: number): PresentedMessage {
+  return {
+    sequence,
+    createdAt: new Date(sequence * 1000).toISOString(),
+    role: 'user',
+    text: `Message ${sequence}`,
+  };
+}
+
+function initialModel(messages: readonly PresentedMessage[] = []) {
+  return createTerminalViewModel({
+    session: {
+      id: 'chat-test',
+      projectLabel: 'example-project',
+      status: 'active',
+    },
+    messages,
+  });
+}
+
+test('creates a bounded renderer-neutral view of persisted chat state', () => {
+  const messages = Array.from(
+    { length: MAX_PRESENTED_MESSAGES + 5 },
+    (_, index) => message(index + 1),
+  );
+  const model = initialModel(messages);
+
+  assert.equal(model.messages.length, MAX_PRESENTED_MESSAGES);
+  assert.equal(model.messages[0]?.sequence, 6);
+  assert.equal(model.messages.at(-1)?.sequence, MAX_PRESENTED_MESSAGES + 5);
+  assert.deepEqual(model.session, {
+    id: 'chat-test',
+    projectLabel: 'example-project',
+    status: 'active',
+  });
+  assert.equal(model.activity, undefined);
+});
+
+test('reduces safe provider activity without making it authoritative', () => {
+  let model = initialModel([message(1)]);
+  model = reducePresentationModel(model, {
+    type: 'agent-started',
+    agent: 'codex',
+    model: 'test-model',
+    startedAt: 1_000,
+  });
+  model = reducePresentationModel(model, {
+    type: 'provider-event',
+    agent: 'codex',
+    event: { type: 'activity', message: 'searching the project' },
+  });
+  model = reducePresentationModel(model, {
+    type: 'provider-event',
+    agent: 'codex',
+    event: {
+      type: 'text-delta',
+      text: 'x'.repeat(MAX_PRESENTED_LIVE_TEXT_CHARS + 10),
+    },
+  });
+  model = reducePresentationModel(model, {
+    type: 'agent-heartbeat',
+    agent: 'codex',
+    now: 61_000,
+  });
+  model = reducePresentationModel(model, {
+    type: 'provider-event',
+    agent: 'codex',
+    event: {
+      type: 'usage',
+      inputTokens: 12,
+      cachedInputTokens: 5,
+      outputTokens: 7,
+    },
+  });
+
+  assert.equal(model.messages.length, 1);
+  assert.equal(model.activity?.agent, 'codex');
+  assert.equal(model.activity?.model, 'test-model');
+  assert.equal(model.activity?.message, 'searching the project');
+  assert.equal(model.activity?.liveText.length, MAX_PRESENTED_LIVE_TEXT_CHARS);
+  assert.equal(model.activity?.liveTextTruncated, true);
+  assert.equal(model.activity?.observedAt, 61_000);
+  assert.deepEqual(model.activity?.usage, {
+    inputTokens: 12,
+    cachedInputTokens: 5,
+    outputTokens: 7,
+  });
+
+  model = reducePresentationModel(model, {
+    type: 'agent-retry',
+    agent: 'codex',
+    attempt: 1,
+    retryLimit: 2,
+  });
+  assert.equal(model.activity?.state, 'retrying');
+  assert.equal(model.activity?.retryAttempt, 1);
+  assert.equal(model.activity?.retryLimit, 2);
+  assert.equal(model.activity?.liveText, '');
+  assert.equal(model.activity?.message, undefined);
+
+  model = reducePresentationModel(model, {
+    type: 'provider-event',
+    agent: 'codex',
+    event: { type: 'text-end' },
+  });
+  assert.equal(model.activity?.state, 'working');
+  assert.equal(model.activity?.liveTextComplete, true);
+
+  model = reducePresentationModel(model, {
+    type: 'agent-response',
+    agent: 'codex',
+    message: {
+      sequence: 2,
+      createdAt: new Date(2_000).toISOString(),
+      role: 'codex',
+      text: 'Authoritative final response.',
+      decision: 'done',
+    },
+  });
+  assert.equal(model.activity, undefined);
+  assert.equal(model.messages.length, 2);
+  assert.equal(model.messages.at(-1)?.decision, 'done');
+
+  model = reducePresentationModel(model, {
+    type: 'session-status',
+    status: 'completed',
+  });
+  assert.equal(model.session.status, 'completed');
+});
+
+test('controller preserves plain streaming output while updating the model', () => {
+  const output: string[] = [];
+  const preferences = {
+    screenReader: false,
+    color: false,
+  };
+  const controller = new PresentationController({
+    initialModel: initialModel(),
+    renderer: createPlainTerminalRenderer(preferences),
+    write: (text) => output.push(text),
+  });
+
+  controller.dispatch({
+    type: 'agent-started',
+    agent: 'claude',
+    model: 'test-model',
+    startedAt: 0,
+  });
+  controller.dispatch({
+    type: 'provider-event',
+    agent: 'claude',
+    event: { type: 'text-delta', text: 'Checking files.' },
+  });
+  controller.dispatch({
+    type: 'agent-heartbeat',
+    agent: 'claude',
+    now: 60_000,
+  });
+  controller.dispatch({
+    type: 'provider-event',
+    agent: 'claude',
+    event: { type: 'activity', message: 'searching the project' },
+  });
+  controller.dispatch({ type: 'agent-stream-finished', agent: 'claude' });
+  controller.dispatch({
+    type: 'agent-response',
+    agent: 'claude',
+    message: {
+      sequence: 1,
+      createdAt: new Date(60_000).toISOString(),
+      role: 'claude',
+      text: 'Finished safely.',
+      decision: 'done',
+    },
+  });
+
+  const rendered = output.join('');
+  const legacyStream = createProviderEventPresenter({
+    agent: 'claude',
+    preferences,
+    streamText: true,
+  });
+  const expected = [
+    formatAgentStarted({
+      agent: 'claude',
+      model: 'test-model',
+      preferences,
+    }),
+    legacyStream.render({
+      type: 'text-delta',
+      text: 'Checking files.',
+    }),
+    legacyStream.beforeStatus(),
+    formatAgentHeartbeat({
+      agent: 'claude',
+      startedAt: 0,
+      now: 60_000,
+      preferences,
+    }),
+    legacyStream.render({
+      type: 'activity',
+      message: 'searching the project',
+    }),
+    legacyStream.finish(),
+    formatAgentResponse({
+      agent: 'claude',
+      decision: 'done',
+      text: 'Finished safely.',
+      preferences,
+    }),
+  ].join('');
+  assert.equal(rendered, expected);
+  assert.match(rendered, /Claude · model test-model · thinking/);
+  assert.match(rendered, /Claude · live update\nChecking files\./);
+  assert.match(rendered, /Claude is still working · 1m 0s/);
+  assert.match(rendered, /Claude · searching the project/);
+  assert.match(rendered, /Claude \[done\]\n/);
+  assert.equal(controller.model.activity, undefined);
+  assert.equal(controller.model.messages[0]?.text, 'Finished safely.');
+});

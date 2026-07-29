@@ -1,6 +1,6 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 
 import {
   CHAT_HELP,
@@ -27,13 +27,16 @@ import type { BridgeOptions } from './options.ts';
 import type { AppPaths } from './paths.ts';
 import {
   agentLabel,
-  createProviderEventPresenter,
-  formatAgentHeartbeat,
-  formatAgentResponse,
-  formatAgentStarted,
+  createPlainTerminalRenderer,
+  PresentationController,
   resolvePresentation,
   type PresentationPreferences,
 } from './presentation.ts';
+import {
+  MAX_PRESENTED_MESSAGES,
+  createTerminalViewModel,
+  type PresentedMessage,
+} from './presentation-model.ts';
 import { ProcessAbortError } from './process.ts';
 import { resolveProject } from './project.ts';
 import { interactiveChatPrompt } from './prompts.ts';
@@ -63,6 +66,59 @@ function addMessage(
   };
   session.messages.push(message);
   return message;
+}
+
+function presentedMessage(message: ChatMessage): PresentedMessage {
+  return {
+    sequence: message.sequence,
+    createdAt: message.createdAt,
+    role: message.role,
+    text: message.text,
+    decision: message.decision,
+  };
+}
+
+function createChatPresentation(
+  session: ChatSession,
+  preferences: PresentationPreferences,
+  terminal: ChatTerminal,
+): PresentationController {
+  return new PresentationController({
+    initialModel: createTerminalViewModel({
+      session: {
+        id: session.id,
+        projectLabel: basename(session.projectRoot) || session.projectRoot,
+        status: session.status,
+      },
+      messages: session.messages
+        .slice(-MAX_PRESENTED_MESSAGES)
+        .map(presentedMessage),
+    }),
+    renderer: createPlainTerminalRenderer(preferences),
+    write: (text) => terminal.write(text),
+  });
+}
+
+function addPresentedMessage(
+  session: ChatSession,
+  presenter: PresentationController,
+  role: 'user' | 'system',
+  text: string,
+): void {
+  const message = addMessage(session, role, text);
+  presenter.dispatch({
+    type: 'message-added',
+    message: presentedMessage(message),
+  });
+}
+
+function setPresentedStatus(
+  session: ChatSession,
+  presenter: PresentationController,
+  status: ChatSession['status'],
+): void {
+  session.status = status;
+  presenter.dispatch({ type: 'session-status', status });
 }
 
 function recentHistory(session: ChatSession, count: number): string {
@@ -130,7 +186,7 @@ async function runExchange({
   session,
   store,
   providers,
-  terminal,
+  presenter,
   tempDirectory,
   instructions,
   options,
@@ -141,7 +197,7 @@ async function runExchange({
   session: ChatSession;
   store: ChatSessionStore;
   providers: ProviderMap;
-  terminal: ChatTerminal;
+  presenter: PresentationController;
   tempDirectory: string;
   instructions: string;
   options: BridgeOptions;
@@ -167,23 +223,18 @@ async function runExchange({
   for (const agent of agents) {
     const startedAt = Date.now();
     const model = agent === 'codex' ? session.codexModel : session.claudeModel;
-    terminal.write(
-      formatAgentStarted({ agent, model, preferences: presentation }),
-    );
-    const eventPresenter = createProviderEventPresenter({
+    presenter.dispatch({
+      type: 'agent-started',
       agent,
-      preferences: presentation,
-      streamText: !presentation.screenReader,
+      model,
+      startedAt,
     });
     const heartbeat = setInterval(() => {
-      terminal.write(eventPresenter.beforeStatus());
-      terminal.write(
-        formatAgentHeartbeat({
-          agent,
-          startedAt,
-          preferences: presentation,
-        }),
-      );
+      presenter.dispatch({
+        type: 'agent-heartbeat',
+        agent,
+        now: Date.now(),
+      });
     }, 30_000);
     heartbeat.unref();
     try {
@@ -212,19 +263,22 @@ async function runExchange({
               agent === 'codex' ? session.codexEffort : session.claudeEffort,
             screenReader: presentation.screenReader,
             signal,
-            onEvent: (event) => terminal.write(eventPresenter.render(event)),
+            onEvent: (event) =>
+              presenter.dispatch({ type: 'provider-event', agent, event }),
           },
           retries: session.retries,
           onRetry: (attempt) => {
-            terminal.write(eventPresenter.reset());
-            terminal.write(
-              `  Temporary ${agentLabel(agent)} failure; retrying (${attempt}/${session.retries})…\n`,
-            );
+            presenter.dispatch({
+              type: 'agent-retry',
+              agent,
+              attempt,
+              retryLimit: session.retries,
+            });
           },
         });
-        terminal.write(eventPresenter.finish());
+        presenter.dispatch({ type: 'agent-stream-finished', agent });
       } catch (error) {
-        terminal.write(eventPresenter.reset());
+        presenter.dispatch({ type: 'agent-failed', agent });
         throw error;
       }
       const message = addMessage(
@@ -245,14 +299,11 @@ async function runExchange({
         session.nextFirstAgent = otherAgent(first);
       }
       await store.save(session);
-      terminal.write(
-        formatAgentResponse({
-          agent,
-          decision: response.decision,
-          text: response.text,
-          preferences: presentation,
-        }),
-      );
+      presenter.dispatch({
+        type: 'agent-response',
+        agent,
+        message: presentedMessage(message),
+      });
     } finally {
       clearInterval(heartbeat);
     }
@@ -363,6 +414,7 @@ export async function runInteractiveChat({
     screenReader: options.screenReader,
     noColor: options.noColor,
   });
+  const presenter = createChatPresentation(session, presentation, terminal);
 
   let lock: ChatLock | undefined;
   const abortController = new AbortController();
@@ -401,7 +453,7 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
         session,
         store,
         providers,
-        terminal,
+        presenter,
         tempDirectory,
         instructions: await instructions(),
         options,
@@ -412,13 +464,13 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
     const initialMessage =
       options.task || options.taskFile ? await resolveTask(options) : undefined;
     if (initialMessage) {
-      addMessage(session, 'user', initialMessage);
+      addPresentedMessage(session, presenter, 'user', initialMessage);
       await store.save(session);
       await runExchange({
         session,
         store,
         providers,
-        terminal,
+        presenter,
         tempDirectory,
         instructions: await instructions(),
         options,
@@ -468,7 +520,7 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
             abortController.signal,
           );
           if (line === null) {
-            session.status = 'paused';
+            setPresentedStatus(session, presenter, 'paused');
             await store.save(session);
             terminal.write(
               `\nChat saved. Resume with:\n  agent-bridge chat --resume ${session.id}\n`,
@@ -503,13 +555,13 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
         if (await refreshProjectKind(session)) {
           await store.save(session);
         }
-        addMessage(session, 'user', text);
+        addPresentedMessage(session, presenter, 'user', text);
         await store.save(session);
         await runExchange({
           session,
           store,
           providers,
-          terminal,
+          presenter,
           tempDirectory,
           instructions: await instructions(),
           options,
@@ -519,7 +571,7 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
         continue;
       }
       if (command.kind === 'pause') {
-        session.status = 'paused';
+        setPresentedStatus(session, presenter, 'paused');
         await store.save(session);
         terminal.write(
           `\nChat saved. Resume with:\n  agent-bridge chat --resume ${session.id}\n`,
@@ -527,7 +579,7 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
         return;
       }
       if (command.kind === 'done') {
-        session.status = 'completed';
+        setPresentedStatus(session, presenter, 'completed');
         await store.save(session);
         completed = true;
         terminal.write(`\nChat ${session.id} completed.\n`);
@@ -541,13 +593,13 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
           command.target && command.target !== 'both'
             ? `Addressed to ${agentLabel(command.target)}:\n${command.text}`
             : command.text;
-        addMessage(session, 'user', addressedText);
+        addPresentedMessage(session, presenter, 'user', addressedText);
         await store.save(session);
         await runExchange({
           session,
           store,
           providers,
-          terminal,
+          presenter,
           tempDirectory,
           instructions: await instructions(),
           options,
@@ -578,7 +630,7 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
             session,
             store,
             providers,
-            terminal,
+            presenter,
             tempDirectory,
             instructions: await instructions(),
             options,
@@ -655,8 +707,9 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
           firstAgent: command.firstAgent,
           exitCode,
         });
-        addMessage(
+        addPresentedMessage(
           session,
+          presenter,
           'system',
           `${command.mode} workflow finished with exit code ${exitCode}${
             launchError ? `: ${launchError}` : ''
@@ -675,7 +728,7 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
     throw new ProcessAbortError('Interactive chat interrupted');
   } catch (error) {
     if (abortController.signal.aborted || error instanceof ProcessAbortError) {
-      session.status = 'paused';
+      setPresentedStatus(session, presenter, 'paused');
       await store.save(session).catch(() => {});
       terminal.write(
         `\nChat paused safely. Resume with:\n  agent-bridge chat --resume ${session.id}\n`,
@@ -687,7 +740,7 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
     process.removeListener('SIGINT', abort);
     process.removeListener('SIGTERM', abort);
     if (!completed && session.status === 'active') {
-      session.status = 'paused';
+      setPresentedStatus(session, presenter, 'paused');
       await store.save(session).catch(() => {});
     }
     if (completed && session.noTranscript) {
