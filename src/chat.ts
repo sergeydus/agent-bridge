@@ -27,6 +27,7 @@ import type { BridgeOptions } from './options.ts';
 import type { AppPaths } from './paths.ts';
 import {
   agentLabel,
+  createProviderEventPresenter,
   formatAgentHeartbeat,
   formatAgentResponse,
   formatAgentStarted,
@@ -169,7 +170,13 @@ async function runExchange({
     terminal.write(
       formatAgentStarted({ agent, model, preferences: presentation }),
     );
+    const eventPresenter = createProviderEventPresenter({
+      agent,
+      preferences: presentation,
+      streamText: !presentation.screenReader,
+    });
     const heartbeat = setInterval(() => {
+      terminal.write(eventPresenter.beforeStatus());
       terminal.write(
         formatAgentHeartbeat({
           agent,
@@ -180,36 +187,46 @@ async function runExchange({
     }, 30_000);
     heartbeat.unref();
     try {
-      const response = await runProviderWithRetry({
-        provider: providers[agent],
-        prompt: interactiveChatPrompt({
-          agent,
-          history: session.messages,
-          projectInstructions: instructions,
-          currentPeerResponse:
-            pairedExchange && agent === second ? firstMessage : undefined,
-        }),
-        options: {
-          cwd: session.projectRoot,
-          tempDirectory,
-          writeAccess: false,
-          verbose: options.verbose,
-          dryRun: options.dryRun,
-          timeoutMs: session.timeoutMinutes * 60_000,
-          responseKind: 'turn',
-          isGitRepository: session.projectKind === 'git',
-          model: agent === 'codex' ? session.codexModel : session.claudeModel,
-          effort:
-            agent === 'codex' ? session.codexEffort : session.claudeEffort,
-          screenReader: presentation.screenReader,
-          signal,
-        },
-        retries: session.retries,
-        onRetry: (attempt) =>
-          terminal.write(
-            `  Temporary ${agentLabel(agent)} failure; retrying (${attempt}/${session.retries})…\n`,
-          ),
-      });
+      let response: Awaited<ReturnType<typeof runProviderWithRetry>>;
+      try {
+        response = await runProviderWithRetry({
+          provider: providers[agent],
+          prompt: interactiveChatPrompt({
+            agent,
+            history: session.messages,
+            projectInstructions: instructions,
+            currentPeerResponse:
+              pairedExchange && agent === second ? firstMessage : undefined,
+          }),
+          options: {
+            cwd: session.projectRoot,
+            tempDirectory,
+            writeAccess: false,
+            verbose: options.verbose,
+            dryRun: options.dryRun,
+            timeoutMs: session.timeoutMinutes * 60_000,
+            responseKind: 'turn',
+            isGitRepository: session.projectKind === 'git',
+            model: agent === 'codex' ? session.codexModel : session.claudeModel,
+            effort:
+              agent === 'codex' ? session.codexEffort : session.claudeEffort,
+            screenReader: presentation.screenReader,
+            signal,
+            onEvent: (event) => terminal.write(eventPresenter.render(event)),
+          },
+          retries: session.retries,
+          onRetry: (attempt) => {
+            terminal.write(eventPresenter.reset());
+            terminal.write(
+              `  Temporary ${agentLabel(agent)} failure; retrying (${attempt}/${session.retries})…\n`,
+            );
+          },
+        });
+        terminal.write(eventPresenter.finish());
+      } catch (error) {
+        terminal.write(eventPresenter.reset());
+        throw error;
+      }
       const message = addMessage(
         session,
         agent,

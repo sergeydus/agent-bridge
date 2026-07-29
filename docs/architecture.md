@@ -32,6 +32,7 @@ bin/agent-bridge.mjs
       │    ├─ prompts ──────────── prompts.ts
       │    └─ provider contract ── response.ts
       ├─ provider adapters ─────── providers.ts
+      │    ├─ event normalization  provider-events.ts
       │    └─ process lifecycle ── process.ts
       ├─ workspace evidence ────── snapshot.ts
       ├─ Git isolation ─────────── git.ts, artifacts.ts
@@ -55,6 +56,11 @@ progress formatting lives outside provider orchestration, while provider
 adapters receive only the accessibility capability they need to construct
 their own CLI arguments.
 
+Provider stdout follows two paths. Normalized safe events feed presentation
+for live progress, while a separate schema-constrained final response feeds
+the state machine. Live events are never persisted as decisions and cannot
+change convergence.
+
 ## Turn data flow
 
 ```text
@@ -65,17 +71,18 @@ task + shared instructions + previous handoff
                     │
                     ▼
               provider adapter
-                    │
-                    ▼
-       structured { decision, text }
-                    │
-        ┌───────────┴───────────┐
-        ▼                       ▼
- captured workspace       checkpoint/transcript
- revision + checks
-        │
-        ▼
- read-only reviewer of that revision
+              ┌─────┴─────┐
+              ▼           ▼
+       safe live events  final structured response
+              │           │
+              ▼           ▼
+       terminal output  state machine ───► checkpoint/transcript
+                          ▼
+                captured workspace
+                 revision + checks
+                          │
+                          ▼
+              read-only reviewer of that revision
 ```
 
 Task, transcript, diff, and response material is JSON-serialized when embedded

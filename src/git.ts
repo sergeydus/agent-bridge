@@ -38,7 +38,7 @@ export async function repositoryRoot(cwd: string): Promise<string> {
   const result = await execute('git', ['rev-parse', '--show-toplevel'], {
     cwd,
   });
-  return result.stdout.trim();
+  return realpath(result.stdout.trim());
 }
 
 export async function createIsolatedWorktree({

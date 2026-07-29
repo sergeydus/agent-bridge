@@ -26,6 +26,7 @@ export function runProcess(
     env = process.env,
     killGraceMs = 2_000,
     maxOutputChars,
+    onStdoutChunk,
   }: {
     cwd?: string;
     input?: string;
@@ -36,6 +37,7 @@ export function runProcess(
     env?: NodeJS.ProcessEnv;
     killGraceMs?: number;
     maxOutputChars?: number;
+    onStdoutChunk?: (chunk: string) => void;
   } = {},
 ): Promise<ProcessResult> {
   return new Promise<ProcessResult>((resolvePromise, rejectPromise) => {
@@ -61,6 +63,7 @@ export function runProcess(
     let settled = false;
     let forceKillTimer: NodeJS.Timeout | undefined;
     let terminating = false;
+    let stdoutCallbackError: Error | undefined;
 
     const kill = (processSignal: NodeJS.Signals): void => {
       if (!child.pid) {
@@ -145,15 +148,29 @@ export function runProcess(
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (chunk: string) => {
+      let acceptedChunk = chunk;
       if (
         maxOutputChars !== undefined &&
         stdout.length + chunk.length > maxOutputChars
       ) {
-        stdout += chunk.slice(0, Math.max(0, maxOutputChars - stdout.length));
+        acceptedChunk = chunk.slice(
+          0,
+          Math.max(0, maxOutputChars - stdout.length),
+        );
+        stdout += acceptedChunk;
         exceededOutput ??= 'stdout';
         terminate();
       } else {
         stdout += chunk;
+      }
+      if (acceptedChunk && onStdoutChunk && !stdoutCallbackError) {
+        try {
+          onStdoutChunk(acceptedChunk);
+        } catch (error) {
+          stdoutCallbackError =
+            error instanceof Error ? error : new Error(String(error));
+          terminate();
+        }
       }
     });
     child.stderr.on('data', (chunk: string) => {
@@ -195,6 +212,10 @@ export function runProcess(
             `${command} exceeded the ${maxOutputChars}-character ${exceededOutput} limit`,
           ),
         );
+        return;
+      }
+      if (stdoutCallbackError) {
+        rejectOnce(stdoutCallbackError);
         return;
       }
       const exitCode = code ?? -1;

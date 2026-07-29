@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { runProcess } from '../src/process.ts';
+import { ProcessAbortError, runProcess } from '../src/process.ts';
 
 test('terminates subprocesses that exceed their timeout', async () => {
   await assert.rejects(
@@ -59,4 +59,58 @@ test('terminates a subprocess that exceeds its output budget', async () => {
       ),
     /exceeded the 1000-character stdout limit/,
   );
+});
+
+test('reports accepted stdout chunks while preserving buffered output', async () => {
+  const chunks: string[] = [];
+  const result = await runProcess(
+    process.execPath,
+    ['-e', "process.stdout.write('first\\n'); process.stdout.write('second')"],
+    {
+      onStdoutChunk: (chunk) => chunks.push(chunk),
+    },
+  );
+
+  assert.equal(chunks.join(''), 'first\nsecond');
+  assert.equal(result.stdout, 'first\nsecond');
+});
+
+test('terminates a subprocess when its stdout consumer fails', async () => {
+  await assert.rejects(
+    () =>
+      runProcess(
+        process.execPath,
+        ['-e', "process.stdout.write('event\\n'); setInterval(() => {}, 1000)"],
+        {
+          onStdoutChunk: () => {
+            throw new Error('event decoder failed');
+          },
+          killGraceMs: 10,
+        },
+      ),
+    /event decoder failed/,
+  );
+});
+
+test('cancels a streaming subprocess without losing cancellation semantics', async () => {
+  const controller = new AbortController();
+  const chunks: string[] = [];
+
+  await assert.rejects(
+    () =>
+      runProcess(
+        process.execPath,
+        ['-e', "process.stdout.write('event\\n'); setInterval(() => {}, 1000)"],
+        {
+          signal: controller.signal,
+          killGraceMs: 10,
+          onStdoutChunk: (chunk) => {
+            chunks.push(chunk);
+            controller.abort();
+          },
+        },
+      ),
+    ProcessAbortError,
+  );
+  assert.equal(chunks.join(''), 'event\n');
 });

@@ -25,7 +25,7 @@ import type {
 
 class ScriptedTerminal implements ChatTerminal {
   readonly output: string[] = [];
-  readonly #inputs: string[];
+  #inputs: string[];
   pauses = 0;
   resumes = 0;
 
@@ -65,6 +65,13 @@ function fakeProviders(
     run: async (prompt, options) => {
       prompts.push(prompt);
       optionsSeen.push(options);
+      options.onEvent?.({
+        type: 'activity',
+        message: 'searching the project',
+      });
+      options.onEvent?.({ type: 'text-delta', text: `${name} live ` });
+      options.onEvent?.({ type: 'text-delta', text: 'progress' });
+      options.onEvent?.({ type: 'text-end' });
       calls += 1;
       return {
         text: `${name} answer ${calls}`,
@@ -116,36 +123,42 @@ test('parses interactive commands without accepting arbitrary actions', () => {
 });
 
 test('builds an isolated child workflow as argument arrays', () => {
+  const temporaryDirectory = tmpdir();
+  const taskPath = join(temporaryDirectory, 'private-task.md');
+  const launcher = join(temporaryDirectory, 'agent-bridge', 'dist', 'cli.js');
   const options = parseArgs(
     [
       'chat',
       '--cwd',
-      '/tmp',
+      temporaryDirectory,
       '--from-head',
       '--trust-project-config',
       '--screen-reader',
       '--max-rounds',
       '7',
     ],
-    { initialCwd: '/', defaultOutput: '/tmp/bridge-runs' },
+    {
+      initialCwd: temporaryDirectory,
+      defaultOutput: join(temporaryDirectory, 'bridge-runs'),
+    },
   );
   const args = buildWorkflowArguments(
     {
       mode: 'collaborative',
       firstAgent: 'claude',
       task: 'context',
-      projectRoot: '/tmp',
+      projectRoot: temporaryDirectory,
       options,
     },
-    '/tmp/private-task.md',
-    '/opt/agent-bridge/dist/cli.js',
+    taskPath,
+    launcher,
   );
   assert.deepEqual(args.slice(0, 5), [
-    '/opt/agent-bridge/dist/cli.js',
+    launcher,
     '--task-file',
-    '/tmp/private-task.md',
+    taskPath,
     '--cwd',
-    '/tmp',
+    temporaryDirectory,
   ]);
   assert.ok(args.includes('--collaborative'));
   assert.ok(args.includes('--from-head'));
@@ -272,6 +285,14 @@ test('runs a targeted accessible turn without disturbing paired rotation', async
     assert.match(prompts[2] ?? '', /You are Claude/);
     assert.equal(session?.nextFirstAgent, 'claude');
     assert.match(terminal.output.join(''), /Claude response\. Decision:/);
+    assert.match(
+      terminal.output.join(''),
+      /Claude progress update\.\nclaude live progress/,
+    );
+    assert.match(
+      terminal.output.join(''),
+      /Claude status: searching the project/,
+    );
     assert.doesNotMatch(terminal.output.join(''), /─/);
   } finally {
     await rm(project, { recursive: true, force: true });

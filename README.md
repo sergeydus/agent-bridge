@@ -66,6 +66,13 @@ control to you. The bridge—not either provider—stores bounded conversation
 history, so provider calls remain ephemeral, portable, and independently
 sandboxed.
 
+While an agent works, Agent Bridge displays safe live progress instead of
+waiting silently for the final answer. Interactive chat streams user-facing
+text as it arrives. Workflows that may run both providers concurrently buffer
+each text update into a complete, speaker-labeled block so their output cannot
+interleave. The final schema-validated response is still the only result that
+can drive agreement or workflow state.
+
 Inside the chat:
 
 ```text
@@ -124,9 +131,11 @@ agent-bridge chat --screen-reader --cwd /path/to/project
 This mode uses append-only semantic status text, descriptive prompts, no ANSI
 color, and no decorative progress glyphs. It is saved with interactive chats
 and forwarded to child workflows. Claude also receives its native
-screen-reader CLI flag. Use `--no-color` when you only want to disable Agent
-Bridge color output. The standard `NO_COLOR` environment variable is honored.
-Color is never the only way an agent or decision is identified.
+screen-reader CLI flag. Live text deltas are buffered into complete semantic
+updates instead of being announced character by character. Use `--no-color`
+when you only want to disable Agent Bridge color output. The standard
+`NO_COLOR` environment variable is honored. Color is never the only way an
+agent or decision is identified.
 
 Check your setup:
 
@@ -383,7 +392,7 @@ chat                     Open interactive human-guided chat mode
 --discard-workspace <id> Safely remove a completed run's isolated worktree
 --prune-runs <days>      Prune old safe-to-delete runs
 --dry-run                Show provider commands without calling agents
---verbose                Show raw provider output
+--verbose                Show provider diagnostic output
 --doctor                 Check versions, auth, storage, and required features
 ```
 

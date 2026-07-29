@@ -25,8 +25,12 @@ test('provider commands require structured output and keep Claude shell-free', a
   const codex = await new CodexProvider().run('task', dryRunOptions);
   const claude = await new ClaudeProvider().run('task', dryRunOptions);
   assert.match(codex.text, /--output-schema/);
+  assert.match(codex.text, /--json/);
   assert.match(codex.text, /--skip-git-repo-check/);
   assert.match(claude.text, /--json-schema/);
+  assert.match(claude.text, /--output-format stream-json/);
+  assert.match(claude.text, /--include-partial-messages/);
+  assert.match(claude.text, /--verbose/);
   assert.doesNotMatch(claude.text, /Bash/);
   assert.equal(codex.decision, 'continue');
   assert.equal(claude.decision, 'continue');

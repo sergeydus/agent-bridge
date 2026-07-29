@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import { parseArgs } from '../src/options.ts';
 import { configureModels, configurePresentation } from '../src/wizard.ts';
 
 class ScriptedQuestioner {
-  readonly #answers: string[];
+  #answers: string[];
 
   constructor(answers: string[]) {
     this.#answers = [...answers];
@@ -17,9 +19,10 @@ class ScriptedQuestioner {
 }
 
 test('wizard configures accessible presentation and optional models', async () => {
+  const temporaryDirectory = tmpdir();
   const options = parseArgs([], {
-    initialCwd: '/tmp',
-    defaultOutput: '/tmp/runs',
+    initialCwd: temporaryDirectory,
+    defaultOutput: join(temporaryDirectory, 'runs'),
   });
   const questioner = new ScriptedQuestioner([
     '2',
@@ -42,11 +45,12 @@ test('wizard configures accessible presentation and optional models', async () =
 });
 
 test('wizard preserves explicit model settings and asks only for missing ones', async () => {
+  const temporaryDirectory = tmpdir();
   const options = parseArgs(
     ['--codex-model', 'explicit-codex', '--codex-effort', 'high'],
     {
-      initialCwd: '/tmp',
-      defaultOutput: '/tmp/runs',
+      initialCwd: temporaryDirectory,
+      defaultOutput: join(temporaryDirectory, 'runs'),
     },
   );
   const questioner = new ScriptedQuestioner(['yes', 'claude-test', '3']);

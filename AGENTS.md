@@ -34,6 +34,7 @@ location of Agent Bridge itself.
 - `core.ts` contains shared workflow types and deterministic helpers.
 - `response.ts` owns structured response schemas and parsing.
 - `providers.ts` translates the provider-independent contract into CLI flags.
+- `provider-events.ts` incrementally normalizes safe provider stream events.
 - `prompts.ts` is the only home for agent role prompts.
 - `verification.ts` executes user-approved commands without a shell.
 - `project.ts` distinguishes Git projects from ordinary directories.
@@ -80,6 +81,8 @@ location of Agent Bridge itself.
 - Persisted task material is private local data and may still be sensitive.
 - Provider-native sessions stay ephemeral; interactive history is
   coordinator-owned, bounded, and JSON-encoded in prompts.
+- Live events never expose reasoning or raw tool payloads and never drive
+  workflow state; only the validated final response is authoritative.
 
 ## Change checklist
 

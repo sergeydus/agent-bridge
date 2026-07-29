@@ -389,7 +389,7 @@ function migrateV1(run: SavedRunV1, outputDirectory: string): SavedRun {
 }
 
 export class RunLock {
-  readonly #path: string;
+  #path: string;
   #released = false;
 
   constructor(path: string) {
@@ -410,8 +410,8 @@ export class RunLock {
 }
 
 export class RunStateStore {
-  readonly #directory: string;
-  readonly #onWarning: (message: string) => void;
+  #directory: string;
+  #onWarning: (message: string) => void;
 
   constructor(
     directory: string,
