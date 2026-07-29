@@ -19,6 +19,7 @@ import {
   createIsolatedWorktree,
   createPatch,
   currentCommit,
+  repositoryHasHead,
   repositoryRoot,
   workspaceFingerprint,
 } from './git.ts';
@@ -206,9 +207,19 @@ async function main(): Promise<void> {
   let needsDirectDirtyRecoveryPatch = false;
   if (projectKind === 'git') {
     repository = await repositoryRoot(originalCwd);
-    baseRevision ??= options.dryRun
-      ? 'dry-run-head'
-      : await currentCommit(repository);
+    const hasHead = await repositoryHasHead(repository);
+    if (editingWorkflow && !hasHead) {
+      throw new Error(
+        'Safe editing requires an initial commit. Review .gitignore, create ' +
+          'the first commit yourself, then try again. Agent Bridge will not ' +
+          'stage or commit project files.',
+      );
+    }
+    if (hasHead) {
+      baseRevision ??= options.dryRun
+        ? 'dry-run-head'
+        : await currentCommit(repository);
+    }
   }
 
   if (editingWorkflow && projectKind === 'git' && !resumedRun) {
@@ -473,8 +484,11 @@ continue from its actual state instead of repeating changes blindly.`;
       reporter,
       runAgent: callAgent,
       captureWorkspace: async () => {
-        if (projectKind !== 'git') {
-          return { snapshot: '[directory review: inspect project directly]' };
+        if (projectKind !== 'git' || !baseRevision) {
+          return {
+            snapshot:
+              '[read-only project review: inspect project files directly]',
+          };
         }
         const [snapshot, status, revision] = await Promise.all([
           workingTreeSnapshot(options),

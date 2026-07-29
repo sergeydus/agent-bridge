@@ -55,6 +55,23 @@ export async function repositoryRoot(cwd: string): Promise<string> {
   return realpath(result.stdout.trim());
 }
 
+export async function initializeRepository(cwd: string): Promise<string> {
+  await execute('git', ['init'], { cwd });
+  return repositoryRoot(cwd);
+}
+
+export async function repositoryHasHead(cwd: string): Promise<boolean> {
+  const result = await execute(
+    'git',
+    ['rev-parse', '--verify', '--quiet', 'HEAD'],
+    {
+      cwd,
+      allowedExitCodes: [0, 1],
+    },
+  );
+  return result.exitCode === 0;
+}
+
 export async function createIsolatedWorktree({
   repository,
   runsDirectory,

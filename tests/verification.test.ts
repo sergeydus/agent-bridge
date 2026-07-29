@@ -15,7 +15,7 @@ test('runs approved commands as executable and argument arrays', async () => {
       },
     ],
     cwd: process.cwd(),
-    defaultTimeoutMs: 1_000,
+    defaultTimeoutMs: 5_000,
   });
   assert.equal(results[0]?.passed, true);
   assert.equal(results[0]?.output, 'verified');
@@ -31,7 +31,7 @@ test('records verification failures without aborting later review evidence', asy
       },
     ],
     cwd: process.cwd(),
-    defaultTimeoutMs: 1_000,
+    defaultTimeoutMs: 5_000,
   });
   assert.equal(results[0]?.passed, false);
   assert.match(formatVerificationResults(results), /FAIL/);

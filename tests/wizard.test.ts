@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 
 import { UserConfigStore } from '../src/config.ts';
+import { execute, repositoryHasHead } from '../src/git.ts';
 import { parseArgs } from '../src/options.ts';
+import { resolveProject } from '../src/project.ts';
 import {
   chooseProject,
   configureAccessibility,
   configureModels,
   configurePresentation,
+  prepareProjectForEditing,
   presentationLabel,
   workflowChoices,
 } from '../src/wizard.ts';
@@ -100,9 +103,80 @@ test('wizard offers simple intents appropriate to the project', () => {
     ['1', '2', '3', '4'],
   );
   assert.deepEqual(
-    workflowChoices({ projectKind: 'directory' }).map(({ action }) => action),
-    ['chat', 'review', 'advanced'],
+    workflowChoices({ editingAvailable: false }).map(({ action }) => action),
+    ['chat', 'edit', 'review', 'advanced'],
   );
+  const setupChoice = workflowChoices({ editingAvailable: false })[1];
+  assert.match(setupChoice?.label ?? '', /Git setup required/);
+  assert.match(setupChoice?.description ?? '', /safe Git workspace/);
+});
+
+test('wizard leaves a declined non-Git project unchanged', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-setup-'));
+  try {
+    const result = await prepareProjectForEditing(
+      new ScriptedQuestioner(['no']),
+      { root: directory, kind: 'directory' },
+    );
+
+    assert.equal(result.action, 'back');
+    assert.deepEqual(await resolveProject(directory), {
+      root: directory,
+      kind: 'directory',
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('wizard initializes Git without staging or committing project files', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-setup-'));
+  try {
+    await writeFile(join(directory, 'project.txt'), 'keep untracked\n');
+    const result = await prepareProjectForEditing(
+      new ScriptedQuestioner(['yes', '3']),
+      { root: directory, kind: 'directory' },
+    );
+
+    assert.equal(result.action, 'chat');
+    assert.equal(result.project.kind, 'git');
+    assert.equal(await repositoryHasHead(directory), false);
+    const status = await execute(
+      'git',
+      ['status', '--porcelain=v1', '--untracked-files=all'],
+      { cwd: directory },
+    );
+    assert.match(status.stdout, /^\?\? project\.txt/m);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('wizard recognizes an existing initial commit without more prompts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-setup-'));
+  try {
+    await execute('git', ['init'], { cwd: directory });
+    await execute('git', ['config', 'user.name', 'Agent Bridge Test'], {
+      cwd: directory,
+    });
+    await execute('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: directory,
+    });
+    await writeFile(join(directory, 'project.txt'), 'committed\n');
+    await execute('git', ['add', 'project.txt'], { cwd: directory });
+    await execute('git', ['commit', '-m', 'initial'], { cwd: directory });
+    const questioner = new ScriptedQuestioner([]);
+
+    const result = await prepareProjectForEditing(questioner, {
+      root: directory,
+      kind: 'git',
+    });
+
+    assert.equal(result.action, 'ready');
+    assert.deepEqual(questioner.prompts, []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('wizard asks accessibility first once and restores the preference', async () => {

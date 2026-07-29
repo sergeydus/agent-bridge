@@ -4,6 +4,7 @@ import {
   lstat,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   unlink,
@@ -19,8 +20,26 @@ import {
   createIsolatedWorktree,
   createPatch,
   execute,
+  initializeRepository,
   removeIsolatedWorktree,
+  repositoryHasHead,
 } from '../src/git.ts';
+
+test('initializes a repository without creating a commit', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-git-init-'));
+  try {
+    await writeFile(join(root, 'existing.txt'), 'untouched\n');
+
+    assert.equal(await initializeRepository(root), await realpath(root));
+    assert.equal(await repositoryHasHead(root), false);
+    const status = await execute('git', ['status', '--porcelain=v1'], {
+      cwd: root,
+    });
+    assert.match(status.stdout, /^\?\? existing\.txt/m);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test('isolates edits and exports tracked and untracked files as a patch', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-bridge-git-'));

@@ -84,9 +84,11 @@ confirmation before an editing child process starts.
 
 The child receives the existing options for models, effort, timeouts, output,
 privacy, presentation, and trusted project configuration. Editing still
-requires Git, defaults to a detached worktree, and uses the standard completion
-choices. The temporary task file is owner-only and removed when the workflow
-exits.
+requires Git with an initial commit, defaults to a detached worktree, and uses
+the standard completion choices. `/edit` reports a missing repository or
+initial commit before preflight; it never initializes, stages, or commits from
+inside chat. The temporary task file is owner-only and removed when the
+workflow exits.
 
 After the child exits, the chat records its mode and exit code and stays open.
 Later agents are told to inspect the actual project state rather than assuming

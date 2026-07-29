@@ -119,7 +119,10 @@ in prompts so user-controlled delimiters cannot masquerade as instructions.
 Review-only runs operate directly on the selected project with provider
 write access disabled. Ordinary directories are supported in this mode.
 
-Editing requires Git. By default a detached worktree is created beneath the
+Editing requires Git with an initial commit. The novice wizard keeps editing
+visible for ordinary folders and can run only `git init` after explicit user
+confirmation. It waits for the user-created initial commit before enabling an
+editing workflow. By default a detached worktree is then created beneath the
 run-data directory from the source repository's committed `HEAD`. Agent edits,
 snapshots, verification, and reviews all use that isolated path. Completion
 produces a portable binary patch using an alternate Git index, which includes

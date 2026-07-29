@@ -62,7 +62,7 @@ Usage:
   agent-bridge [options] < task.md
 
 Options:
-  --wizard                Start guided setup; project paths can be pasted or dragged
+  --wizard                Guided setup, including safe Git setup for editing
   --list-chats            List saved interactive chats and exit
   --delete-chat <id>      Delete one saved interactive chat
   --task <text>           Task to discuss; otherwise read stdin

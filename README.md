@@ -47,8 +47,10 @@ On first use, the wizard asks whether you need screen-reader-friendly output
 before showing any complex menu, then remembers that choice. Select a project
 by number or paste/drag its folder, and choose one plain-language intent:
 **Discuss**, **Make changes**, or **Review**. Provider roles, models, interface
-style, and limits stay under Advanced settings. Non-Git folders simply omit
-the editing option.
+style, and limits stay under Advanced settings. **Make changes** always remains
+visible. For a non-Git folder, the wizard explains why Git is needed and can
+run `git init` after confirmation. It never stages or commits project files;
+you review `.gitignore` and create the required first commit yourself.
 
 The default path is short:
 
@@ -56,9 +58,10 @@ The default path is short:
 2. Pick or paste a project.
 3. Choose **Discuss**, **Make changes**, or **Review**.
 
-**Discuss can edit later:** ordinary chat messages never edit files, but
-typing `/edit` opens a complete safety preview and confirmation before a
-separate editing workflow begins.
+**Discuss can edit later:** ordinary chat messages never edit files, but typing
+`/edit` opens a complete safety preview and confirmation before a separate
+editing workflow begins. If the repository has no initial commit yet, chat
+explains that requirement instead of starting a broken workflow.
 
 ## Interactive chat
 
@@ -269,9 +272,11 @@ When the executable is not globally linked, replace `agent-bridge` with
 
 ## Repository safety
 
-Editing workflows require Git and create a detached worktree by default. The
-selected checkout remains untouched while agents work. At completion, Agent
-Bridge creates a binary-safe patch and offers to:
+Editing workflows require Git with an initial commit and create a detached
+worktree by default. The wizard can initialize Git with explicit permission,
+but only you decide which files belong in the initial commit. The selected
+checkout remains untouched while agents work. At completion, Agent Bridge
+creates a binary-safe patch and offers to:
 
 - keep the isolated workspace for inspection;
 - apply the patch after checking that the original base revision is unchanged
@@ -407,7 +412,7 @@ owner-only permissions where the platform supports them.
 Run `agent-bridge --help` for the authoritative list:
 
 ```text
---wizard                 Start guided setup
+--wizard                 Guided setup, including safe Git setup for editing
 chat                     Open interactive human-guided chat mode
 --list-chats             List saved interactive chats
 --delete-chat <id>       Delete an exact saved chat

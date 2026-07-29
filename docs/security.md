@@ -36,7 +36,11 @@ Agent Bridge is not a security sandbox for hostile code.
 
 ## Repository protection
 
-- Editing requires Git and defaults to an isolated detached worktree.
+- Editing requires Git with an initial commit and defaults to an isolated
+  detached worktree.
+- The novice wizard may run `git init` only after confirmation. It never stages
+  or creates the initial commit; the user reviews `.gitignore` and chooses the
+  committed files.
 - A dirty source checkout requires explicit acknowledgement that isolation
   starts from committed `HEAD`.
 - Direct editing requires explicit flags; pre-existing dirty paths are
