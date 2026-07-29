@@ -41,8 +41,8 @@ function isUserConfig(value: unknown): value is UserConfig {
 }
 
 export class UserConfigStore {
-  readonly #path: string;
-  readonly #onWarning: (message: string) => void;
+  #path: string;
+  #onWarning: (message: string) => void;
 
   constructor(path: string, onWarning: (message: string) => void = () => {}) {
     this.#path = path;

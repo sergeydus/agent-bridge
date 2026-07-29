@@ -11,6 +11,8 @@
   reasoning, raw commands, tool inputs, and file paths from live output.
 - Added buffered screen-reader updates, bounded live output, deterministic
   split-chunk fixtures, and streaming process cancellation tests.
+- Preserved source execution on the declared Node 22.6 minimum and enforced LF
+  checkouts so the same formatting checks pass on Windows.
 
 ## 0.4.0
 

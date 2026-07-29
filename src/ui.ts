@@ -9,10 +9,10 @@ const agentLabel = (agent: AgentName): string =>
   agent === 'codex' ? 'Codex' : 'Claude';
 
 export class ProgressReporter {
-  readonly #startedAt = Date.now();
-  readonly #verbose: boolean;
-  readonly #silent: boolean;
-  readonly #screenReader: boolean;
+  #startedAt = Date.now();
+  #verbose: boolean;
+  #silent: boolean;
+  #screenReader: boolean;
 
   constructor({
     verbose = false,

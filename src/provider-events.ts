@@ -37,7 +37,7 @@ function parseJsonLine(line: string): Record<string, unknown> {
 class JsonLineDecoder {
   #buffer = '';
   #error: Error | undefined;
-  readonly #onLine: (line: string) => void;
+  #onLine: (line: string) => void;
 
   constructor(onLine: (line: string) => void) {
     this.#onLine = onLine;
@@ -174,9 +174,9 @@ function codexActivity(
 }
 
 export class CodexEventStream {
-  readonly #decoder: JsonLineDecoder;
-  readonly #kind: ResponseKind;
-  readonly #sink: ProviderEventSink;
+  #decoder: JsonLineDecoder;
+  #kind: ResponseKind;
+  #sink: ProviderEventSink;
   #pendingAgentMessage: string | undefined;
   #fatalError: string | undefined;
 
@@ -292,9 +292,9 @@ function textFromClaudeMessage(value: unknown): string {
 }
 
 export class ClaudeEventStream {
-  readonly #decoder: JsonLineDecoder;
-  readonly #kind: ResponseKind;
-  readonly #sink: ProviderEventSink;
+  #decoder: JsonLineDecoder;
+  #kind: ResponseKind;
+  #sink: ProviderEventSink;
   #fatalError: string | undefined;
   #result: string | undefined;
   #currentMessageHasTextDeltas = false;

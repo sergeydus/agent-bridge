@@ -25,7 +25,7 @@ import type {
 
 class ScriptedTerminal implements ChatTerminal {
   readonly output: string[] = [];
-  readonly #inputs: string[];
+  #inputs: string[];
   pauses = 0;
   resumes = 0;
 

@@ -5,7 +5,7 @@ import { parseArgs } from '../src/options.ts';
 import { configureModels, configurePresentation } from '../src/wizard.ts';
 
 class ScriptedQuestioner {
-  readonly #answers: string[];
+  #answers: string[];
 
   constructor(answers: string[]) {
     this.#answers = [...answers];

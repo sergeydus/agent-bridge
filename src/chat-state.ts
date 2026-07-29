@@ -323,7 +323,7 @@ export function formatChatList(sessions: ChatSession[]): string {
 }
 
 export class ChatLock {
-  readonly #path: string;
+  #path: string;
   #released = false;
 
   constructor(path: string) {
@@ -344,8 +344,8 @@ export class ChatLock {
 }
 
 export class ChatSessionStore {
-  readonly #directory: string;
-  readonly #onWarning: (message: string) => void;
+  #directory: string;
+  #onWarning: (message: string) => void;
 
   constructor(
     directory: string,
