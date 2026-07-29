@@ -109,6 +109,22 @@ test('renders compact, stacked, and wide frames within terminal bounds', () => {
   );
 });
 
+test('enhanced empty state explains discussion and editing commands', () => {
+  const model = createTerminalViewModel({
+    session: {
+      id: 'chat-20260729-empty',
+      projectLabel: 'sample-project',
+      status: 'active',
+    },
+    messages: [],
+  });
+  const frame = renderEnhancedFrame(model, { columns: 100, rows: 20 });
+
+  assert.match(frame, /Type a message to discuss; files stay unchanged/);
+  assert.match(frame, /Make safe changes: \/edit/);
+  assert.match(frame, /Advanced roles: \/implement or \/collaborate/);
+});
+
 test('enhanced renderer owns and restores only presentation state', () => {
   const model = viewModel();
   const renderer = createEnhancedTerminalRenderer({

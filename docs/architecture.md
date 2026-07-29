@@ -20,7 +20,8 @@ Three filesystem locations must never be conflated:
 ```text
 bin/agent-bridge.mjs
   └─ CLI composition (cli.ts)
-      ├─ options + wizard ───────── options.ts, wizard.ts
+      ├─ options + wizard ───────── options.ts, wizard.ts,
+      │                           workflow-preflight.ts
       ├─ terminal presentation ──── presentation-model.ts,
       │                           presentation.ts, enhanced-terminal.ts,
       │                           terminal-capabilities.ts, ui.ts
@@ -52,6 +53,13 @@ Interactive chat is a higher-level coordinator. Its ordinary turns are always
 read-only. Editing and formal review commands launch the existing one-shot
 workflow as a child process with inherited terminal control, so repository
 safety has one implementation rather than two.
+
+The wizard and interactive chat also share workflow preflight inspection and
+formatting. Dirty-tree status, project verification configuration, isolation,
+cycle limits, and provider-call estimates therefore cannot silently drift
+between the novice entry points. Callers retain presentation-specific prompts,
+but both require an explicit confirmation at the read-only-to-workflow
+boundary.
 
 Presentation is resolved once at the CLI boundary. Semantic speaker and
 progress formatting lives outside provider orchestration, while provider

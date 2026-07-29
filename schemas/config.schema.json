@@ -6,12 +6,22 @@
   "additionalProperties": false,
   "required": ["version", "recentProjects"],
   "properties": {
-    "version": { "const": 1 },
+    "version": { "const": 2 },
     "recentProjects": {
       "type": "array",
       "maxItems": 8,
       "uniqueItems": true,
       "items": { "type": "string", "minLength": 1 }
+    },
+    "presentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["screenReader", "noColor", "ui"],
+      "properties": {
+        "screenReader": { "type": "boolean" },
+        "noColor": { "type": "boolean" },
+        "ui": { "enum": ["plain", "enhanced", "auto"] }
+      }
     }
   }
 }

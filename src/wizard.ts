@@ -2,18 +2,21 @@ import {
   createInterface,
   type Interface as ReadlineInterface,
 } from 'node:readline/promises';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 
 import { UserConfigStore } from './config.ts';
 import { ChatSessionStore } from './chat-state.ts';
-import { estimateCalls, type ReasoningEffort } from './core.ts';
+import type { ReasoningEffort } from './core.ts';
 import type { AppPaths } from './paths.ts';
 import type { BridgeOptions } from './options.ts';
-import { loadProjectConfig } from './project-config.ts';
 import { resolveProject, type SelectedProject } from './project.ts';
 import { workingTreeStatus } from './snapshot.ts';
 import { RunStateStore } from './state.ts';
 import { sanitizeTerminalText } from './terminal-text.ts';
+import {
+  formatWorkflowPreflight,
+  inspectWorkflowPreflight,
+} from './workflow-preflight.ts';
 
 interface Questioner {
   question(prompt: string): Promise<string>;
@@ -38,25 +41,89 @@ async function askForChoice(
 export async function configurePresentation(
   interface_: Questioner,
   options: BridgeOptions,
+  enhancedAvailable = false,
 ): Promise<void> {
-  if (options.screenReader) {
-    return;
-  }
-  console.log(`
-How should Agent Bridge present the conversation?
-  1) Standard terminal output
-  2) Screen-reader-friendly plain output
+  const presentations = [
+    'Standard terminal output',
+    ...(enhancedAvailable
+      ? ['Enhanced interactive view when this terminal supports it']
+      : []),
+    'Screen-reader-friendly plain output',
+  ];
+  const choices = presentations.map((_, index) => String(index + 1));
+  const defaultPresentation = options.screenReader
+    ? String(presentations.length)
+    : enhancedAvailable && options.ui !== 'plain'
+      ? '2'
+      : '1';
+  console.log(`\nHow should Agent Bridge present the conversation?
+${presentations
+  .map(
+    (label, index) =>
+      `  ${index + 1}) ${label}${String(index + 1) === defaultPresentation ? ' (current)' : ''}`,
+  )
+  .join('\n')}
 `);
   const presentation = await askForChoice(
     interface_,
-    'Choose 1 or 2 [1]: ',
-    ['1', '2'],
-    '1',
+    `Choose ${enhancedAvailable ? '1, 2, or 3' : '1 or 2'} [${defaultPresentation}]: `,
+    choices,
+    defaultPresentation,
   );
-  if (presentation === '2') {
+  if (enhancedAvailable && presentation === '2') {
+    options.screenReader = false;
+    options.noColor = false;
+    options.ui = 'auto';
+  } else if (presentation === String(presentations.length)) {
     options.screenReader = true;
     options.noColor = true;
+    options.ui = 'plain';
+  } else {
+    options.screenReader = false;
+    options.noColor = false;
+    options.ui = 'plain';
   }
+}
+
+export async function configureAccessibility(
+  interface_: Questioner,
+  options: BridgeOptions,
+  configStore: UserConfigStore,
+): Promise<void> {
+  const config = await configStore.load();
+  if (config.presentation) {
+    if (!options.screenReaderExplicit) {
+      options.screenReader = config.presentation.screenReader;
+    }
+    options.noColor ||= config.presentation.noColor;
+    if (!options.uiExplicit) {
+      options.ui = config.presentation.ui;
+    }
+  } else if (!options.screenReaderExplicit) {
+    const accessible = await askForChoice(
+      interface_,
+      'Use screen-reader-friendly output? [y/N]: ',
+      ['y', 'yes', 'n', 'no'],
+      'n',
+    );
+    options.screenReader = ['y', 'yes'].includes(accessible);
+    if (options.screenReader) {
+      options.noColor = true;
+      options.ui = 'plain';
+    }
+  }
+  if (options.uiExplicit && !options.screenReaderExplicit) {
+    options.screenReader = false;
+  }
+  if (options.screenReader) {
+    options.noColor = true;
+    options.ui = 'plain';
+  }
+  await configStore.rememberPresentation({
+    screenReader: options.screenReader,
+    noColor: options.noColor,
+    ui: options.ui,
+  });
 }
 
 const EFFORT_CHOICES: Array<{
@@ -108,6 +175,7 @@ ${EFFORT_CHOICES.map(({ choice, label }) => `  ${choice}) ${label}`).join('\n')}
 export async function configureModels(
   interface_: Questioner,
   options: BridgeOptions,
+  askToCustomize = true,
 ): Promise<void> {
   if (
     options.codexModel &&
@@ -117,14 +185,16 @@ export async function configureModels(
   ) {
     return;
   }
-  const customize = await askForChoice(
-    interface_,
-    '\nCustomize models or reasoning effort? [y/N]: ',
-    ['y', 'yes', 'n', 'no'],
-    'n',
-  );
-  if (!['y', 'yes'].includes(customize)) {
-    return;
+  if (askToCustomize) {
+    const customize = await askForChoice(
+      interface_,
+      '\nCustomize models or reasoning effort? [y/N]: ',
+      ['y', 'yes', 'n', 'no'],
+      'n',
+    );
+    if (!['y', 'yes'].includes(customize)) {
+      return;
+    }
   }
   if (!options.codexModel) {
     options.codexModel = await askForModel(
@@ -146,24 +216,32 @@ export async function configureModels(
   }
 }
 
-function presentationLabel(options: BridgeOptions): string {
+export function presentationLabel(options: BridgeOptions): string {
   if (options.screenReader) {
     return 'screen-reader-friendly';
   }
-  return options.noColor ? 'plain, no color' : 'standard';
+  const colorSuffix = options.noColor ? ', no color' : '';
+  if (options.ui === 'enhanced') {
+    return `enhanced${colorSuffix}`;
+  }
+  if (options.ui === 'auto') {
+    return `enhanced when supported, otherwise standard${colorSuffix}`;
+  }
+  return `standard${colorSuffix}`;
 }
 
 async function askForMaxRounds(
-  interface_: ReadlineInterface,
+  interface_: Questioner,
   label = 'Maximum review cycles',
+  minimum = 2,
 ): Promise<number> {
   while (true) {
     const answer = (await interface_.question(`${label} [6]: `)).trim();
     const value = Number(answer || '6');
-    if (Number.isInteger(value) && value >= 2 && value <= 20) {
+    if (Number.isInteger(value) && value >= minimum && value <= 20) {
       return value;
     }
-    console.log('Please enter a whole number from 2 to 20.');
+    console.log(`Please enter a whole number from ${minimum} to 20.`);
   }
 }
 
@@ -185,8 +263,26 @@ async function validRecentProjects(
   return valid;
 }
 
-async function chooseProject(
-  interface_: ReadlineInterface,
+async function askForProjectPath(
+  interface_: Questioner,
+  prompt: string,
+): Promise<SelectedProject> {
+  while (true) {
+    const input = await interface_.question(prompt);
+    try {
+      return await resolveProject(input);
+    } catch (error) {
+      console.log(
+        sanitizeTerminalText(
+          error instanceof Error ? error.message : String(error),
+        ),
+      );
+    }
+  }
+}
+
+export async function chooseProject(
+  interface_: Questioner,
   options: BridgeOptions,
   configStore: UserConfigStore,
   installRoot: string,
@@ -212,51 +308,197 @@ async function chooseProject(
   }
 
   console.log('\nWhich project should the agents work on?');
+  if (candidates.length === 0) {
+    const project = await askForProjectPath(
+      interface_,
+      'Paste a project folder, or drag it into this window:\n> ',
+    );
+    await configStore.rememberProject(project.root);
+    return project;
+  }
+
   candidates.forEach((project, index) => {
     const kind = project.kind === 'git' ? 'Git' : 'folder';
     console.log(
       `  ${index + 1}) ${sanitizeTerminalText(project.root)} (${kind})`,
     );
   });
-  const customChoice = String(candidates.length + 1);
-  console.log(`  ${customChoice}) Enter or drag in another project folder`);
-  const choices = [
-    ...candidates.map((_, index) => String(index + 1)),
-    customChoice,
-  ];
-  const choice = await askForChoice(
-    interface_,
-    `Choose ${choices.join(', ')} [${candidates.length ? '1' : customChoice}]: `,
-    choices,
-    candidates.length ? '1' : customChoice,
-  );
+  console.log('  Or paste or drag in another project folder.');
 
-  let project: SelectedProject;
-  if (choice === customChoice) {
-    while (true) {
-      const input = await interface_.question(
-        '\nPaste a project folder, or drag it into this window:\n> ',
-      );
-      try {
-        project = await resolveProject(input);
-        break;
-      } catch (error) {
+  let project: SelectedProject | undefined;
+  while (!project) {
+    const shortcutPrompt =
+      candidates.length === 1 ? 'Choose 1' : `Choose 1–${candidates.length}`;
+    const input = (
+      await interface_.question(
+        `${shortcutPrompt}, or enter a project folder [1]: `,
+      )
+    ).trim();
+    if (!input) {
+      project = candidates[0];
+      continue;
+    }
+    if (/^\d+$/.test(input)) {
+      project = candidates[Number(input) - 1];
+      if (!project) {
         console.log(
-          sanitizeTerminalText(
-            error instanceof Error ? error.message : String(error),
-          ),
+          `Please choose a number from 1 to ${candidates.length}, or enter a project folder.`,
         );
       }
+      continue;
     }
-  } else {
-    const selected = candidates[Number(choice) - 1];
-    if (!selected) {
-      throw new Error('The selected project is no longer available.');
+    try {
+      project = await resolveProject(input);
+    } catch (error) {
+      console.log(
+        sanitizeTerminalText(
+          error instanceof Error ? error.message : String(error),
+        ),
+      );
     }
-    project = selected;
   }
   await configStore.rememberProject(project.root);
   return project;
+}
+
+interface WorkflowChoice {
+  value: string;
+  label: string;
+  description?: string;
+  action:
+    | 'chat'
+    | 'edit'
+    | 'advanced'
+    | 'collaborate-claude'
+    | 'collaborate-codex'
+    | 'implement-claude'
+    | 'implement-codex'
+    | 'review';
+}
+
+const BASE_WORKFLOWS: Array<Omit<WorkflowChoice, 'value'>> = [
+  {
+    action: 'chat',
+    label: 'Discuss',
+    description:
+      'Chat with both agents without changing files. Use /edit later if you want changes.',
+  },
+  {
+    action: 'edit',
+    label: 'Make changes',
+    description:
+      'The agents discuss, edit in a safe workspace, and review each other’s work.',
+  },
+  {
+    action: 'review',
+    label: 'Review',
+    description: 'Both agents inspect the project. No files are changed.',
+  },
+  {
+    action: 'advanced',
+    label: 'Advanced role setup',
+    description: 'Choose who edits first, fixed roles, models, and limits.',
+  },
+];
+
+export function workflowChoices({
+  projectKind = 'git',
+}: {
+  projectKind?: SelectedProject['kind'];
+} = {}): WorkflowChoice[] {
+  return BASE_WORKFLOWS.filter(
+    ({ action }) => projectKind === 'git' || action !== 'edit',
+  ).map(({ action, label, description }, index) => ({
+    value: String(index + 1),
+    action,
+    label,
+    ...(description ? { description } : {}),
+  }));
+}
+
+async function chooseAdvancedWorkflow(
+  interface_: Questioner,
+  projectKind: SelectedProject['kind'],
+): Promise<WorkflowChoice['action']> {
+  const allChoices: Array<{
+    value: string;
+    action: WorkflowChoice['action'];
+    label: string;
+  }> = [
+    {
+      value: '1',
+      action: 'collaborate-claude',
+      label: 'Alternate editing and review (Claude starts)',
+    },
+    {
+      value: '2',
+      action: 'collaborate-codex',
+      label: 'Alternate editing and review (Codex starts)',
+    },
+    {
+      value: '3',
+      action: 'implement-claude',
+      label: 'Claude edits; Codex reviews',
+    },
+    {
+      value: '4',
+      action: 'implement-codex',
+      label: 'Codex edits; Claude reviews',
+    },
+    { value: '5', action: 'review', label: 'Review only' },
+    { value: '6', action: 'chat', label: 'Discuss only' },
+  ];
+  const choices = allChoices.filter(
+    ({ action }) =>
+      projectKind === 'git' || action === 'review' || action === 'chat',
+  );
+  choices.forEach((choice, index) => {
+    choice.value = String(index + 1);
+  });
+  console.log(`
+Advanced role setup
+${choices.map(({ value, label }) => `  ${value}) ${label}`).join('\n')}
+`);
+  const value = await askForChoice(
+    interface_,
+    `Choose 1–${choices.length} [1]: `,
+    choices.map((choice) => choice.value),
+    '1',
+  );
+  return choices.find((choice) => choice.value === value)?.action ?? 'chat';
+}
+
+async function configureAdvancedSettings(
+  interface_: Questioner,
+  options: BridgeOptions,
+  configStore: UserConfigStore,
+  chat: boolean,
+): Promise<void> {
+  const customize = await askForChoice(
+    interface_,
+    '\nCustomize advanced settings? [y/N]: ',
+    ['y', 'yes', 'n', 'no'],
+    'n',
+  );
+  if (!['y', 'yes'].includes(customize)) {
+    return;
+  }
+  await configureModels(interface_, options, false);
+  if (chat) {
+    options.maxAutoRounds = await askForMaxRounds(
+      interface_,
+      'Maximum automatic chat exchanges',
+      1,
+    );
+    await configurePresentation(interface_, options, true);
+  } else {
+    options.maxRounds = await askForMaxRounds(interface_);
+  }
+  await configStore.rememberPresentation({
+    screenReader: options.screenReader,
+    noColor: options.noColor,
+    ui: options.ui,
+  });
 }
 
 async function chooseReviewEvidence(
@@ -312,114 +554,147 @@ export async function runWizard({
   });
 
   try {
-    await configurePresentation(interface_, options);
+    const configStore = new UserConfigStore(appPaths.configFile, (message) =>
+      console.warn(sanitizeTerminalText(message)),
+    );
+    await configureAccessibility(interface_, options, configStore);
     const resumableRun = await new RunStateStore(
       appPaths.stateDirectory,
     ).latestIncomplete();
-    const resumableChat = await new ChatSessionStore(
-      appPaths.chatsDirectory,
-    ).latest();
+    const resumableChat =
+      (await new ChatSessionStore(appPaths.chatsDirectory).list()).find(
+        (session) => session.status !== 'completed',
+      ) ?? null;
     console.log(
       options.screenReader
         ? `
 Agent Bridge.
-Codex and Claude will work in turns until both agree the task is done.
-Project material needed for the task may be sent to both providers.
+Choose a project, then say whether you want to discuss, change, or review it.
+Project material needed for the task can be sent to Codex and Claude.
 `
         : `
 Agent Bridge
 ============
-Codex and Claude will work in turns until both agree the task is done.
-Project material needed for the task may be sent to both providers.
+Choose a project, then say whether you want to discuss, change, or review it.
+Project material needed for the task can be sent to Codex and Claude.
 `,
     );
-    console.log(`What should they do?
-  1) Open a longer interactive chat (recommended)
-  2) Collaborate: discuss first, then alternate editing (Claude starts)
-  3) Collaborate: discuss first, then alternate editing (Codex starts)
-  4) Fixed roles: Claude implements; Codex reviews
-  5) Fixed roles: Codex implements; Claude reviews
-  6) Both review only; nobody edits
-  7) Continue the most recent interrupted run${
-    resumableRun ? ` (${resumableRun.id})` : ' (none available)'
-  }
-  8) Reopen the most recent interactive chat${
-    resumableChat ? ` (${resumableChat.id})` : ' (none available)'
-  }
+
+    if (resumableRun || resumableChat) {
+      const resumeChoices: Array<{
+        value: string;
+        action: 'resume-run' | 'resume-chat' | 'new';
+        label: string;
+      }> = [];
+      if (resumableChat) {
+        resumeChoices.push({
+          value: String(resumeChoices.length + 1),
+          action: 'resume-chat',
+          label: `Reopen chat for ${basename(resumableChat.projectRoot)} (${resumableChat.messages.length} messages)`,
+        });
+      }
+      if (resumableRun) {
+        resumeChoices.push({
+          value: String(resumeChoices.length + 1),
+          action: 'resume-run',
+          label: `Continue ${resumableRun.workflow.kind} work in ${basename(resumableRun.originalCwd)}`,
+        });
+      }
+      resumeChoices.push({
+        value: String(resumeChoices.length + 1),
+        action: 'new',
+        label: 'Start something new',
+      });
+      console.log(`Continue where you left off?
+${resumeChoices
+  .map(({ value, label }) => `  ${value}) ${sanitizeTerminalText(label)}`)
+  .join('\n')}
 `);
-    const mode = await askForChoice(
-      interface_,
-      'Choose 1–8 [1]: ',
-      ['1', '2', '3', '4', '5', '6', '7', '8'],
-      '1',
-    );
-    if (mode === '7') {
-      if (!resumableRun) {
-        throw new Error('There is no incomplete run to continue.');
+      const resumeChoice = await askForChoice(
+        interface_,
+        `Choose 1–${resumeChoices.length} [1]: `,
+        resumeChoices.map(({ value }) => value),
+        '1',
+      );
+      const resumeAction = resumeChoices.find(
+        ({ value }) => value === resumeChoice,
+      )?.action;
+      if (resumeAction === 'resume-chat' && resumableChat) {
+        options.chat = true;
+        options.resume = resumableChat.id;
+        return;
       }
-      options.resume = resumableRun.id;
-      return;
-    }
-    if (mode === '8') {
-      if (!resumableChat) {
-        throw new Error('There is no saved interactive chat to reopen.');
+      if (resumeAction === 'resume-run' && resumableRun) {
+        options.resume = resumableRun.id;
+        return;
       }
-      options.chat = true;
-      options.resume = resumableChat.id;
-      return;
-    }
-    if (mode === '2') {
-      options.collaborative = 'claude';
-    } else if (mode === '3') {
-      options.collaborative = 'codex';
-    } else if (mode === '4') {
-      options.implementer = 'claude';
-    } else if (mode === '5') {
-      options.implementer = 'codex';
-    }
-    if (mode !== '1') {
-      options.untilAgreement = true;
     }
 
     const project = await chooseProject(
       interface_,
       options,
-      new UserConfigStore(appPaths.configFile, (message) =>
-        console.warn(sanitizeTerminalText(message)),
-      ),
+      configStore,
       installRoot,
     );
     options.cwd = project.root;
-    await configureModels(interface_, options);
-    console.log(`\nProject: ${sanitizeTerminalText(project.root)}`);
-    if (mode === '1') {
-      options.chat = true;
-      options.maxRounds = await askForMaxRounds(
+
+    const choices = workflowChoices({ projectKind: project.kind });
+    console.log(`
+What do you want to do?
+${choices
+  .map(
+    ({ value, label, description }) =>
+      `  ${value}) ${label}${description ? `\n     ${description}` : ''}`,
+  )
+  .join('\n')}
+`);
+    const choice = await askForChoice(
+      interface_,
+      `Choose 1–${choices.length} [1]: `,
+      choices.map(({ value }) => value),
+      '1',
+    );
+    let mode = choices.find(({ value }) => value === choice)?.action;
+    if (!mode) {
+      throw new Error('The selected workflow is no longer available.');
+    }
+    const advancedSelected = mode === 'advanced';
+    if (advancedSelected) {
+      mode = await chooseAdvancedWorkflow(interface_, project.kind);
+    } else if (mode === 'edit') {
+      mode = 'collaborate-claude';
+    }
+    if (mode === 'collaborate-claude') {
+      options.collaborative = 'claude';
+    } else if (mode === 'collaborate-codex') {
+      options.collaborative = 'codex';
+    } else if (mode === 'implement-claude') {
+      options.implementer = 'claude';
+    } else if (mode === 'implement-codex') {
+      options.implementer = 'codex';
+    }
+    if (mode !== 'chat') {
+      options.untilAgreement = true;
+    }
+    if (advancedSelected) {
+      await configureAdvancedSettings(
         interface_,
-        'Maximum automatic exchanges',
+        options,
+        configStore,
+        mode === 'chat',
       );
+    }
+    if (mode === 'chat') {
+      options.chat = true;
       console.log(
         sanitizeTerminalText(`
 Ready to chat${options.screenReader ? '' : '\n-------------'}
 Project: ${project.root}
-Automatic exchange limit: ${options.maxRounds}
-Codex model: ${options.codexModel ?? 'provider default'}
-Claude model: ${options.claudeModel ?? 'provider default'}
 Presentation: ${presentationLabel(options)}
-Each message first returns control to you. Use /auto when you want Codex and
-Claude to continue without waiting, or /implement and /collaborate when you
-want the existing safe editing workflow.
+Ordinary messages are read-only and normally ask both agents (2 provider calls).
+Use /ask for one agent, /auto for a bounded conversation, or /edit for safe changes.
 `),
       );
-      const confirmed = await askForChoice(
-        interface_,
-        'Open the chat now? [Y/n]: ',
-        ['y', 'yes', 'n', 'no'],
-        'y',
-      );
-      if (!['y', 'yes'].includes(confirmed)) {
-        throw new Error('Cancelled.');
-      }
       return;
     }
     if (
@@ -448,10 +723,20 @@ want the existing safe editing workflow.
     ) {
       options.gitDiff = await chooseReviewEvidence(interface_, options);
     }
-    options.maxRounds = await askForMaxRounds(interface_);
 
+    const workflowKind = options.collaborative
+      ? 'collaborative'
+      : options.implementer
+        ? 'fixed'
+        : 'review';
+    const firstAgent = options.collaborative ?? options.implementer;
+    const preflight = await inspectWorkflowPreflight({
+      mode: workflowKind,
+      firstAgent,
+      options,
+    });
     if (options.implementer || options.collaborative) {
-      const status = await workingTreeStatus(options);
+      const status = preflight.dirtyStatus;
       if (status && options.isolation) {
         console.log(`
 This project has uncommitted changes. The safe isolated workspace starts from
@@ -484,11 +769,12 @@ committed HEAD, so agents will not see those changes.`);
       }
     }
 
-    const projectConfig = await loadProjectConfig({
-      projectRoot: project.root,
-      configPath: options.projectConfigPath,
-    });
-    if (projectConfig.path && projectConfig.config.verification.length > 0) {
+    const projectConfig = preflight.projectConfig;
+    if (
+      workflowKind !== 'review' &&
+      projectConfig.path &&
+      projectConfig.config.verification.length > 0
+    ) {
       console.log('\nProject verification commands:');
       for (const command of projectConfig.config.verification) {
         console.log(
@@ -506,30 +792,14 @@ committed HEAD, so agents will not see those changes.`);
       options.trustProjectConfig = ['y', 'yes'].includes(trust);
     }
 
-    const workflowKind = options.collaborative
-      ? 'collaborative'
-      : options.implementer
-        ? 'fixed'
-        : 'review';
-    const estimate = estimateCalls({
-      kind: workflowKind,
-      firstAgent: options.collaborative ?? options.implementer,
-      maxRounds: options.maxRounds,
-    });
     console.log(
       sanitizeTerminalText(`
-Ready to start${options.screenReader ? '' : '\n--------------'}
-Mode: ${workflowKind}
-Project: ${project.root}
-Workspace: ${
-        workflowKind === 'review'
-          ? 'Selected project (read-only)'
-          : options.isolation
-            ? 'New isolated Git worktree'
-            : 'Selected checkout'
-      }
-Maximum cycles: ${options.maxRounds}
-Estimated calls: ${estimate.minimum}–${estimate.maximum}
+${formatWorkflowPreflight({
+  mode: workflowKind,
+  firstAgent,
+  options,
+  preflight,
+})}
 Codex model: ${options.codexModel ?? 'provider default'}
 Claude model: ${options.claudeModel ?? 'provider default'}
 Presentation: ${presentationLabel(options)}

@@ -11,6 +11,7 @@ export interface BridgeOptions {
   cwdExplicit: boolean;
   rounds: number;
   maxRounds: number;
+  maxAutoRounds: number;
   untilAgreement: boolean;
   requireAgreement: boolean;
   allowDirty: boolean;
@@ -24,8 +25,10 @@ export interface BridgeOptions {
   dryRun: boolean;
   noTranscript: boolean;
   screenReader: boolean;
+  screenReaderExplicit: boolean;
   noColor: boolean;
   ui: UiMode;
+  uiExplicit: boolean;
   trustProjectConfig: boolean;
   doctor: boolean;
   wizard: boolean;
@@ -59,7 +62,7 @@ Usage:
   agent-bridge [options] < task.md
 
 Options:
-  --wizard                Start the guided interactive setup
+  --wizard                Start guided setup; project paths can be pasted or dragged
   --list-chats            List saved interactive chats and exit
   --delete-chat <id>      Delete one saved interactive chat
   --task <text>           Task to discuss; otherwise read stdin
@@ -69,7 +72,8 @@ Options:
   --rounds <number>       Response rounds, default: 2
   --until-agreement       Continue until both agents return done
   --require-agreement     Return a non-zero exit code if agreement is not reached
-  --max-rounds <number>   Agreement or automatic-chat cap, default: 6
+  --max-rounds <number>   Workflow agreement/cycle cap, default: 6
+  --max-auto-rounds <n>   Automatic chat exchange cap, default: 6
   --implementer <agent>   Let codex or claude edit; the other reviews
   --collaborative <agent> Discuss, then alternate edits; agent edits first
   --allow-dirty           Permit direct editing with existing local changes
@@ -118,6 +122,7 @@ export function parseArgs(
     cwdExplicit: false,
     rounds: 2,
     maxRounds: 6,
+    maxAutoRounds: 6,
     untilAgreement: false,
     requireAgreement: false,
     allowDirty: false,
@@ -131,8 +136,10 @@ export function parseArgs(
     dryRun: false,
     noTranscript: false,
     screenReader: false,
+    screenReaderExplicit: false,
     noColor: false,
     ui: 'plain',
+    uiExplicit: false,
     trustProjectConfig: false,
     doctor: false,
     wizard: false,
@@ -157,6 +164,9 @@ export function parseArgs(
     },
     'max-rounds': (value) => {
       options.maxRounds = Number(value);
+    },
+    'max-auto-rounds': (value) => {
+      options.maxAutoRounds = Number(value);
     },
     implementer: (value) => {
       options.implementer = value as AgentName;
@@ -196,6 +206,7 @@ export function parseArgs(
     },
     ui: (value) => {
       options.ui = value as UiMode;
+      options.uiExplicit = true;
     },
     'delete-run': (value) => {
       options.deleteRun = value;
@@ -257,6 +268,7 @@ export function parseArgs(
       },
       '--screen-reader': (): void => {
         options.screenReader = true;
+        options.screenReaderExplicit = true;
         options.noColor = true;
       },
       '--no-color': (): void => {
@@ -309,6 +321,13 @@ export function parseArgs(
     throw new Error('--max-rounds must be an integer from 2 to 20');
   }
   if (
+    !Number.isInteger(options.maxAutoRounds) ||
+    options.maxAutoRounds < 1 ||
+    options.maxAutoRounds > 20
+  ) {
+    throw new Error('--max-auto-rounds must be an integer from 1 to 20');
+  }
+  if (
     !Number.isInteger(options.retries) ||
     options.retries < 0 ||
     options.retries > 3
@@ -345,7 +364,7 @@ export function parseArgs(
     (options.implementer || options.collaborative || options.gitDiff)
   ) {
     throw new Error(
-      'Choose editing or review roles inside chat with /implement, /collaborate, or /review',
+      'Choose editing or review roles inside chat with /edit, /implement, /collaborate, or /review',
     );
   }
   if (options.chat && (!options.isolation || options.allowDirty)) {

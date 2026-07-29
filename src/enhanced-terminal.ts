@@ -176,7 +176,13 @@ function conversationLines(
     });
   }
   if (entries.length === 0) {
-    return ['No messages yet.'];
+    return wrapText(
+      'Type a message to discuss; files stay unchanged.\n' +
+        'Make safe changes: /edit.\n' +
+        'Advanced roles: /implement or /collaborate.',
+      width,
+      maxLines,
+    );
   }
 
   const result: string[] = [];
@@ -238,7 +244,10 @@ function compactFrame(
     clipLine(sessionHeading(model), width),
     ...conversationLines(model, width, conversationRows),
     ...activityLines(model.activity, width, 1),
-    clipLine('Input · /help for commands', width),
+    clipLine(
+      'Input · discuss normally · safe changes: /edit · help: /help',
+      width,
+    ),
   ].slice(0, rows - 1);
 }
 
@@ -259,7 +268,7 @@ function stackedFrame(
     ...activityLines(model.activity, width, 2),
     divider,
     clipLine(
-      'Input · Tab completes commands · /help shows all controls',
+      'Input · discuss normally · safe changes with /edit · help: /help',
       width,
     ),
   ].slice(0, rows - 1);
@@ -293,7 +302,7 @@ function wideFrame(
     ...body,
     '─'.repeat(width),
     clipLine(
-      'Input · Tab completes commands · /help shows all controls',
+      'Input · discuss normally · safe changes with /edit · help: /help',
       width,
     ),
   ].slice(0, rows - 1);

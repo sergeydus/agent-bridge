@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -13,7 +13,7 @@ import {
 
 function makeSession(id = 'chat-test'): ChatSession {
   return {
-    version: 1,
+    version: 2,
     id,
     createdAt: '2026-07-29T00:00:00.000Z',
     updatedAt: '2026-07-29T00:00:00.000Z',
@@ -21,9 +21,11 @@ function makeSession(id = 'chat-test'): ChatSession {
     projectRoot: '/tmp/project',
     projectKind: 'git',
     maxAutoRounds: 6,
+    maxWorkflowRounds: 6,
     retries: 1,
     timeoutMinutes: 30,
     noTranscript: false,
+    ui: 'plain',
     messages: [
       {
         sequence: 1,
@@ -72,9 +74,34 @@ test('validates chat sequences, limits, and unexpected properties', () => {
     false,
   );
   assert.equal(isChatSession({ ...session, maxAutoRounds: 21 }), false);
+  assert.equal(isChatSession({ ...session, maxWorkflowRounds: 0 }), false);
+  assert.equal(isChatSession({ ...session, ui: 'unknown' }), false);
   assert.equal(isChatSession({ ...session, screenReader: 'yes' }), false);
   assert.equal(isChatSession({ ...session, nextFirstAgent: 'other' }), false);
   assert.equal(isChatSession({ ...session, unexpected: true }), false);
+});
+
+test('migrates version 1 chat limits and presentation safely', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-v1-'));
+  try {
+    const legacy = {
+      ...makeSession('chat-legacy'),
+      version: 1,
+    } as Record<string, unknown>;
+    delete legacy.maxWorkflowRounds;
+    delete legacy.ui;
+    const store = new ChatSessionStore(directory);
+    await writeFile(
+      store.pathFor('chat-legacy'),
+      `${JSON.stringify(legacy)}\n`,
+    );
+    const migrated = await store.load('chat-legacy');
+    assert.equal(migrated.version, 2);
+    assert.equal(migrated.maxWorkflowRounds, 6);
+    assert.equal(migrated.ui, 'plain');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('locks a chat against concurrent use', async () => {

@@ -13,14 +13,16 @@
     "projectRoot",
     "projectKind",
     "maxAutoRounds",
+    "maxWorkflowRounds",
     "retries",
     "timeoutMinutes",
     "noTranscript",
+    "ui",
     "messages",
     "workflows"
   ],
   "properties": {
-    "version": { "const": 1 },
+    "version": { "const": 2 },
     "id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
@@ -30,12 +32,14 @@
     "status": { "enum": ["active", "paused", "completed"] },
     "projectRoot": { "type": "string", "minLength": 1 },
     "projectKind": { "enum": ["git", "directory"] },
-    "maxAutoRounds": { "type": "integer", "minimum": 2, "maximum": 20 },
+    "maxAutoRounds": { "type": "integer", "minimum": 1, "maximum": 20 },
+    "maxWorkflowRounds": { "type": "integer", "minimum": 1, "maximum": 20 },
     "retries": { "type": "integer", "minimum": 0, "maximum": 3 },
     "timeoutMinutes": { "type": "integer", "minimum": 1, "maximum": 180 },
     "noTranscript": { "type": "boolean" },
     "screenReader": { "type": "boolean" },
     "noColor": { "type": "boolean" },
+    "ui": { "enum": ["plain", "enhanced", "auto"] },
     "codexModel": { "type": "string" },
     "claudeModel": { "type": "string" },
     "codexEffort": { "enum": ["low", "medium", "high", "xhigh", "max"] },

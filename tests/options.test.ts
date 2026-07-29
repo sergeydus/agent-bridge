@@ -17,6 +17,8 @@ test('parses portable project and workflow options', async () => {
         'claude',
         '--max-rounds',
         '8',
+        '--max-auto-rounds',
+        '4',
         '--timeout-minutes',
         '45',
       ],
@@ -28,6 +30,7 @@ test('parses portable project and workflow options', async () => {
     assert.equal(options.collaborative, 'claude');
     assert.equal(options.untilAgreement, true);
     assert.equal(options.maxRounds, 8);
+    assert.equal(options.maxAutoRounds, 4);
     assert.equal(options.timeoutMinutes, 45);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -105,6 +108,7 @@ test('parses accessible presentation and validates model names', () => {
     },
   );
   assert.equal(options.screenReader, true);
+  assert.equal(options.screenReaderExplicit, true);
   assert.equal(options.noColor, true);
   assert.equal(options.codexModel, 'codex-test');
   assert.equal(options.claudeModel, 'claude-test');
@@ -123,6 +127,7 @@ test('parses accessible presentation and validates model names', () => {
     defaultOutput: join(temporaryDirectory, 'runs'),
   });
   assert.equal(enhanced.ui, 'enhanced');
+  assert.equal(enhanced.uiExplicit, true);
   assert.throws(
     () =>
       parseArgs(['chat', '--ui', 'unknown'], {

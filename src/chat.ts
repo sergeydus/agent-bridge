@@ -54,6 +54,10 @@ import {
   type TerminalCapabilities,
 } from './terminal-capabilities.ts';
 import { sanitizeTerminalText } from './terminal-text.ts';
+import {
+  formatWorkflowPreflight,
+  inspectWorkflowPreflight,
+} from './workflow-preflight.ts';
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -96,7 +100,11 @@ function chatIntroduction(
 Agent Bridge interactive chat.
 Session: ${session.id}
 Project: ${projectRoot}
-Type a message or /help. Ctrl+D and /pause save the conversation.
+Ordinary messages discuss and review without editing files.
+An ordinary message normally asks both providers; /ask uses one.
+To make safe changes, use /edit. You will see a preview before anything edits.
+Ctrl+C cancels active work; at the prompt it saves and leaves.
+Use /help for all commands. Ctrl+D and /pause also save and leave.
 `
     : `
 Agent Bridge interactive chat
@@ -104,7 +112,11 @@ Agent Bridge interactive chat
 Session: ${session.id}
 Project: ${projectRoot}
 
-Type a message or /help. Ctrl+D and /pause save the conversation.
+Ordinary messages discuss and review without editing files.
+An ordinary message normally asks both providers; /ask uses one.
+To make safe changes, use /edit. You will see a preview before anything edits.
+Ctrl+C cancels active work; at the prompt it saves and leaves.
+Use /help for all commands. Ctrl+D and /pause also save and leave.
 `;
 }
 
@@ -196,6 +208,7 @@ Project: ${sanitizeTerminalText(session.projectRoot)} (${session.projectKind})
 Messages: ${session.messages.length}
 Linked workflows: ${session.workflows.length}
 Automatic exchange limit: ${session.maxAutoRounds}
+Editing workflow cycle limit: ${session.maxWorkflowRounds}
 Codex model: ${sanitizeTerminalText(session.codexModel ?? 'provider default')}
 Claude model: ${sanitizeTerminalText(session.claudeModel ?? 'provider default')}
 Presentation: ${
@@ -373,19 +386,21 @@ function createSession(
 ): ChatSession {
   const now = new Date().toISOString();
   return {
-    version: 1,
+    version: 2,
     id: `chat-${makeRunId(new Date(now))}`,
     createdAt: now,
     updatedAt: now,
     status: 'active',
     projectRoot: project.root,
     projectKind: project.kind,
-    maxAutoRounds: options.maxRounds,
+    maxAutoRounds: options.maxAutoRounds,
+    maxWorkflowRounds: options.maxRounds,
     retries: options.retries,
     timeoutMinutes: options.timeoutMinutes,
     noTranscript: options.noTranscript,
     screenReader: options.screenReader,
     noColor: options.noColor,
+    ui: options.ui,
     codexModel: options.codexModel,
     claudeModel: options.claudeModel,
     codexEffort: options.codexEffort,
@@ -442,10 +457,16 @@ export async function runInteractiveChat({
         throw new Error('There is no saved chat to resume.');
       }
       session = resumed;
-      options.screenReader ||= session.screenReader ?? false;
+      if (!options.screenReaderExplicit) {
+        options.screenReader = session.screenReader ?? false;
+      }
       options.noColor ||= session.noColor ?? false;
+      if (!options.uiExplicit) {
+        options.ui = session.ui;
+      }
       session.screenReader = options.screenReader;
       session.noColor = options.noColor;
+      session.ui = options.ui;
       await refreshProjectKind(session);
       session.status = 'active';
     } else {
@@ -475,7 +496,15 @@ export async function runInteractiveChat({
 
     let lock: ChatLock | undefined;
     const abortController = new AbortController();
-    const abort = (): void => abortController.abort();
+    let activeOperation: AbortController | undefined;
+    const abort = (): void => {
+      if (activeOperation && !activeOperation.signal.aborted) {
+        activeOperation.abort();
+        return;
+      }
+      abortController.abort();
+    };
+    const abortSession = (): void => abortController.abort();
     let terminalFailure: unknown;
     const redraw = (): void => {
       if (activeUiMode() !== 'enhanced') {
@@ -493,9 +522,9 @@ export async function runInteractiveChat({
       }
     };
     const tempDirectory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-'));
-    process.once('SIGINT', abort);
-    process.once('SIGTERM', abort);
-    process.once('SIGHUP', abort);
+    process.on('SIGINT', abort);
+    process.once('SIGTERM', abortSession);
+    process.once('SIGHUP', abortSession);
     if (uiResolution.mode === 'enhanced') {
       process.stdout.on('resize', redraw);
     }
@@ -515,12 +544,66 @@ export async function runInteractiveChat({
       supplementalOutputOpen = false;
       presenter.resume();
     };
+    const confirm = async (
+      prompt: string,
+      defaultYes: boolean,
+    ): Promise<boolean> => {
+      const answer = (
+        (await terminal.prompt(prompt, abortController.signal)) ?? ''
+      )
+        .trim()
+        .toLowerCase();
+      resumeAfterSupplementalOutput();
+      if (abortController.signal.aborted) {
+        return false;
+      }
+      if (!answer) {
+        return defaultYes;
+      }
+      return answer === 'y' || answer === 'yes';
+    };
 
     try {
       lock = await store.acquireLock(session.id);
       await store.save(session);
       const instructions = async (): Promise<string> =>
         (await loadInstructionContext(session.projectRoot)).prompt;
+      const runCancellableExchange = async (
+        participants?: readonly AgentName[],
+      ): Promise<{ agreed: boolean; cancelled: boolean }> => {
+        const operation = new AbortController();
+        activeOperation = operation;
+        try {
+          return {
+            agreed: await runExchange({
+              session,
+              store,
+              providers,
+              presenter,
+              tempDirectory,
+              instructions: await instructions(),
+              options,
+              signal: operation.signal,
+              presentation,
+              ...(participants ? { participants } : {}),
+            }),
+            cancelled: false,
+          };
+        } catch (error) {
+          if (operation.signal.aborted || error instanceof ProcessAbortError) {
+            await store.save(session);
+            writeSupplemental(
+              '\nActive agent work cancelled. The chat is saved and still open.\n',
+            );
+            return { agreed: false, cancelled: true };
+          }
+          throw error;
+        } finally {
+          if (activeOperation === operation) {
+            activeOperation = undefined;
+          }
+        }
+      };
       if (uiResolution.notice) {
         terminal.write(`${uiResolution.notice}. Continuing in plain mode.\n`);
       }
@@ -534,17 +617,7 @@ export async function runInteractiveChat({
 
       if (session.pendingExchange) {
         terminal.write('\nResuming the interrupted peer response…\n');
-        await runExchange({
-          session,
-          store,
-          providers,
-          presenter,
-          tempDirectory,
-          instructions: await instructions(),
-          options,
-          signal: abortController.signal,
-          presentation,
-        });
+        await runCancellableExchange();
       }
       const initialMessage =
         options.task || options.taskFile
@@ -553,17 +626,7 @@ export async function runInteractiveChat({
       if (initialMessage) {
         addPresentedMessage(session, presenter, 'user', initialMessage);
         await store.save(session);
-        await runExchange({
-          session,
-          store,
-          providers,
-          presenter,
-          tempDirectory,
-          instructions: await instructions(),
-          options,
-          signal: abortController.signal,
-          presentation,
-        });
+        await runCancellableExchange();
       }
 
       while (!abortController.signal.aborted) {
@@ -654,17 +717,7 @@ export async function runInteractiveChat({
           }
           addPresentedMessage(session, presenter, 'user', text);
           await store.save(session);
-          await runExchange({
-            session,
-            store,
-            providers,
-            presenter,
-            tempDirectory,
-            instructions: await instructions(),
-            options,
-            signal: abortController.signal,
-            presentation,
-          });
+          await runCancellableExchange();
           continue;
         }
         if (command.kind === 'pause') {
@@ -694,21 +747,11 @@ export async function runInteractiveChat({
               : command.text;
           addPresentedMessage(session, presenter, 'user', addressedText);
           await store.save(session);
-          await runExchange({
-            session,
-            store,
-            providers,
-            presenter,
-            tempDirectory,
-            instructions: await instructions(),
-            options,
-            signal: abortController.signal,
-            presentation,
-            participants:
-              command.target && command.target !== 'both'
-                ? [command.target]
-                : undefined,
-          });
+          await runCancellableExchange(
+            command.target && command.target !== 'both'
+              ? [command.target]
+              : undefined,
+          );
           continue;
         }
         if (command.kind === 'auto') {
@@ -722,29 +765,34 @@ export async function runInteractiveChat({
             await store.save(session);
           }
           const rounds = command.rounds ?? session.maxAutoRounds;
+          writeSupplemental(`
+Automatic conversation preview
+Maximum exchanges: ${rounds}
+Maximum provider calls: ${rounds * 2}
+It stops early if both agents agree.
+`);
+          if (!(await confirm('Start automatic conversation? [Y/n]: ', true))) {
+            writeSupplemental('Automatic conversation cancelled.\n');
+            continue;
+          }
           let agreed = false;
+          let cancelled = false;
           for (let round = 1; round <= rounds; round += 1) {
             terminal.write(`\nAutomatic exchange ${round}/${rounds}\n`);
-            agreed = await runExchange({
-              session,
-              store,
-              providers,
-              presenter,
-              tempDirectory,
-              instructions: await instructions(),
-              options,
-              signal: abortController.signal,
-              presentation,
-            });
-            if (agreed) {
+            const result = await runCancellableExchange();
+            agreed = result.agreed;
+            cancelled = result.cancelled;
+            if (agreed || cancelled) {
               break;
             }
           }
-          writeSupplemental(
-            agreed
-              ? '\nCodex and Claude agree on the current answer.\n'
-              : '\nAutomatic exchange limit reached; you remain in control.\n',
-          );
+          if (!cancelled) {
+            writeSupplemental(
+              agreed
+                ? '\nCodex and Claude agree on the current answer.\n'
+                : '\nAutomatic exchange limit reached; you remain in control.\n',
+            );
+          }
           continue;
         }
         if (command.kind === 'workflow') {
@@ -766,6 +814,80 @@ export async function runInteractiveChat({
             );
             continue;
           }
+          const workflowOptions: BridgeOptions = {
+            ...options,
+            cwd: session.projectRoot,
+            maxRounds: session.maxWorkflowRounds,
+            retries: session.retries,
+            timeoutMinutes: session.timeoutMinutes,
+            codexModel: session.codexModel,
+            claudeModel: session.claudeModel,
+            codexEffort: session.codexEffort,
+            claudeEffort: session.claudeEffort,
+            noTranscript: session.noTranscript,
+            screenReader: session.screenReader ?? options.screenReader,
+            noColor: session.noColor ?? options.noColor,
+            fromHead: false,
+            trustProjectConfig: false,
+          };
+          const preflight = await inspectWorkflowPreflight({
+            mode: command.mode,
+            firstAgent: command.firstAgent,
+            options: workflowOptions,
+          });
+          if (
+            command.mode !== 'review' &&
+            preflight.dirtyStatus &&
+            workflowOptions.isolation
+          ) {
+            writeSupplemental(`
+This project has uncommitted changes. A safe isolated workspace cannot include
+them; it starts from committed HEAD and leaves those changes untouched.
+`);
+            if (
+              !(await confirm(
+                'Continue explicitly from committed HEAD? [y/N]: ',
+                false,
+              ))
+            ) {
+              writeSupplemental(
+                'Editing cancelled. Commit or stash those changes, then use /edit again.\n',
+              );
+              continue;
+            }
+            workflowOptions.fromHead = true;
+          }
+          if (
+            command.mode !== 'review' &&
+            preflight.projectConfig.path &&
+            preflight.projectConfig.config.verification.length > 0
+          ) {
+            writeSupplemental('\nProject verification commands:\n');
+            for (const verification of preflight.projectConfig.config
+              .verification) {
+              writeSupplemental(
+                `  • ${[verification.command, ...verification.args].join(' ')}\n`,
+              );
+            }
+            workflowOptions.trustProjectConfig = await confirm(
+              'Allow these commands to run after edits? [y/N]: ',
+              false,
+            );
+          }
+          writeSupplemental(
+            `\n${formatWorkflowPreflight({
+              mode: command.mode,
+              firstAgent: command.firstAgent,
+              options: workflowOptions,
+              preflight,
+            })}\n`,
+          );
+          if (!(await confirm('Start this workflow? [Y/n]: ', true))) {
+            writeSupplemental(
+              'Workflow cancelled. The chat is still active and no files were changed.\n',
+            );
+            continue;
+          }
           const startedAt = new Date().toISOString();
           presenter.suspend();
           terminal.write(
@@ -784,17 +906,7 @@ export async function runInteractiveChat({
                 command.firstAgent,
               ),
               projectRoot: session.projectRoot,
-              options: {
-                ...options,
-                maxRounds: session.maxAutoRounds,
-                retries: session.retries,
-                timeoutMinutes: session.timeoutMinutes,
-                codexModel: session.codexModel,
-                claudeModel: session.claudeModel,
-                codexEffort: session.codexEffort,
-                claudeEffort: session.claudeEffort,
-                noTranscript: session.noTranscript,
-              },
+              options: workflowOptions,
             });
           } catch (error) {
             launchError = errorMessage(error);
@@ -821,7 +933,7 @@ export async function runInteractiveChat({
           await store.save(session);
           writeSupplemental(
             exitCode === 0 && !launchError
-              ? '\nWorkflow finished. You can continue the conversation.\n'
+              ? '\nWorkflow finished. Any isolated edit result was handled by its apply/keep/discard prompt. You can continue the conversation or ask the agents to inspect the result.\n'
               : `\nWorkflow did not complete successfully${
                   launchError ? `: ${launchError}` : ` (exit ${exitCode})`
                 }. The chat is still active.\n`,
@@ -848,8 +960,8 @@ export async function runInteractiveChat({
       throw error;
     } finally {
       process.removeListener('SIGINT', abort);
-      process.removeListener('SIGTERM', abort);
-      process.removeListener('SIGHUP', abort);
+      process.removeListener('SIGTERM', abortSession);
+      process.removeListener('SIGHUP', abortSession);
       process.stdout.removeListener('resize', redraw);
       try {
         presenter.stop();

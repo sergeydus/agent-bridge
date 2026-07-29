@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { promisify } from 'node:util';
 
 import {
+  CHAT_HELP,
   completeChatInput,
   parseChatInput,
   type ChatTerminal,
@@ -22,6 +25,8 @@ import type {
   ProviderMap,
   ProviderRunOptions,
 } from '../src/providers.ts';
+
+const execFileAsync = promisify(execFile);
 
 class ScriptedTerminal implements ChatTerminal {
   readonly output: string[] = [];
@@ -111,11 +116,24 @@ function fakeProviders(
 }
 
 test('parses interactive commands without accepting arbitrary actions', () => {
+  assert.match(CHAT_HELP, /files stay unchanged/);
+  assert.match(CHAT_HELP, /Named agent edits; the other agent reviews/);
+  assert.match(CHAT_HELP, /alternate editing and reviewing/);
   assert.deepEqual(parseChatInput('hello'), {
     kind: 'message',
     text: 'hello',
   });
   assert.deepEqual(parseChatInput('/auto 4'), { kind: 'auto', rounds: 4 });
+  assert.deepEqual(parseChatInput('/edit'), {
+    kind: 'workflow',
+    mode: 'collaborative',
+    firstAgent: 'claude',
+  });
+  assert.deepEqual(parseChatInput('/edit codex'), {
+    kind: 'workflow',
+    mode: 'collaborative',
+    firstAgent: 'codex',
+  });
   assert.deepEqual(parseChatInput('/ask claude inspect this carefully'), {
     kind: 'message',
     target: 'claude',
@@ -207,7 +225,9 @@ test('runs paired exchanges, autonomous agreement, and a linked workflow', async
     'the design',
     '.',
     '/auto 2',
+    'y',
     '/review',
+    'y',
     '/done',
   ]);
   const launches: WorkflowLaunchRequest[] = [];
@@ -247,6 +267,9 @@ test('runs paired exchanges, autonomous agreement, and a linked workflow', async
     );
     assert.equal(session.workflows[0]?.mode, 'review');
     assert.equal(launches.length, 1);
+    assert.equal(session.maxAutoRounds, 6);
+    assert.equal(session.maxWorkflowRounds, 4);
+    assert.equal(launches[0]?.options.maxRounds, 4);
     assert.equal(session.messages[0]?.text, 'Please review\nthe design');
     assert.match(launches[0]?.task ?? '', /Please review/);
     assert.ok(
@@ -257,6 +280,9 @@ test('runs paired exchanges, autonomous agreement, and a linked workflow', async
     assert.equal(terminal.resumes, 1);
     const output = terminal.output.join('');
     assert.match(output, /agree on the current answer/);
+    assert.match(output, /Maximum provider calls: 4/);
+    assert.match(output, /Workflow preview/);
+    assert.match(output, /Estimated provider calls:/);
     const enhancedEntries = output.split('\u001B[?1049h').length - 1;
     const enhancedExits = output.split('\u001B[?1049l').length - 1;
     assert.ok(enhancedEntries > 2);
@@ -405,7 +431,12 @@ test('runs a targeted accessible turn without disturbing paired rotation', async
 test('keeps the chat usable when a linked workflow cannot start', async () => {
   const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
   const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
-  const terminal = new ScriptedTerminal(['Review this', '/review', '/done']);
+  const terminal = new ScriptedTerminal([
+    'Review this',
+    '/review',
+    'y',
+    '/done',
+  ]);
   try {
     const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
     const options = parseArgs(['chat', '--cwd', project], {
@@ -426,7 +457,73 @@ test('keeps the chat usable when a linked workflow cannot start', async () => {
     assert.equal(session?.workflows[0]?.exitCode, 1);
     assert.equal(terminal.pauses, 1);
     assert.equal(terminal.resumes, 1);
-    assert.match(terminal.output.join(''), /launcher unavailable/);
+    const output = terminal.output.join('');
+    assert.match(output, /launcher unavailable/);
+    assert.match(output, /Ordinary messages discuss and review/);
+    assert.match(output, /make safe changes, use \/edit/);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('chat editing preflight carries explicit dirty and verification approvals', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-git-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const launches: WorkflowLaunchRequest[] = [];
+  try {
+    await execFileAsync('git', ['init'], { cwd: project });
+    await execFileAsync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: project,
+    });
+    await execFileAsync('git', ['config', 'user.name', 'Test User'], {
+      cwd: project,
+    });
+    await writeFile(join(project, 'tracked.txt'), 'committed\n');
+    await execFileAsync('git', ['add', 'tracked.txt'], { cwd: project });
+    await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: project });
+    await writeFile(join(project, 'tracked.txt'), 'local change\n');
+    await writeFile(
+      join(project, '.agent-bridge.json'),
+      JSON.stringify({
+        version: 1,
+        verification: [{ command: 'npm', args: ['test'] }],
+        protectedPaths: [],
+      }),
+    );
+
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const terminal = new ScriptedTerminal([
+      'Implement the change',
+      '/edit',
+      'yes',
+      'yes',
+      'yes',
+      '/done',
+    ]);
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--cwd', project], {
+        initialCwd: '/',
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal,
+      launchWorkflow: async (request) => {
+        launches.push(request);
+        return 0;
+      },
+    });
+
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0]?.mode, 'collaborative');
+    assert.equal(launches[0]?.firstAgent, 'claude');
+    assert.equal(launches[0]?.options.fromHead, true);
+    assert.equal(launches[0]?.options.trustProjectConfig, true);
+    const output = terminal.output.join('');
+    assert.match(output, /starts from committed HEAD/);
+    assert.match(output, /npm test/);
+    assert.match(output, /Workflow preview/);
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
@@ -495,6 +592,97 @@ test('resume completes an interrupted peer response without repeating the first'
     assert.deepEqual(called, ['codex', 'claude', 'claude']);
     assert.equal(completed.pendingExchange, undefined);
     assert.equal(completed.status, 'completed');
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('resume restores the saved chat interface unless explicitly overridden', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const capabilities = {
+    stdinIsTty: true,
+    stdoutIsTty: true,
+    term: 'xterm-256color',
+    columns: 100,
+    rows: 24,
+  } as const;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--cwd', project, '--ui', 'enhanced'], {
+        initialCwd: '/',
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal: new ScriptedTerminal(['/pause']),
+      terminalCapabilities: capabilities,
+    });
+    const paused = await new ChatSessionStore(paths.chatsDirectory).latest();
+    assert.equal(paused?.ui, 'enhanced');
+
+    const terminal = new ScriptedTerminal(['/done']);
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--resume', paused?.id ?? 'missing'], {
+        initialCwd: project,
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal,
+      terminalCapabilities: capabilities,
+    });
+    assert.equal(terminal.output.join('').includes('\u001B[?1049h'), true);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('Ctrl+C cancels active provider work but keeps the chat open', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  let providerCalls = 0;
+  const provider = (name: 'codex' | 'claude'): AgentProvider => ({
+    name,
+    label: name,
+    version: async () => ({ stdout: 'test', stderr: '', exitCode: 0 }),
+    authStatus: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    run: async (_prompt, options) => {
+      providerCalls += 1;
+      if (!options.signal) {
+        throw new Error('test expected a cancellation signal');
+      }
+      const signal = options.signal;
+      setImmediate(() => process.emit('SIGINT'));
+      await new Promise<void>((_resolve, reject) => {
+        signal.addEventListener(
+          'abort',
+          () => reject(new Error('provider interrupted')),
+          { once: true },
+        );
+      });
+      throw new Error('unreachable');
+    },
+  });
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const terminal = new ScriptedTerminal(['Please inspect this', '/done']);
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--cwd', project], {
+        initialCwd: '/',
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers: { codex: provider('codex'), claude: provider('claude') },
+      terminal,
+    });
+    const session = await new ChatSessionStore(paths.chatsDirectory).latest();
+    assert.equal(session?.status, 'completed');
+    assert.equal(providerCalls, 1);
+    assert.match(terminal.output.join(''), /Active agent work cancelled/);
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
