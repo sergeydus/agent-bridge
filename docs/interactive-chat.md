@@ -19,8 +19,20 @@ For each human message:
 The first speaker alternates between exchanges. This prevents either provider
 from permanently anchoring the discussion.
 
+`/ask codex <message>` and `/ask claude <message>` request a single read-only
+response. The equivalent short forms are `@codex <message>` and
+`@claude <message>`. `/both <message>` and `@both <message>` explicitly use the
+normal paired exchange. Targeted turns are checkpointed in the same bounded
+history but do not create a pending peer response or claim two-agent
+agreement. They also do not change which provider leads the next paired
+exchange.
+
 Normal input sends one line. `/paste` accepts a multiline message and sends it
 when a line containing only `.` is entered.
+
+The terminal completes slash commands and agent mentions with Tab. Its
+in-process input history is capped and deduplicated; Agent Bridge does not
+create a second persistent command-history file.
 
 If interruption occurs after the first response, the checkpoint records the
 pending peer and exact saved message. Resume calls only that missing peer; it
@@ -44,6 +56,7 @@ Every active session has:
 - an owner-only Markdown transcript;
 - an exclusive lock;
 - saved project type, provider settings, retry limit, and timeout;
+- saved screen-reader and color presentation preferences;
 - linked workflow results.
 
 Completed sessions remain reopenable. `/pause`, Ctrl+D, and interruption leave
@@ -61,9 +74,10 @@ Bridge child workflow using the bounded conversation as its task:
 - `/review` — read-only agreement workflow.
 
 The child receives the existing options for models, effort, timeouts, output,
-privacy, and trusted project configuration. Editing still requires Git,
-defaults to a detached worktree, and uses the standard completion choices.
-The temporary task file is owner-only and removed when the workflow exits.
+privacy, presentation, and trusted project configuration. Editing still
+requires Git, defaults to a detached worktree, and uses the standard completion
+choices. The temporary task file is owner-only and removed when the workflow
+exits.
 
 After the child exits, the chat records its mode and exit code and stays open.
 Later agents are told to inspect the actual project state rather than assuming
@@ -80,3 +94,14 @@ agent-bridge chat --delete-chat <chat-id>
 
 Deletion acquires the session lock first, so an active chat cannot be deleted
 from another process.
+
+## Presentation
+
+`--screen-reader` selects semantic, append-only output without color or
+decorative separators. It uses descriptive prompt labels and forwards
+Claude's native accessibility flag. `--no-color` disables bridge color without
+changing the rest of the standard layout. `NO_COLOR` is also honored.
+
+Speaker names and structured decisions are always written as text, so color is
+supplemental. Presentation preferences are restored when a chat is resumed
+and forwarded when chat launches an implementation or review workflow.

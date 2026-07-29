@@ -21,6 +21,7 @@ Three filesystem locations must never be conflated:
 bin/agent-bridge.mjs
   └─ CLI composition (cli.ts)
       ├─ options + wizard ───────── options.ts, wizard.ts
+      ├─ terminal presentation ──── presentation.ts, ui.ts
       ├─ interactive chat ──────── chat.ts, chat-input.ts,
       │                           chat-state.ts, chat-workflow.ts
       ├─ task + review evidence ── task.ts
@@ -37,7 +38,7 @@ bin/agent-bridge.mjs
       ├─ checkpoints + history ─── state.ts, runs.ts
       │                              run-management.ts
       ├─ transcripts ───────────── transcript.ts
-      └─ diagnostics + output ──── doctor.ts, ui.ts
+      └─ diagnostics ───────────── doctor.ts
 ```
 
 The CLI composes modules but does not decide turn order. The orchestrator does
@@ -48,6 +49,11 @@ Interactive chat is a higher-level coordinator. Its ordinary turns are always
 read-only. Editing and formal review commands launch the existing one-shot
 workflow as a child process with inherited terminal control, so repository
 safety has one implementation rather than two.
+
+Presentation is resolved once at the CLI boundary. Semantic speaker and
+progress formatting lives outside provider orchestration, while provider
+adapters receive only the accessibility capability they need to construct
+their own CLI arguments.
 
 ## Turn data flow
 

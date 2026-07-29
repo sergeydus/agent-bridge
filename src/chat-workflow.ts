@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { ChatSession, ChatWorkflowMode } from './chat-state.ts';
 import type { AgentName } from './core.ts';
 import type { BridgeOptions } from './options.ts';
+import { agentLabel } from './presentation.ts';
 import { clip, MAX_CONTEXT_CHARS } from './prompts.ts';
 
 export interface WorkflowLaunchRequest {
@@ -19,10 +20,6 @@ export interface WorkflowLaunchRequest {
 export type WorkflowLauncher = (
   request: WorkflowLaunchRequest,
 ) => Promise<number>;
-
-function agentLabel(agent: AgentName): string {
-  return agent === 'codex' ? 'Codex' : 'Claude';
-}
 
 export function buildChatWorkflowTask(
   session: ChatSession,
@@ -112,6 +109,11 @@ export function buildWorkflowArguments(
   }
   if (options.noTranscript) {
     args.push('--no-transcript');
+  }
+  if (options.screenReader) {
+    args.push('--screen-reader');
+  } else if (options.noColor) {
+    args.push('--no-color');
   }
   if (options.fromHead) {
     args.push('--from-head');

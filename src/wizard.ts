@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 
 import { UserConfigStore } from './config.ts';
 import { ChatSessionStore } from './chat-state.ts';
-import { estimateCalls } from './core.ts';
+import { estimateCalls, type ReasoningEffort } from './core.ts';
 import type { AppPaths } from './paths.ts';
 import type { BridgeOptions } from './options.ts';
 import { loadProjectConfig } from './project-config.ts';
@@ -14,8 +14,12 @@ import { resolveProject, type SelectedProject } from './project.ts';
 import { workingTreeStatus } from './snapshot.ts';
 import { RunStateStore } from './state.ts';
 
+interface Questioner {
+  question(prompt: string): Promise<string>;
+}
+
 async function askForChoice(
-  interface_: ReadlineInterface,
+  interface_: Questioner,
   prompt: string,
   choices: string[],
   defaultChoice: string,
@@ -28,6 +32,124 @@ async function askForChoice(
     }
     console.log(`Please enter ${choices.join(', ')}.`);
   }
+}
+
+export async function configurePresentation(
+  interface_: Questioner,
+  options: BridgeOptions,
+): Promise<void> {
+  if (options.screenReader) {
+    return;
+  }
+  console.log(`
+How should Agent Bridge present the conversation?
+  1) Standard terminal output
+  2) Screen-reader-friendly plain output
+`);
+  const presentation = await askForChoice(
+    interface_,
+    'Choose 1 or 2 [1]: ',
+    ['1', '2'],
+    '1',
+  );
+  if (presentation === '2') {
+    options.screenReader = true;
+    options.noColor = true;
+  }
+}
+
+const EFFORT_CHOICES: Array<{
+  choice: string;
+  value?: ReasoningEffort;
+  label: string;
+}> = [
+  { choice: '1', label: 'Provider default' },
+  { choice: '2', value: 'low', label: 'Low' },
+  { choice: '3', value: 'medium', label: 'Medium' },
+  { choice: '4', value: 'high', label: 'High' },
+  { choice: '5', value: 'xhigh', label: 'Extra high' },
+  { choice: '6', value: 'max', label: 'Maximum' },
+];
+
+async function askForModel(
+  interface_: Questioner,
+  label: string,
+): Promise<string | undefined> {
+  while (true) {
+    const answer = (await interface_.question(label)).trim();
+    if (!answer) {
+      return undefined;
+    }
+    if (answer.length <= 200 && !/\s/.test(answer)) {
+      return answer;
+    }
+    console.log('Enter one model name without spaces, or leave it blank.');
+  }
+}
+
+async function askForEffort(
+  interface_: Questioner,
+  provider: string,
+): Promise<ReasoningEffort | undefined> {
+  console.log(`
+${provider} reasoning effort:
+${EFFORT_CHOICES.map(({ choice, label }) => `  ${choice}) ${label}`).join('\n')}
+`);
+  const choice = await askForChoice(
+    interface_,
+    'Choose 1–6 [1]: ',
+    EFFORT_CHOICES.map((item) => item.choice),
+    '1',
+  );
+  return EFFORT_CHOICES.find((item) => item.choice === choice)?.value;
+}
+
+export async function configureModels(
+  interface_: Questioner,
+  options: BridgeOptions,
+): Promise<void> {
+  if (
+    options.codexModel &&
+    options.claudeModel &&
+    options.codexEffort &&
+    options.claudeEffort
+  ) {
+    return;
+  }
+  const customize = await askForChoice(
+    interface_,
+    '\nCustomize models or reasoning effort? [y/N]: ',
+    ['y', 'yes', 'n', 'no'],
+    'n',
+  );
+  if (!['y', 'yes'].includes(customize)) {
+    return;
+  }
+  if (!options.codexModel) {
+    options.codexModel = await askForModel(
+      interface_,
+      'Codex model [provider default]: ',
+    );
+  }
+  if (!options.claudeModel) {
+    options.claudeModel = await askForModel(
+      interface_,
+      'Claude model [provider default]: ',
+    );
+  }
+  if (!options.codexEffort) {
+    options.codexEffort = await askForEffort(interface_, 'Codex');
+  }
+  if (!options.claudeEffort) {
+    options.claudeEffort = await askForEffort(interface_, 'Claude');
+  }
+}
+
+function presentationLabel(options: BridgeOptions): string {
+  if (options.screenReader) {
+    return 'screen-reader-friendly';
+  }
+  return options.noColor ? 'plain, no color' : 'standard';
 }
 
 async function askForMaxRounds(
@@ -183,18 +305,27 @@ export async function runWizard({
   });
 
   try {
+    await configurePresentation(interface_, options);
     const resumableRun = await new RunStateStore(
       appPaths.stateDirectory,
     ).latestIncomplete();
     const resumableChat = await new ChatSessionStore(
       appPaths.chatsDirectory,
     ).latest();
-    console.log(`
+    console.log(
+      options.screenReader
+        ? `
+Agent Bridge.
+Codex and Claude will work in turns until both agree the task is done.
+Project material needed for the task may be sent to both providers.
+`
+        : `
 Agent Bridge
 ============
 Codex and Claude will work in turns until both agree the task is done.
 Project material needed for the task may be sent to both providers.
-`);
+`,
+    );
     console.log(`What should they do?
   1) Open a longer interactive chat (recommended)
   2) Collaborate: discuss first, then alternate editing (Claude starts)
@@ -252,6 +383,7 @@ Project material needed for the task may be sent to both providers.
       installRoot,
     );
     options.cwd = project.root;
+    await configureModels(interface_, options);
     console.log(`\nProject: ${project.root}`);
     if (mode === '1') {
       options.chat = true;
@@ -260,10 +392,12 @@ Project material needed for the task may be sent to both providers.
         'Maximum automatic exchanges',
       );
       console.log(`
-Ready to chat
--------------
+Ready to chat${options.screenReader ? '' : '\n-------------'}
 Project: ${project.root}
 Automatic exchange limit: ${options.maxRounds}
+Codex model: ${options.codexModel ?? 'provider default'}
+Claude model: ${options.claudeModel ?? 'provider default'}
+Presentation: ${presentationLabel(options)}
 Each message first returns control to you. Use /auto when you want Codex and
 Claude to continue without waiting, or /implement and /collaborate when you
 want the existing safe editing workflow.
@@ -370,8 +504,7 @@ committed HEAD, so agents will not see those changes.`);
       maxRounds: options.maxRounds,
     });
     console.log(`
-Ready to start
---------------
+Ready to start${options.screenReader ? '' : '\n--------------'}
 Mode: ${workflowKind}
 Project: ${project.root}
 Workspace: ${
@@ -383,6 +516,9 @@ Workspace: ${
     }
 Maximum cycles: ${options.maxRounds}
 Estimated calls: ${estimate.minimum}–${estimate.maximum}
+Codex model: ${options.codexModel ?? 'provider default'}
+Claude model: ${options.claudeModel ?? 'provider default'}
+Presentation: ${presentationLabel(options)}
 Task: ${options.task}
 `);
     const confirmed = await askForChoice(

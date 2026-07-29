@@ -22,6 +22,8 @@ export interface BridgeOptions {
   output: string;
   dryRun: boolean;
   noTranscript: boolean;
+  screenReader: boolean;
+  noColor: boolean;
   trustProjectConfig: boolean;
   doctor: boolean;
   wizard: boolean;
@@ -82,6 +84,8 @@ Options:
   --claude-effort <level> low, medium, high, xhigh, or max
   --output <directory>    Override transcript and workspace storage
   --no-transcript         Remove completed run or chat transcripts
+  --screen-reader         Use append-only, screen-reader-friendly presentation
+  --no-color              Disable Agent Bridge color output
   --project-config <path> Use a specific .agent-bridge.json configuration
   --trust-project-config  Run verification commands from project configuration
   --list-runs             List saved runs and exit
@@ -123,6 +127,8 @@ export function parseArgs(
     output: defaultOutput,
     dryRun: false,
     noTranscript: false,
+    screenReader: false,
+    noColor: false,
     trustProjectConfig: false,
     doctor: false,
     wizard: false,
@@ -242,6 +248,13 @@ export function parseArgs(
       '--no-transcript': (): void => {
         options.noTranscript = true;
       },
+      '--screen-reader': (): void => {
+        options.screenReader = true;
+        options.noColor = true;
+      },
+      '--no-color': (): void => {
+        options.noColor = true;
+      },
       '--trust-project-config': (): void => {
         options.trustProjectConfig = true;
       },
@@ -339,6 +352,14 @@ export function parseArgs(
   }
   if (options.claudeEffort && !validEfforts.includes(options.claudeEffort)) {
     throw new Error('--claude-effort must be low, medium, high, xhigh, or max');
+  }
+  for (const [flag, model] of [
+    ['--codex-model', options.codexModel],
+    ['--claude-model', options.claudeModel],
+  ] as const) {
+    if (model && (model.length > 200 || /\s/.test(model))) {
+      throw new Error(`${flag} must be one model name without spaces`);
+    }
   }
   if (options.implementer || options.collaborative) {
     options.untilAgreement = true;

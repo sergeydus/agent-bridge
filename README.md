@@ -44,7 +44,8 @@ agent-bridge --help
 ```
 
 The guided wizard explains every consequential choice, shows an estimated
-number of agent calls, and asks for confirmation before starting.
+number of agent calls, offers model and reasoning-effort selection, and asks
+for confirmation before starting.
 
 ## Interactive chat
 
@@ -68,6 +69,9 @@ sandboxed.
 Inside the chat:
 
 ```text
+/ask codex|claude <text> Ask one agent directly
+/both <text>              Explicitly ask both agents
+@codex|@claude|@both ... Short form for a targeted message
 /auto [1-20]              Continue autonomously until agreement or the limit
 /implement codex|claude   Start safe fixed-role implementation and review
 /collaborate codex|claude Start safe alternating edits; named agent goes first
@@ -79,6 +83,15 @@ Inside the chat:
 /done                     Complete and leave
 /help                     Show all commands
 ```
+
+Press Tab to complete commands and agent names. Readline history is available
+for the current process and removes duplicate entries; it is not written to a
+separate shell-history file.
+
+Ordinary messages and `/both` produce the normal two-agent exchange. `/ask`
+and the `@codex` or `@claude` forms call only the selected agent, which is
+useful for a focused follow-up without paying for an unnecessary peer call.
+The targeted message and response remain part of the shared bounded history.
 
 `/implement` and `/collaborate` do not grant ad-hoc write access inside the
 chat. They launch the same isolated Git workflow described below, including
@@ -98,6 +111,22 @@ agent-bridge chat --delete-chat <chat-id>
 Use `--task` or `--task-file` with `chat` to supply the first message
 immediately. `--no-transcript` keeps only the active recovery checkpoint and
 deletes the chat history after `/done`.
+
+## Accessible terminal output
+
+Choose screen-reader-friendly presentation in the wizard, or start any mode
+with:
+
+```sh
+agent-bridge chat --screen-reader --cwd /path/to/project
+```
+
+This mode uses append-only semantic status text, descriptive prompts, no ANSI
+color, and no decorative progress glyphs. It is saved with interactive chats
+and forwarded to child workflows. Claude also receives its native
+screen-reader CLI flag. Use `--no-color` when you only want to disable Agent
+Bridge color output. The standard `NO_COLOR` environment variable is honored.
+Color is never the only way an agent or decision is identified.
 
 Check your setup:
 
@@ -343,6 +372,8 @@ chat                     Open interactive human-guided chat mode
 --claude-model <name>    Claude model override
 --codex-effort <level>   Codex reasoning effort
 --claude-effort <level>  Claude reasoning effort
+--screen-reader          Use screen-reader-friendly, append-only output
+--no-color               Disable Agent Bridge color output
 --project-config <path>  Alternate project configuration
 --trust-project-config   Run configured verification commands
 --output <directory>     Override run-data storage

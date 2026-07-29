@@ -7,8 +7,11 @@ export const MAX_USER_MESSAGE_CHARS = 200_000;
 
 export const CHAT_HELP = `Interactive chat commands
 
-  Type a message                 Ask Codex and Claude; then return to the prompt
-  /auto [1-20]                  Let them continue until agreement or the limit
+  Type a message                 Ask both agents; then return to the prompt
+  /ask codex|claude <message>    Ask only one agent
+  /both <message>                Explicitly ask both agents
+  @codex|@claude|@both <message> Short form for a targeted message
+  /auto [1-20]                   Let them continue until agreement or the limit
   /implement codex|claude       Start a safe fixed-role implementation workflow
   /collaborate codex|claude     Start alternating edits; named agent goes first
   /review                       Start a read-only agreement workflow
@@ -29,7 +32,7 @@ export interface ChatTerminal {
 }
 
 export type ChatCommand =
-  | { kind: 'message'; text: string }
+  | { kind: 'message'; text: string; target?: AgentName | 'both' }
   | { kind: 'auto'; rounds?: number }
   | { kind: 'workflow'; mode: ChatWorkflowMode; firstAgent?: AgentName }
   | { kind: 'history'; count: number }
@@ -49,6 +52,21 @@ export function parseChatInput(input: string): ChatCommand {
     return { kind: 'empty' };
   }
   if (!trimmed.startsWith('/')) {
+    const mention = /^@(codex|claude|both)\s+([\s\S]+)$/i.exec(trimmed);
+    if (mention?.[1] && mention[2]?.trim()) {
+      const text = mention[2].trim();
+      if (text.length > MAX_USER_MESSAGE_CHARS) {
+        return {
+          kind: 'invalid',
+          message: `Message exceeds ${MAX_USER_MESSAGE_CHARS.toLocaleString()} characters.`,
+        };
+      }
+      return {
+        kind: 'message',
+        text,
+        target: mention[1].toLowerCase() as AgentName | 'both',
+      };
+    }
     if (trimmed.length > MAX_USER_MESSAGE_CHARS) {
       return {
         kind: 'invalid',
@@ -57,10 +75,43 @@ export function parseChatInput(input: string): ChatCommand {
     }
     return { kind: 'message', text: trimmed };
   }
-  const [rawCommand = '', rawArgument, ...extra] = trimmed.split(/\s+/);
+  const [rawCommand = '', ...arguments_] = trimmed.split(/\s+/);
+  const rawArgument = arguments_[0];
+  const extra = arguments_.slice(1);
   const command = rawCommand.toLowerCase();
-  if (extra.length > 0) {
+  if (extra.length > 0 && command !== '/ask' && command !== '/both') {
     return { kind: 'invalid', message: `Too many arguments for ${command}.` };
+  }
+  if (command === '/ask') {
+    const target = parseAgent(rawArgument);
+    const text = extra.join(' ').trim();
+    if (!target || !text) {
+      return {
+        kind: 'invalid',
+        message: '/ask expects codex or claude followed by a message.',
+      };
+    }
+    return text.length <= MAX_USER_MESSAGE_CHARS
+      ? { kind: 'message', target, text }
+      : {
+          kind: 'invalid',
+          message: `Message exceeds ${MAX_USER_MESSAGE_CHARS.toLocaleString()} characters.`,
+        };
+  }
+  if (command === '/both') {
+    const text = arguments_.join(' ').trim();
+    if (!text) {
+      return {
+        kind: 'invalid',
+        message: '/both expects a message.',
+      };
+    }
+    return text.length <= MAX_USER_MESSAGE_CHARS
+      ? { kind: 'message', target: 'both', text }
+      : {
+          kind: 'invalid',
+          message: `Message exceeds ${MAX_USER_MESSAGE_CHARS.toLocaleString()} characters.`,
+        };
   }
   if (command === '/help') {
     return rawArgument === undefined
@@ -131,10 +182,41 @@ export function parseChatInput(input: string): ChatCommand {
   };
 }
 
+const CHAT_COMPLETIONS = [
+  '/ask codex ',
+  '/ask claude ',
+  '/both ',
+  '/auto ',
+  '/implement codex',
+  '/implement claude',
+  '/collaborate codex',
+  '/collaborate claude',
+  '/review',
+  '/paste',
+  '/status',
+  '/history ',
+  '/help',
+  '/pause',
+  '/done',
+  '@codex ',
+  '@claude ',
+  '@both ',
+];
+
+export function completeChatInput(line: string): [string[], string] {
+  const matches = CHAT_COMPLETIONS.filter((completion) =>
+    completion.startsWith(line.toLowerCase()),
+  );
+  return [line.length === 0 ? CHAT_COMPLETIONS : matches, line];
+}
+
 export function createChatTerminal(): ChatTerminal {
   const interface_ = createInterface({
     input: process.stdin,
     output: process.stdout,
+    completer: completeChatInput,
+    historySize: 100,
+    removeHistoryDuplicates: true,
   });
   const queuedLines: string[] = [];
   let closed = false;

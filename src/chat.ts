@@ -25,6 +25,14 @@ import { makeRunId, otherAgent, type AgentName } from './core.ts';
 import { loadInstructionContext } from './instructions.ts';
 import type { BridgeOptions } from './options.ts';
 import type { AppPaths } from './paths.ts';
+import {
+  agentLabel,
+  formatAgentHeartbeat,
+  formatAgentResponse,
+  formatAgentStarted,
+  resolvePresentation,
+  type PresentationPreferences,
+} from './presentation.ts';
 import { ProcessAbortError } from './process.ts';
 import { resolveProject } from './project.ts';
 import { interactiveChatPrompt } from './prompts.ts';
@@ -34,10 +42,6 @@ import {
   type ProviderMap,
 } from './providers.ts';
 import { resolveTask } from './task.ts';
-
-function agentLabel(agent: AgentName): string {
-  return agent === 'codex' ? 'Codex' : 'Claude';
-}
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -79,13 +83,25 @@ function recentHistory(session: ChatSession, count: number): string {
     .join('\n\n');
 }
 
-function chatStatus(session: ChatSession): string {
+function chatStatus(
+  session: ChatSession,
+  presentation: PresentationPreferences,
+): string {
   return `Session: ${session.id}
 Status: ${session.status}
 Project: ${session.projectRoot} (${session.projectKind})
 Messages: ${session.messages.length}
 Linked workflows: ${session.workflows.length}
-Automatic exchange limit: ${session.maxAutoRounds}`;
+Automatic exchange limit: ${session.maxAutoRounds}
+Codex model: ${session.codexModel ?? 'provider default'}
+Claude model: ${session.claudeModel ?? 'provider default'}
+Presentation: ${
+    presentation.screenReader
+      ? 'screen-reader-friendly'
+      : presentation.color
+        ? 'enhanced'
+        : 'plain, no color'
+  }`;
 }
 
 async function refreshProjectKind(session: ChatSession): Promise<boolean> {
@@ -102,7 +118,7 @@ async function refreshProjectKind(session: ChatSession): Promise<boolean> {
   return true;
 }
 
-function nextFirstAgent(session: ChatSession): AgentName {
+function legacyNextFirstAgent(session: ChatSession): AgentName {
   const agentMessages = session.messages.filter(
     (message) => message.role === 'codex' || message.role === 'claude',
   );
@@ -118,6 +134,8 @@ async function runExchange({
   instructions,
   options,
   signal,
+  presentation,
+  participants,
 }: {
   session: ChatSession;
   store: ChatSessionStore;
@@ -127,19 +145,38 @@ async function runExchange({
   instructions: string;
   options: BridgeOptions;
   signal: AbortSignal;
+  presentation: PresentationPreferences;
+  participants?: readonly AgentName[];
 }): Promise<boolean> {
   const pending = session.pendingExchange;
-  const first = pending?.firstAgent ?? nextFirstAgent(session);
+  if (pending && participants) {
+    throw new Error('Cannot target an agent while a peer response is pending.');
+  }
+  const first =
+    pending?.firstAgent ??
+    session.nextFirstAgent ??
+    legacyNextFirstAgent(session);
   const second = pending?.secondAgent ?? otherAgent(first);
   let firstMessage = pending
     ? session.messages[pending.firstMessageSequence - 1]
     : undefined;
-  const agents = pending ? [second] : [first, second];
+  const agents = participants ?? (pending ? [second] : [first, second]);
+  const pairedExchange = participants === undefined;
 
   for (const agent of agents) {
-    terminal.write(`\n${agentLabel(agent)} is thinking…\n`);
+    const startedAt = Date.now();
+    const model = agent === 'codex' ? session.codexModel : session.claudeModel;
+    terminal.write(
+      formatAgentStarted({ agent, model, preferences: presentation }),
+    );
     const heartbeat = setInterval(() => {
-      terminal.write(`  ${agentLabel(agent)} is still working…\n`);
+      terminal.write(
+        formatAgentHeartbeat({
+          agent,
+          startedAt,
+          preferences: presentation,
+        }),
+      );
     }, 30_000);
     heartbeat.unref();
     try {
@@ -149,7 +186,8 @@ async function runExchange({
           agent,
           history: session.messages,
           projectInstructions: instructions,
-          currentPeerResponse: agent === second ? firstMessage : undefined,
+          currentPeerResponse:
+            pairedExchange && agent === second ? firstMessage : undefined,
         }),
         options: {
           cwd: session.projectRoot,
@@ -163,6 +201,7 @@ async function runExchange({
           model: agent === 'codex' ? session.codexModel : session.claudeModel,
           effort:
             agent === 'codex' ? session.codexEffort : session.claudeEffort,
+          screenReader: presentation.screenReader,
           signal,
         },
         retries: session.retries,
@@ -177,27 +216,34 @@ async function runExchange({
         response.text,
         response.decision,
       );
-      if (agent === first) {
+      if (pairedExchange && agent === first) {
         firstMessage = message;
         session.pendingExchange = {
           firstAgent: first,
           secondAgent: second,
           firstMessageSequence: message.sequence,
         };
-      } else {
+      } else if (pairedExchange) {
         session.pendingExchange = undefined;
+        session.nextFirstAgent = otherAgent(first);
       }
       await store.save(session);
       terminal.write(
-        `\n${agentLabel(agent)}${response.decision ? ` [${response.decision}]` : ''}\n${'─'.repeat(
-          agentLabel(agent).length,
-        )}\n${response.text}\n`,
+        formatAgentResponse({
+          agent,
+          decision: response.decision,
+          text: response.text,
+          preferences: presentation,
+        }),
       );
     } finally {
       clearInterval(heartbeat);
     }
   }
 
+  if (!pairedExchange) {
+    return false;
+  }
   const latest = session.messages.slice(-2);
   return (
     latest.length === 2 &&
@@ -222,10 +268,13 @@ function createSession(
     retries: options.retries,
     timeoutMinutes: options.timeoutMinutes,
     noTranscript: options.noTranscript,
+    screenReader: options.screenReader,
+    noColor: options.noColor,
     codexModel: options.codexModel,
     claudeModel: options.claudeModel,
     codexEffort: options.codexEffort,
     claudeEffort: options.claudeEffort,
+    nextFirstAgent: 'codex',
     pendingExchange: undefined,
     messages: [],
     workflows: [],
@@ -284,11 +333,19 @@ export async function runInteractiveChat({
       throw new Error('There is no saved chat to resume.');
     }
     session = resumed;
+    options.screenReader ||= session.screenReader ?? false;
+    options.noColor ||= session.noColor ?? false;
+    session.screenReader = options.screenReader;
+    session.noColor = options.noColor;
     await refreshProjectKind(session);
     session.status = 'active';
   } else {
     session = createSession(options, await resolveProject(options.cwd));
   }
+  const presentation = resolvePresentation({
+    screenReader: options.screenReader,
+    noColor: options.noColor,
+  });
 
   let lock: ChatLock | undefined;
   const abortController = new AbortController();
@@ -303,14 +360,23 @@ export async function runInteractiveChat({
     await store.save(session);
     const instructions = async (): Promise<string> =>
       (await loadInstructionContext(session.projectRoot)).prompt;
-    terminal.write(`
+    terminal.write(
+      presentation.screenReader
+        ? `
+Agent Bridge interactive chat.
+Session: ${session.id}
+Project: ${session.projectRoot}
+Type a message or /help. Ctrl+D and /pause save the conversation.
+`
+        : `
 Agent Bridge interactive chat
 =============================
 Session: ${session.id}
 Project: ${session.projectRoot}
 
 Type a message or /help. Ctrl+D and /pause save the conversation.
-`);
+`,
+    );
 
     if (session.pendingExchange) {
       terminal.write('\nResuming the interrupted peer response…\n');
@@ -323,6 +389,7 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
         instructions: await instructions(),
         options,
         signal: abortController.signal,
+        presentation,
       });
     }
     const initialMessage =
@@ -339,11 +406,15 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
         instructions: await instructions(),
         options,
         signal: abortController.signal,
+        presentation,
       });
     }
 
     while (!abortController.signal.aborted) {
-      const input = await terminal.prompt('\nYou > ', abortController.signal);
+      const input = await terminal.prompt(
+        presentation.screenReader ? '\nYour message: ' : '\nYou > ',
+        abortController.signal,
+      );
       const command = parseChatInput(input ?? '/pause');
       if (command.kind === 'empty') {
         continue;
@@ -360,7 +431,7 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
         if (await refreshProjectKind(session)) {
           await store.save(session);
         }
-        terminal.write(`\n${chatStatus(session)}\n`);
+        terminal.write(`\n${chatStatus(session, presentation)}\n`);
         continue;
       }
       if (command.kind === 'history') {
@@ -375,7 +446,10 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
         let characters = 0;
         let tooLong = false;
         while (true) {
-          const line = await terminal.prompt('… ', abortController.signal);
+          const line = await terminal.prompt(
+            presentation.screenReader ? 'Next line: ' : '… ',
+            abortController.signal,
+          );
           if (line === null) {
             session.status = 'paused';
             await store.save(session);
@@ -423,6 +497,7 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
           instructions: await instructions(),
           options,
           signal: abortController.signal,
+          presentation,
         });
         continue;
       }
@@ -445,7 +520,11 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
         if (await refreshProjectKind(session)) {
           await store.save(session);
         }
-        addMessage(session, 'user', command.text);
+        const addressedText =
+          command.target && command.target !== 'both'
+            ? `Addressed to ${agentLabel(command.target)}:\n${command.text}`
+            : command.text;
+        addMessage(session, 'user', addressedText);
         await store.save(session);
         await runExchange({
           session,
@@ -456,6 +535,11 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
           instructions: await instructions(),
           options,
           signal: abortController.signal,
+          presentation,
+          participants:
+            command.target && command.target !== 'both'
+              ? [command.target]
+              : undefined,
         });
         continue;
       }
@@ -482,6 +566,7 @@ Type a message or /help. Ctrl+D and /pause save the conversation.
             instructions: await instructions(),
             options,
             signal: abortController.signal,
+            presentation,
           });
           if (agreed) {
             terminal.write('\nCodex and Claude agree on the current answer.\n');
