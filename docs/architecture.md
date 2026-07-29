@@ -21,7 +21,8 @@ Three filesystem locations must never be conflated:
 bin/agent-bridge.mjs
   └─ CLI composition (cli.ts)
       ├─ options + wizard ───────── options.ts, wizard.ts
-      ├─ terminal presentation ──── presentation.ts, ui.ts
+      ├─ terminal presentation ──── presentation-model.ts,
+      │                           presentation.ts, ui.ts
       ├─ interactive chat ──────── chat.ts, chat-input.ts,
       │                           chat-state.ts, chat-workflow.ts
       ├─ task + review evidence ── task.ts
@@ -55,6 +56,12 @@ Presentation is resolved once at the CLI boundary. Semantic speaker and
 progress formatting lives outside provider orchestration, while provider
 adapters receive only the accessibility capability they need to construct
 their own CLI arguments.
+
+Interactive chat dispatches semantic presentation events into an in-memory,
+renderer-neutral view model. The current plain renderer consumes those same
+events to preserve append-only and screen-reader output. The model is bounded,
+contains only presentation-safe state, and has no authority over persistence,
+permissions, workflow transitions, or convergence.
 
 Provider stdout follows two paths. Normalized safe events feed presentation
 for live progress, while a separate schema-constrained final response feeds
