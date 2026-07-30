@@ -104,7 +104,9 @@ agent-bridge chat --delete-chat <chat-id>
 ```
 
 Deletion acquires the session lock first, so an active chat cannot be deleted
-from another process.
+from another process. Resuming likewise acquires the session lock before the
+provider-availability preflight, so a chat already open elsewhere reports that
+conflict rather than an unrelated provider error.
 
 ## Presentation
 

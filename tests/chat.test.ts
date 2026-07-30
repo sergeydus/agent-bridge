@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -110,6 +110,21 @@ function fakeProviders(
         text: `${name} answer ${calls}`,
         decision: calls <= 2 ? 'continue' : 'done',
       };
+    },
+  });
+  return { codex: provider('codex'), claude: provider('claude') };
+}
+
+function unavailableProviders(): ProviderMap {
+  const provider = (name: 'codex' | 'claude'): AgentProvider => ({
+    name,
+    label: name,
+    version: async () => {
+      throw new Error(`spawn ${name} ENOENT`);
+    },
+    authStatus: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    run: async () => {
+      throw new Error('run should not be reached');
     },
   });
   return { codex: provider('codex'), claude: provider('claude') };
@@ -773,6 +788,50 @@ test('does not overwrite a chat when another process owns its lock', async () =>
   }
 });
 
+test('reports a lock conflict before an unrelated provider failure', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  let heldLock:
+    Awaited<ReturnType<ChatSessionStore['acquireLock']>> | undefined;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const initialOptions = parseArgs(['chat', '--cwd', project], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+    await runInteractiveChat({
+      options: initialOptions,
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal: new ScriptedTerminal(['/pause']),
+    });
+
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const before = await store.latest();
+    assert.ok(before);
+    heldLock = await store.acquireLock(before.id);
+    const resumeTerminal = new ScriptedTerminal(['/done']);
+    const resumeOptions = parseArgs(['chat', '--resume', before.id], {
+      initialCwd: project,
+      defaultOutput: paths.runsDirectory,
+    });
+
+    await assert.rejects(
+      runInteractiveChat({
+        options: resumeOptions,
+        appPaths: paths,
+        providers: unavailableProviders(),
+        terminal: resumeTerminal,
+      }),
+      /already open in another Agent Bridge process/,
+    );
+  } finally {
+    await heldLock?.release();
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('closes the terminal when chat initialization fails', async () => {
   const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
   const terminal = new ScriptedTerminal([]);
@@ -889,6 +948,126 @@ test('routes fatal resize callback failures through chat cleanup', async () => {
     const lock = await store.acquireLock(session.id);
     await lock.release();
     assert.equal(terminal.closes, 1);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('leaves a completed chat unchanged when a resumed preflight fails', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const initialOptions = parseArgs(['chat', '--cwd', project], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+    await runInteractiveChat({
+      options: initialOptions,
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal: new ScriptedTerminal(['/done']),
+    });
+
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const before = await store.latest();
+    assert.ok(before);
+    assert.equal(before.status, 'completed');
+    const bytesBefore = await readFile(store.pathFor(before.id));
+
+    const resumeOptions = parseArgs(['chat', '--resume', before.id], {
+      initialCwd: project,
+      defaultOutput: paths.runsDirectory,
+    });
+    await assert.rejects(
+      runInteractiveChat({
+        options: resumeOptions,
+        appPaths: paths,
+        providers: unavailableProviders(),
+        terminal: new ScriptedTerminal(['/done']),
+      }),
+      /could not start every required provider CLI/,
+    );
+
+    const bytesAfter = await readFile(store.pathFor(before.id));
+    assert.deepEqual(bytesAfter, bytesBefore);
+    assert.deepEqual(await store.load(before.id), before);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('creates no saved session when a new chat preflight fails', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const options = parseArgs(['chat', '--cwd', project], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+
+    await assert.rejects(
+      runInteractiveChat({
+        options,
+        appPaths: paths,
+        providers: unavailableProviders(),
+        terminal: new ScriptedTerminal(['/done']),
+      }),
+      /could not start every required provider CLI/,
+    );
+
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    assert.deepEqual(await store.list(), []);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('marks the chat paused when the checkpoint save partially fails', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const initialOptions = parseArgs(['chat', '--cwd', project], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+    await runInteractiveChat({
+      options: initialOptions,
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal: new ScriptedTerminal(['/done']),
+    });
+
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const before = await store.latest();
+    assert.ok(before);
+    assert.equal(before.status, 'completed');
+
+    // Forces the transcript half of store.save() to fail with EISDIR after
+    // the JSON checkpoint half has already succeeded.
+    await rm(store.transcriptPathFor(before.id), { force: true });
+    await mkdir(store.transcriptPathFor(before.id));
+
+    const resumeOptions = parseArgs(['chat', '--resume', before.id], {
+      initialCwd: project,
+      defaultOutput: paths.runsDirectory,
+    });
+    await assert.rejects(
+      runInteractiveChat({
+        options: resumeOptions,
+        appPaths: paths,
+        providers: fakeProviders([], []),
+        terminal: new ScriptedTerminal(['/done']),
+      }),
+    );
+
+    const after = await store.load(before.id);
+    assert.equal(after.status, 'paused');
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

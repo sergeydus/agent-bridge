@@ -42,6 +42,7 @@ import { repositoryHasHead } from './git.ts';
 import { resolveProject } from './project.ts';
 import { interactiveChatPrompt } from './prompts.ts';
 import {
+  assertProvidersAvailable,
   createDefaultProviders,
   runProviderWithRetry,
   type ProviderMap,
@@ -496,6 +497,7 @@ export async function runInteractiveChat({
         : 'plain';
 
     let lock: ChatLock | undefined;
+    let cleanupMayPersist = false;
     const abortController = new AbortController();
     let activeOperation: AbortController | undefined;
     const abort = (): void => {
@@ -566,6 +568,10 @@ export async function runInteractiveChat({
 
     try {
       lock = await store.acquireLock(session.id);
+      if (!options.dryRun) {
+        await assertProvidersAvailable(providers);
+      }
+      cleanupMayPersist = true;
       await store.save(session);
       const instructions = async (): Promise<string> =>
         (await loadInstructionContext(session.projectRoot)).prompt;
@@ -956,8 +962,8 @@ them; it starts from committed HEAD and leaves those changes untouched.
         throw terminalFailure;
       }
       if (
-        abortController.signal.aborted ||
-        error instanceof ProcessAbortError
+        cleanupMayPersist &&
+        (abortController.signal.aborted || error instanceof ProcessAbortError)
       ) {
         setPresentedStatus(session, presenter, 'paused');
         await store.save(session).catch(() => {});
@@ -977,7 +983,12 @@ them; it starts from committed HEAD and leaves those changes untouched.
         presenter.stop();
       } finally {
         try {
-          if (lock && !completed && session.status === 'active') {
+          if (
+            lock &&
+            cleanupMayPersist &&
+            !completed &&
+            session.status === 'active'
+          ) {
             setPresentedStatus(session, presenter, 'paused');
             await store.save(session).catch(() => {});
           }
