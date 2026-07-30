@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed Windows editing when the target project and Agent Bridge run-data
+  directory are on different drive letters.
 - Kept editing workflows visible for non-Git and not-yet-committed projects,
   added explicit, non-staging `git init` guidance to the novice wizard, and
   made direct CLI and chat editing report the missing initial commit clearly.
