@@ -4,6 +4,8 @@
 
 - Fixed Windows editing when the target project and Agent Bridge run-data
   directory are on different drive letters.
+- Fixed launching npm-installed Codex and Claude `.cmd` shims on Windows, and
+  added actionable provider checks before chats or workflow workspace creation.
 - Kept editing workflows visible for non-Git and not-yet-committed projects,
   added explicit, non-staging `git init` guidance to the novice wizard, and
   made direct CLI and chat editing report the missing initial commit clearly.

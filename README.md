@@ -187,8 +187,13 @@ Check your setup:
 npm run doctor
 ```
 
-Agent Bridge has no production npm dependencies. `npm install` is needed only
-to develop, test, or compile it.
+Before opening a chat or creating an editing workspace, Agent Bridge checks
+that both provider CLIs can start. If either is unavailable, it reports which
+command failed and points to the setup diagnostics. On Windows, npm-installed
+`.cmd` shims such as `claude.cmd` and `codex.cmd` are supported.
+
+`npm install` installs Agent Bridge's small Windows-compatible process-launch
+dependency as well as its development tooling.
 
 ## Roadmap
 

@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import test from 'node:test';
@@ -260,6 +266,56 @@ test('editing refuses to place run artifacts inside the target project', () => {
   }
 });
 
+test('provider setup fails before an editing workspace is created', () => {
+  const project = mkdtempSync(`${tmpdir()}/agent-bridge-cli-preflight-`);
+  const bridgeHome = mkdtempSync(`${tmpdir()}/agent-bridge-home-`);
+  const commandDirectory = mkdtempSync(
+    `${tmpdir()}/agent-bridge-provider-path-`,
+  );
+  const codexCommand = resolve(
+    commandDirectory,
+    process.platform === 'win32' ? 'codex.cmd' : 'codex',
+  );
+  try {
+    if (process.platform === 'win32') {
+      writeFileSync(codexCommand, '@echo off\r\necho codex-test\r\n');
+    } else {
+      writeFileSync(codexCommand, '#!/bin/sh\nprintf "codex-test\\n"\n');
+      chmodSync(codexCommand, 0o700);
+    }
+    const result = spawnSync(
+      process.execPath,
+      [
+        'bin/agent-bridge.mjs',
+        '--task',
+        'Implement safely',
+        '--cwd',
+        project,
+        '--implementer',
+        'codex',
+      ],
+      {
+        cwd: bridgeRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          AGENT_BRIDGE_HOME: bridgeHome,
+          PATH: commandDirectory,
+        },
+      },
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Claude: .*ENOENT/);
+    assert.match(result.stderr, /claude --version/);
+    assert.equal(existsSync(resolve(bridgeHome, 'runs', 'workspaces')), false);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(bridgeHome, { recursive: true, force: true });
+    rmSync(commandDirectory, { recursive: true, force: true });
+  }
+});
+
 test('compiled CLI exposes chat management without calling providers', () => {
   const bridgeHome = mkdtempSync(`${tmpdir()}/agent-bridge-home-`);
   try {
@@ -293,6 +349,7 @@ test('redirected chat input pauses cleanly at end of input', () => {
         '--ui',
         'plain',
         '--no-color',
+        '--dry-run',
       ],
       {
         cwd: bridgeRoot,

@@ -59,10 +59,12 @@ Agent Bridge is not a security sandbox for hostile code.
 
 ## Process safety
 
-All child processes run with `shell: false` and argument arrays. Timeouts and
-signals terminate the child process tree so provider descendants do not remain
-running after cancellation. Write phases remain checkpointed and preserved
-when an outcome is uncertain.
+Agent Bridge always supplies a fixed executable and an argument array and never
+enables Node's `shell: true` option. On Windows, npm `.cmd` provider shims are
+resolved by a compatibility layer that applies Windows command escaping.
+Timeouts and signals terminate the child process tree so provider descendants
+do not remain running after cancellation. Write phases remain checkpointed and
+preserved when an outcome is uncertain.
 
 Live presentation uses an allowlisted normalized event contract. It never
 renders provider reasoning, thinking deltas, raw commands, tool inputs, file

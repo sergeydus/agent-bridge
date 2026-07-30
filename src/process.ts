@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import spawn from 'cross-spawn';
 
 export class ProcessAbortError extends Error {
   constructor(message = 'Process was cancelled') {

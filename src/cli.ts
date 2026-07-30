@@ -31,7 +31,11 @@ import { createProviderEventPresenter } from './presentation.ts';
 import { ProcessAbortError } from './process.ts';
 import { loadProjectConfig } from './project-config.ts';
 import { isPathInside, resolveProject } from './project.ts';
-import { createDefaultProviders, runProviderWithRetry } from './providers.ts';
+import {
+  assertProvidersAvailable,
+  createDefaultProviders,
+  runProviderWithRetry,
+} from './providers.ts';
 import { handleRunManagement } from './run-management.ts';
 import {
   pathFingerprint,
@@ -100,6 +104,9 @@ async function main(): Promise<void> {
     });
   }
   if (options.chat) {
+    if (!options.dryRun && !options.listChats && !options.deleteChat) {
+      await assertProvidersAvailable(PROVIDERS);
+    }
     await runInteractiveChat({
       options,
       appPaths: APP_PATHS,
@@ -145,6 +152,10 @@ async function main(): Promise<void> {
     options.noTranscript = resumedRun.noTranscript;
     options.isolation = Boolean(resumedRun.workspace);
     console.log(`Continuing run ${resumedRun.id}…`);
+  }
+
+  if (!options.dryRun && !resumedRun) {
+    await assertProvidersAvailable(PROVIDERS);
   }
 
   const selectedProject = await resolveProject(options.cwd);
@@ -347,6 +358,9 @@ continue from its actual state instead of repeating changes blindly.`;
   try {
     if (!options.dryRun) {
       runLock = await stateStore.acquireLock(runId);
+      if (resumedRun) {
+        await assertProvidersAvailable(PROVIDERS);
+      }
       ownsRunState = true;
     }
     if (needsDirectDirtyRecoveryPatch && !options.dryRun) {
