@@ -497,7 +497,7 @@ export async function runInteractiveChat({
         : 'plain';
 
     let lock: ChatLock | undefined;
-    let sessionInitialized = false;
+    let cleanupMayPersist = false;
     const abortController = new AbortController();
     let activeOperation: AbortController | undefined;
     const abort = (): void => {
@@ -571,8 +571,8 @@ export async function runInteractiveChat({
       if (!options.dryRun) {
         await assertProvidersAvailable(providers);
       }
+      cleanupMayPersist = true;
       await store.save(session);
-      sessionInitialized = true;
       const instructions = async (): Promise<string> =>
         (await loadInstructionContext(session.projectRoot)).prompt;
       const runCancellableExchange = async (
@@ -962,7 +962,7 @@ them; it starts from committed HEAD and leaves those changes untouched.
         throw terminalFailure;
       }
       if (
-        sessionInitialized &&
+        cleanupMayPersist &&
         (abortController.signal.aborted || error instanceof ProcessAbortError)
       ) {
         setPresentedStatus(session, presenter, 'paused');
@@ -985,7 +985,7 @@ them; it starts from committed HEAD and leaves those changes untouched.
         try {
           if (
             lock &&
-            sessionInitialized &&
+            cleanupMayPersist &&
             !completed &&
             session.status === 'active'
           ) {

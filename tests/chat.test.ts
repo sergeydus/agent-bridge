@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -1021,6 +1021,53 @@ test('creates no saved session when a new chat preflight fails', async () => {
 
     const store = new ChatSessionStore(paths.chatsDirectory);
     assert.deepEqual(await store.list(), []);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('marks the chat paused when the checkpoint save partially fails', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const initialOptions = parseArgs(['chat', '--cwd', project], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+    await runInteractiveChat({
+      options: initialOptions,
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal: new ScriptedTerminal(['/done']),
+    });
+
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const before = await store.latest();
+    assert.ok(before);
+    assert.equal(before.status, 'completed');
+
+    // Forces the transcript half of store.save() to fail with EISDIR after
+    // the JSON checkpoint half has already succeeded.
+    await rm(store.transcriptPathFor(before.id), { force: true });
+    await mkdir(store.transcriptPathFor(before.id));
+
+    const resumeOptions = parseArgs(['chat', '--resume', before.id], {
+      initialCwd: project,
+      defaultOutput: paths.runsDirectory,
+    });
+    await assert.rejects(
+      runInteractiveChat({
+        options: resumeOptions,
+        appPaths: paths,
+        providers: fakeProviders([], []),
+        terminal: new ScriptedTerminal(['/done']),
+      }),
+    );
+
+    const after = await store.load(before.id);
+    assert.equal(after.status, 'paused');
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
