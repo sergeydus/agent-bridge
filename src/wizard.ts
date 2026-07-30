@@ -7,6 +7,7 @@ import { basename, resolve } from 'node:path';
 import { UserConfigStore } from './config.ts';
 import { ChatSessionStore } from './chat-state.ts';
 import type { ReasoningEffort } from './core.ts';
+import { initializeRepository, repositoryHasHead } from './git.ts';
 import type { AppPaths } from './paths.ts';
 import type { BridgeOptions } from './options.ts';
 import { resolveProject, type SelectedProject } from './project.ts';
@@ -402,23 +403,31 @@ const BASE_WORKFLOWS: Array<Omit<WorkflowChoice, 'value'>> = [
 ];
 
 export function workflowChoices({
-  projectKind = 'git',
+  editingAvailable = true,
 }: {
-  projectKind?: SelectedProject['kind'];
+  editingAvailable?: boolean;
 } = {}): WorkflowChoice[] {
-  return BASE_WORKFLOWS.filter(
-    ({ action }) => projectKind === 'git' || action !== 'edit',
-  ).map(({ action, label, description }, index) => ({
+  return BASE_WORKFLOWS.map(({ action, label, description }, index) => ({
     value: String(index + 1),
     action,
-    label,
-    ...(description ? { description } : {}),
+    label:
+      action === 'edit' && !editingAvailable
+        ? 'Make changes (Git setup required)'
+        : label,
+    ...(description
+      ? {
+          description:
+            action === 'edit' && !editingAvailable
+              ? 'Select this to set up the safe Git workspace needed for editing.'
+              : description,
+        }
+      : {}),
   }));
 }
 
 async function chooseAdvancedWorkflow(
   interface_: Questioner,
-  projectKind: SelectedProject['kind'],
+  editingAvailable: boolean,
 ): Promise<WorkflowChoice['action']> {
   const allChoices: Array<{
     value: string;
@@ -448,13 +457,15 @@ async function chooseAdvancedWorkflow(
     { value: '5', action: 'review', label: 'Review only' },
     { value: '6', action: 'chat', label: 'Discuss only' },
   ];
-  const choices = allChoices.filter(
-    ({ action }) =>
-      projectKind === 'git' || action === 'review' || action === 'chat',
-  );
-  choices.forEach((choice, index) => {
-    choice.value = String(index + 1);
-  });
+  const choices = allChoices.map((choice) => ({
+    ...choice,
+    label:
+      !editingAvailable &&
+      choice.action !== 'review' &&
+      choice.action !== 'chat'
+        ? `${choice.label} (Git setup required)`
+        : choice.label,
+  }));
   console.log(`
 Advanced role setup
 ${choices.map(({ value, label }) => `  ${value}) ${label}`).join('\n')}
@@ -466,6 +477,90 @@ ${choices.map(({ value, label }) => `  ${value}) ${label}`).join('\n')}
     '1',
   );
   return choices.find((choice) => choice.value === value)?.action ?? 'chat';
+}
+
+type EditingSetupAction = 'ready' | 'back' | 'chat';
+
+export async function prepareProjectForEditing(
+  interface_: Questioner,
+  project: SelectedProject,
+): Promise<{ action: EditingSetupAction; project: SelectedProject }> {
+  let selected = project;
+  if (selected.kind === 'directory') {
+    console.log(
+      sanitizeTerminalText(`
+Editing needs Git
+Agent Bridge uses Git to create an isolated workspace and let you safely apply,
+keep, or discard agent changes. This folder is not a Git repository.
+
+Agent Bridge can initialize Git now. It will not stage or commit any files.
+`),
+    );
+    const setup = await askForChoice(
+      interface_,
+      'Initialize Git in this folder? [y/N]: ',
+      ['y', 'yes', 'n', 'no'],
+      'n',
+    );
+    if (!['y', 'yes'].includes(setup)) {
+      return { action: 'back', project: selected };
+    }
+    const root = await initializeRepository(selected.root);
+    selected = { root, kind: 'git' };
+    console.log(
+      sanitizeTerminalText(`
+Git is now initialized in:
+${root}
+
+No files were staged or committed.
+`),
+    );
+  }
+
+  if (await repositoryHasHead(selected.root)) {
+    return { action: 'ready', project: selected };
+  }
+
+  console.log(
+    sanitizeTerminalText(`
+One more step is required
+Safe editing starts from a committed snapshot, but this repository has no
+commits yet. Open another terminal in this project folder, review .gitignore,
+avoid committing secrets, and create the first commit:
+
+  git status
+  git add <files you want the agents to work on>
+  git commit -m "Initial project state"
+
+Agent Bridge will never stage or commit these files for you.
+`),
+  );
+  while (true) {
+    console.log(`What would you like to do?
+  1) Re-check after I create the commit
+  2) Return to the workflow choices
+  3) Start a read-only discussion instead
+`);
+    const next = await askForChoice(
+      interface_,
+      'Choose 1, 2, or 3 [2]: ',
+      ['1', '2', '3'],
+      '2',
+    );
+    if (next === '2') {
+      return { action: 'back', project: selected };
+    }
+    if (next === '3') {
+      return { action: 'chat', project: selected };
+    }
+    if (await repositoryHasHead(selected.root)) {
+      console.log('Initial commit found. Safe editing is now available.');
+      return { action: 'ready', project: selected };
+    }
+    console.log(
+      'No commit was found yet. Create it in another terminal, then re-check.',
+    );
+  }
 }
 
 async function configureAdvancedSettings(
@@ -630,7 +725,7 @@ ${resumeChoices
       }
     }
 
-    const project = await chooseProject(
+    let project = await chooseProject(
       interface_,
       options,
       configStore,
@@ -638,8 +733,13 @@ ${resumeChoices
     );
     options.cwd = project.root;
 
-    const choices = workflowChoices({ projectKind: project.kind });
-    console.log(`
+    let mode: WorkflowChoice['action'] | undefined;
+    let advancedSelected = false;
+    while (!mode) {
+      const editingAvailable =
+        project.kind === 'git' && (await repositoryHasHead(project.root));
+      const choices = workflowChoices({ editingAvailable });
+      console.log(`
 What do you want to do?
 ${choices
   .map(
@@ -648,21 +748,37 @@ ${choices
   )
   .join('\n')}
 `);
-    const choice = await askForChoice(
-      interface_,
-      `Choose 1–${choices.length} [1]: `,
-      choices.map(({ value }) => value),
-      '1',
-    );
-    let mode = choices.find(({ value }) => value === choice)?.action;
-    if (!mode) {
-      throw new Error('The selected workflow is no longer available.');
-    }
-    const advancedSelected = mode === 'advanced';
-    if (advancedSelected) {
-      mode = await chooseAdvancedWorkflow(interface_, project.kind);
-    } else if (mode === 'edit') {
-      mode = 'collaborate-claude';
+      const choice = await askForChoice(
+        interface_,
+        `Choose 1–${choices.length} [1]: `,
+        choices.map(({ value }) => value),
+        '1',
+      );
+      let requestedMode = choices.find(({ value }) => value === choice)?.action;
+      if (!requestedMode) {
+        throw new Error('The selected workflow is no longer available.');
+      }
+      advancedSelected = requestedMode === 'advanced';
+      if (advancedSelected) {
+        requestedMode = await chooseAdvancedWorkflow(
+          interface_,
+          editingAvailable,
+        );
+      }
+      const editingRequested = !['chat', 'review'].includes(requestedMode);
+      if (editingRequested && !editingAvailable) {
+        const setup = await prepareProjectForEditing(interface_, project);
+        project = setup.project;
+        options.cwd = project.root;
+        if (setup.action === 'back') {
+          continue;
+        }
+        if (setup.action === 'chat') {
+          mode = 'chat';
+          break;
+        }
+      }
+      mode = requestedMode === 'edit' ? 'collaborate-claude' : requestedMode;
     }
     if (mode === 'collaborate-claude') {
       options.collaborative = 'claude';
@@ -697,13 +813,13 @@ Use /ask for one agent, /auto for a bounded conversation, or /edit for safe chan
       );
       return;
     }
-    if (
-      project.kind === 'directory' &&
-      (options.implementer || options.collaborative)
-    ) {
+    const projectHasHead =
+      project.kind === 'git' && (await repositoryHasHead(project.root));
+    if ((options.implementer || options.collaborative) && !projectHasHead) {
       throw new Error(
-        'Safe editing currently requires Git. Run `git init` in this folder, ' +
-          'or choose review-only mode.',
+        'Safe editing requires a Git repository with an initial commit. ' +
+          'Choose Make changes in the wizard for guided setup, or choose a ' +
+          'read-only workflow.',
       );
     }
 
@@ -716,11 +832,7 @@ Use /ask for one agent, /auto for a bounded conversation, or /edit for safe chan
       }
     }
 
-    if (
-      !options.implementer &&
-      !options.collaborative &&
-      project.kind === 'git'
-    ) {
+    if (!options.implementer && !options.collaborative && projectHasHead) {
       options.gitDiff = await chooseReviewEvidence(interface_, options);
     }
 

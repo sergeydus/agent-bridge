@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import test from 'node:test';
@@ -11,12 +11,37 @@ import { RunStateStore, type SavedRun } from '../src/state.ts';
 
 const bridgeRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
+function initializeCommittedRepository(repository: string): void {
+  const commands = [
+    ['init'],
+    ['config', 'user.name', 'Agent Bridge Test'],
+    ['config', 'user.email', 'test@example.com'],
+  ];
+  for (const args of commands) {
+    const result = spawnSync('git', args, {
+      cwd: repository,
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  writeFileSync(resolve(repository, 'initial.txt'), 'initial\n');
+  for (const args of [
+    ['add', 'initial.txt'],
+    ['commit', '-m', 'initial'],
+  ]) {
+    const result = spawnSync('git', args, {
+      cwd: repository,
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, result.stderr);
+  }
+}
+
 test('collaborative dry run plans read-only and alternates write access', () => {
   const repository = mkdtempSync(`${tmpdir()}/agent-bridge-cli-`);
   const bridgeHome = mkdtempSync(`${tmpdir()}/agent-bridge-home-`);
   try {
-    const git = spawnSync('git', ['init', repository], { encoding: 'utf8' });
-    assert.equal(git.status, 0, git.stderr);
+    initializeCommittedRepository(repository);
 
     const result = spawnSync(
       process.execPath,
@@ -59,10 +84,7 @@ test('scripted isolated editing requires explicit acknowledgement of dirty HEAD'
   const repository = mkdtempSync(`${tmpdir()}/agent-bridge-cli-dirty-`);
   const bridgeHome = mkdtempSync(`${tmpdir()}/agent-bridge-home-`);
   try {
-    assert.equal(
-      spawnSync('git', ['init', repository], { encoding: 'utf8' }).status,
-      0,
-    );
+    initializeCommittedRepository(repository);
     const dirtyPath = resolve(repository, 'uncommitted.txt');
     spawnSync(
       process.execPath,
@@ -140,13 +162,81 @@ test('review-only dry run supports an ordinary non-Git directory', () => {
   }
 });
 
+test('review-only dry run supports a Git repository without commits', () => {
+  const repository = mkdtempSync(`${tmpdir()}/agent-bridge-cli-unborn-review-`);
+  try {
+    assert.equal(
+      spawnSync('git', ['init'], {
+        cwd: repository,
+        encoding: 'utf8',
+      }).status,
+      0,
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        'bin/agent-bridge.mjs',
+        '--task',
+        'Review this new project',
+        '--cwd',
+        repository,
+        '--rounds',
+        '1',
+        '--dry-run',
+      ],
+      {
+        cwd: bridgeRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          AGENT_BRIDGE_HOME: `${repository}/.bridge-data`,
+        },
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test('editing explains that a Git repository needs an initial commit', () => {
+  const repository = mkdtempSync(`${tmpdir()}/agent-bridge-cli-unborn-edit-`);
+  try {
+    assert.equal(
+      spawnSync('git', ['init'], {
+        cwd: repository,
+        encoding: 'utf8',
+      }).status,
+      0,
+    );
+    const result = spawnSync(
+      process.execPath,
+      [
+        'bin/agent-bridge.mjs',
+        '--task',
+        'Implement safely',
+        '--cwd',
+        repository,
+        '--implementer',
+        'codex',
+        '--dry-run',
+      ],
+      { cwd: bridgeRoot, encoding: 'utf8' },
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /requires an initial commit/);
+    assert.match(result.stderr, /will not stage or commit/);
+  } finally {
+    rmSync(repository, { recursive: true, force: true });
+  }
+});
+
 test('editing refuses to place run artifacts inside the target project', () => {
   const repository = mkdtempSync(`${tmpdir()}/agent-bridge-cli-output-`);
   try {
-    assert.equal(
-      spawnSync('git', ['init', repository], { encoding: 'utf8' }).status,
-      0,
-    );
+    initializeCommittedRepository(repository);
     const result = spawnSync(
       process.execPath,
       [

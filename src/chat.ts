@@ -38,6 +38,7 @@ import {
   type PresentedMessage,
 } from './presentation-model.ts';
 import { ProcessAbortError } from './process.ts';
+import { repositoryHasHead } from './git.ts';
 import { resolveProject } from './project.ts';
 import { interactiveChatPrompt } from './prompts.ts';
 import {
@@ -811,6 +812,15 @@ It stops early if both agents agree.
           ) {
             writeSupplemental(
               '\nSafe editing requires Git. Initialize this folder with `git init`, or use /review.\n',
+            );
+            continue;
+          }
+          if (
+            command.mode !== 'review' &&
+            !(await repositoryHasHead(session.projectRoot))
+          ) {
+            writeSupplemental(
+              '\nSafe editing requires an initial commit. Review .gitignore, create the first commit yourself, then use /edit again. Agent Bridge will not stage or commit project files.\n',
             );
             continue;
           }

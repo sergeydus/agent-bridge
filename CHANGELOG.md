@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Kept editing workflows visible for non-Git and not-yet-committed projects,
+  added explicit, non-staging `git init` guidance to the novice wizard, and
+  made direct CLI and chat editing report the missing initial commit clearly.
 - Reworked first-run setup around project-first Discuss, Make changes, and
   Review intents, with provider roles and model/interface tuning under
   Advanced settings.

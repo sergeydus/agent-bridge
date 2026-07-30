@@ -296,6 +296,43 @@ test('runs paired exchanges, autonomous agreement, and a linked workflow', async
   }
 });
 
+test('chat explains that editing needs an initial commit', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-unborn-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const launches: WorkflowLaunchRequest[] = [];
+  try {
+    await execFileAsync('git', ['init'], { cwd: project });
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const terminal = new ScriptedTerminal([
+      'Please implement this',
+      '/edit',
+      '/done',
+    ]);
+    const options = parseArgs(['chat', '--cwd', project], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+
+    await runInteractiveChat({
+      options,
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal,
+      launchWorkflow: async (request) => {
+        launches.push(request);
+        return 0;
+      },
+    });
+
+    assert.equal(launches.length, 0);
+    assert.match(terminal.output.join(''), /requires an initial commit/);
+    assert.match(terminal.output.join(''), /will not stage or commit/);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('no-transcript chat deletes its successful local checkpoint', async () => {
   const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
   const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
