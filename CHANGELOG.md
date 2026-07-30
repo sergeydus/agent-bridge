@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Fixed a failed provider preflight marking a resumed chat `paused`, and
+  saving a ghost session for a new chat, instead of leaving persisted state
+  untouched.
 - Fixed resuming a chat that is already open in another Agent Bridge process
   reporting a provider-availability error instead of the actual lock conflict.
 - Fixed Windows editing when the target project and Agent Bridge run-data

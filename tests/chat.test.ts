@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -110,6 +110,21 @@ function fakeProviders(
         text: `${name} answer ${calls}`,
         decision: calls <= 2 ? 'continue' : 'done',
       };
+    },
+  });
+  return { codex: provider('codex'), claude: provider('claude') };
+}
+
+function unavailableProviders(): ProviderMap {
+  const provider = (name: 'codex' | 'claude'): AgentProvider => ({
+    name,
+    label: name,
+    version: async () => {
+      throw new Error(`spawn ${name} ENOENT`);
+    },
+    authStatus: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    run: async () => {
+      throw new Error('run should not be reached');
     },
   });
   return { codex: provider('codex'), claude: provider('claude') };
@@ -801,26 +816,11 @@ test('reports a lock conflict before an unrelated provider failure', async () =>
       defaultOutput: paths.runsDirectory,
     });
 
-    const unavailableProvider = (name: 'codex' | 'claude'): AgentProvider => ({
-      name,
-      label: name,
-      version: async () => {
-        throw new Error(`spawn ${name} ENOENT`);
-      },
-      authStatus: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
-      run: async () => {
-        throw new Error('run should not be reached');
-      },
-    });
-
     await assert.rejects(
       runInteractiveChat({
         options: resumeOptions,
         appPaths: paths,
-        providers: {
-          codex: unavailableProvider('codex'),
-          claude: unavailableProvider('claude'),
-        },
+        providers: unavailableProviders(),
         terminal: resumeTerminal,
       }),
       /already open in another Agent Bridge process/,
@@ -948,6 +948,79 @@ test('routes fatal resize callback failures through chat cleanup', async () => {
     const lock = await store.acquireLock(session.id);
     await lock.release();
     assert.equal(terminal.closes, 1);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('leaves a completed chat unchanged when a resumed preflight fails', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const initialOptions = parseArgs(['chat', '--cwd', project], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+    await runInteractiveChat({
+      options: initialOptions,
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal: new ScriptedTerminal(['/done']),
+    });
+
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const before = await store.latest();
+    assert.ok(before);
+    assert.equal(before.status, 'completed');
+    const bytesBefore = await readFile(store.pathFor(before.id));
+
+    const resumeOptions = parseArgs(['chat', '--resume', before.id], {
+      initialCwd: project,
+      defaultOutput: paths.runsDirectory,
+    });
+    await assert.rejects(
+      runInteractiveChat({
+        options: resumeOptions,
+        appPaths: paths,
+        providers: unavailableProviders(),
+        terminal: new ScriptedTerminal(['/done']),
+      }),
+      /could not start every required provider CLI/,
+    );
+
+    const bytesAfter = await readFile(store.pathFor(before.id));
+    assert.deepEqual(bytesAfter, bytesBefore);
+    assert.deepEqual(await store.load(before.id), before);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('creates no saved session when a new chat preflight fails', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const options = parseArgs(['chat', '--cwd', project], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+
+    await assert.rejects(
+      runInteractiveChat({
+        options,
+        appPaths: paths,
+        providers: unavailableProviders(),
+        terminal: new ScriptedTerminal(['/done']),
+      }),
+      /could not start every required provider CLI/,
+    );
+
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    assert.deepEqual(await store.list(), []);
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

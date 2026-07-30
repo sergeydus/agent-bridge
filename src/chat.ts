@@ -497,6 +497,7 @@ export async function runInteractiveChat({
         : 'plain';
 
     let lock: ChatLock | undefined;
+    let sessionInitialized = false;
     const abortController = new AbortController();
     let activeOperation: AbortController | undefined;
     const abort = (): void => {
@@ -571,6 +572,7 @@ export async function runInteractiveChat({
         await assertProvidersAvailable(providers);
       }
       await store.save(session);
+      sessionInitialized = true;
       const instructions = async (): Promise<string> =>
         (await loadInstructionContext(session.projectRoot)).prompt;
       const runCancellableExchange = async (
@@ -960,8 +962,8 @@ them; it starts from committed HEAD and leaves those changes untouched.
         throw terminalFailure;
       }
       if (
-        abortController.signal.aborted ||
-        error instanceof ProcessAbortError
+        sessionInitialized &&
+        (abortController.signal.aborted || error instanceof ProcessAbortError)
       ) {
         setPresentedStatus(session, presenter, 'paused');
         await store.save(session).catch(() => {});
@@ -981,7 +983,12 @@ them; it starts from committed HEAD and leaves those changes untouched.
         presenter.stop();
       } finally {
         try {
-          if (lock && !completed && session.status === 'active') {
+          if (
+            lock &&
+            sessionInitialized &&
+            !completed &&
+            session.status === 'active'
+          ) {
             setPresentedStatus(session, presenter, 'paused');
             await store.save(session).catch(() => {});
           }
