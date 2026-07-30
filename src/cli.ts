@@ -159,7 +159,8 @@ async function main(): Promise<void> {
   }
   if (editingWorkflow && (await isPathInside(originalCwd, options.output))) {
     throw new Error(
-      '--output must be outside the target repository for editing workflows',
+      '--output must be outside the target repository for editing workflows.\n' +
+        `Project: ${originalCwd}\nRun data: ${options.output}`,
     );
   }
 

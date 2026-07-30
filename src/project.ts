@@ -1,5 +1,13 @@
 import { realpath, stat } from 'node:fs/promises';
-import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+  sep,
+} from 'node:path';
 
 import { repositoryRoot } from './git.ts';
 import type { ProjectKind } from './core.ts';
@@ -7,6 +15,21 @@ import type { ProjectKind } from './core.ts';
 export interface SelectedProject {
   root: string;
   kind: ProjectKind;
+}
+
+export function relativePathStaysInsideParent(
+  path: string,
+  pathUtilities: {
+    isAbsolute(path: string): boolean;
+    separator: string;
+  } = { isAbsolute, separator: sep },
+): boolean {
+  return (
+    path === '' ||
+    (!pathUtilities.isAbsolute(path) &&
+      path !== '..' &&
+      !path.startsWith(`..${pathUtilities.separator}`))
+  );
 }
 
 export function cleanProjectPathInput(input: string): string {
@@ -51,7 +74,7 @@ export async function isPathInside(
     canonicalizePotentialPath(child),
   ]);
   const path = relative(canonicalParent, canonicalChild);
-  return path === '' || (!path.startsWith(`..${sep}`) && path !== '..');
+  return relativePathStaysInsideParent(path);
 }
 
 export async function resolveProject(input: string): Promise<SelectedProject> {

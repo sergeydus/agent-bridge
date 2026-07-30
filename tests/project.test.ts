@@ -1,19 +1,36 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, win32 } from 'node:path';
 import test from 'node:test';
 
 import { execute } from '../src/git.ts';
 import {
   cleanProjectPathInput,
   isPathInside,
+  relativePathStaysInsideParent,
   resolveProject,
 } from '../src/project.ts';
 
 test('normalizes pasted and dragged project paths', () => {
   assert.equal(cleanProjectPathInput('  "/tmp/a project"  '), '/tmp/a project');
   assert.equal(cleanProjectPathInput('/tmp/a\\ project '), '/tmp/a project');
+});
+
+test('does not treat a path on another Windows drive as a child path', () => {
+  const relativePath = win32.relative(
+    'D:\\projects\\random',
+    'C:\\Users\\person\\AppData\\Local\\Agent Bridge\\runs',
+  );
+
+  assert.equal(win32.isAbsolute(relativePath), true);
+  assert.equal(
+    relativePathStaysInsideParent(relativePath, {
+      isAbsolute: win32.isAbsolute,
+      separator: win32.sep,
+    }),
+    false,
+  );
 });
 
 test('accepts an ordinary directory for review-only workflows', async () => {
