@@ -23,6 +23,36 @@ import {
 const MAX_PROVIDER_RESPONSE_BYTES = 2_000_000;
 const MAX_PROVIDER_PROCESS_OUTPUT_CHARS = 10_000_000;
 
+/**
+ * Codex only enables its Windows restricted-token sandbox when
+ * `windows.sandbox` is configured. Agent Bridge deliberately runs Codex with
+ * `--ignore-user-config`, so the value has to be supplied explicitly;
+ * otherwise `--sandbox workspace-write` degrades to a read-only sandbox that
+ * rejects every edit. `unelevated` is the lower-privilege mode and does not
+ * require an administrative terminal.
+ */
+const CODEX_WINDOWS_SANDBOX = 'unelevated';
+
+/**
+ * Provider system prompts are passed as command-line arguments, so they must
+ * stay on one line. See `findLineBreakArgument`.
+ */
+const CLAUDE_WRITE_SYSTEM_PROMPT = [
+  'You are the designated implementation agent in a controlled implement-review',
+  "workflow. Use the provided tools to inspect and edit only the task's",
+  'repository. Preserve unrelated user changes. Never commit, stage, discard,',
+  'or revert work. Agent Bridge runs user-approved verification commands; do',
+  'not try to execute shell commands yourself. Discover and read applicable',
+  'AGENTS.md and CLAUDE.md files before editing.',
+].join(' ');
+
+const CLAUDE_READ_ONLY_SYSTEM_PROMPT = [
+  'You are the read-only analysis agent in a controlled technical workflow.',
+  'Inspect the provided repository when useful, but never edit, stage, commit,',
+  'revert, or run mutating commands. Base findings on concrete evidence.',
+  'Discover and read applicable AGENTS.md and CLAUDE.md files before analysis.',
+].join(' ');
+
 export interface ProviderRunOptions {
   cwd: string;
   tempDirectory: string;
@@ -32,11 +62,18 @@ export interface ProviderRunOptions {
   timeoutMs: number;
   responseKind: ResponseKind;
   isGitRepository: boolean;
+  /**
+   * Neither provider CLI exposes a native accessibility mode, so this only
+   * records the caller's preference. Accessible output is produced entirely by
+   * Agent Bridge's own renderer.
+   */
   screenReader: boolean;
   signal?: AbortSignal;
   model?: string;
   effort?: ReasoningEffort;
   onEvent?: ProviderEventSink;
+  /** Injected only so platform-specific flags stay unit-testable. */
+  platform?: NodeJS.Platform;
 }
 
 export interface AgentProvider {
@@ -86,6 +123,12 @@ export class CodexProvider implements AgentProvider {
     ];
     if (!options.isGitRepository) {
       args.push('--skip-git-repo-check');
+    }
+    if ((options.platform ?? process.platform) === 'win32') {
+      args.push(
+        '--config',
+        `windows.sandbox=${JSON.stringify(CODEX_WINDOWS_SANDBOX)}`,
+      );
     }
 
     if (options.model) {
@@ -156,16 +199,8 @@ export class ClaudeProvider implements AgentProvider {
     options: ProviderRunOptions,
   ): Promise<AgentResponse> {
     const systemPrompt = options.writeAccess
-      ? `You are the designated implementation agent in a controlled
-implement-review workflow. Use the provided tools to inspect and edit only the
-task's repository. Preserve unrelated user changes. Never commit, stage,
-discard, or revert work. Agent Bridge runs user-approved verification commands;
-do not try to execute shell commands yourself.
-Discover and read applicable AGENTS.md and CLAUDE.md files before editing.`
-      : `You are the read-only analysis agent in a controlled technical
-workflow. Inspect the provided repository when useful, but never edit, stage,
-commit, revert, or run mutating commands. Base findings on concrete evidence.
-Discover and read applicable AGENTS.md and CLAUDE.md files before analysis.`;
+      ? CLAUDE_WRITE_SYSTEM_PROMPT
+      : CLAUDE_READ_ONLY_SYSTEM_PROMPT;
     const tools = options.writeAccess
       ? 'Edit,Read,Write,Glob,Grep'
       : 'Read,Glob,Grep';
@@ -186,7 +221,6 @@ Discover and read applicable AGENTS.md and CLAUDE.md files before analysis.`;
       '--no-session-persistence',
       '--max-turns',
       '50',
-      '--safe-mode',
       '--allowedTools',
       options.writeAccess
         ? ['Read', 'Glob', 'Grep', 'Edit', 'Write'].join(',')
@@ -198,9 +232,6 @@ Discover and read applicable AGENTS.md and CLAUDE.md files before analysis.`;
     }
     if (options.effort) {
       args.push('--effort', options.effort);
-    }
-    if (options.screenReader) {
-      args.push('--ax-screen-reader');
     }
 
     if (options.dryRun) {

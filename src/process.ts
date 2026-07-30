@@ -17,6 +17,22 @@ export interface ProcessResult {
 
 const TRUNCATION_MARKER = '\n…[output truncated]…\n';
 
+/**
+ * Windows resolves npm-installed CLIs such as `codex` and `claude` to `.cmd`
+ * shims, which are executed through `cmd.exe`. A line break inside an argument
+ * silently terminates that command line, so every later argument is dropped
+ * without any error. Refuse to spawn instead of running a truncated command.
+ */
+export function findLineBreakArgument(
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): number {
+  if (platform !== 'win32') {
+    return -1;
+  }
+  return args.findIndex((value) => /[\r\n]/.test(value));
+}
+
 class OutputCapture {
   private complete = '';
   private readonly enabled: boolean;
@@ -106,6 +122,18 @@ export function runProcess(
   return new Promise<ProcessResult>((resolvePromise, rejectPromise) => {
     if (signal?.aborted) {
       rejectPromise(new ProcessAbortError());
+      return;
+    }
+
+    const lineBreakArgument = findLineBreakArgument(args);
+    if (lineBreakArgument >= 0) {
+      rejectPromise(
+        new Error(
+          `${command} argument ${lineBreakArgument + 1} contains a line break, ` +
+            'which Windows command shims silently truncate. Pass the value on ' +
+            'a single line, or supply it through standard input or a file.',
+        ),
+      );
       return;
     }
 

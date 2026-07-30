@@ -93,12 +93,68 @@ test('provider commands require structured output and keep Claude shell-free', a
   assert.equal(claude.decision, 'continue');
 });
 
-test('Claude receives its native screen-reader flag when requested', async () => {
-  const claude = await new ClaudeProvider().run('task', {
+test('write turns request write permission from both providers', async () => {
+  const codex = await new CodexProvider().run('task', dryRunOptions);
+  const claude = await new ClaudeProvider().run('task', dryRunOptions);
+  assert.match(codex.text, /--sandbox workspace-write/);
+  assert.match(claude.text, /--permission-mode acceptEdits/);
+
+  const readOnly = { ...dryRunOptions, writeAccess: false };
+  const codexReadOnly = await new CodexProvider().run('task', readOnly);
+  const claudeReadOnly = await new ClaudeProvider().run('task', readOnly);
+  assert.match(codexReadOnly.text, /--sandbox read-only/);
+  assert.match(claudeReadOnly.text, /--permission-mode plan/);
+});
+
+test('Codex enables its Windows sandbox despite ignoring user config', async () => {
+  const windows = await new CodexProvider().run('task', {
     ...dryRunOptions,
-    screenReader: true,
+    platform: 'win32',
   });
-  assert.match(claude.text, /--ax-screen-reader/);
+  assert.match(windows.text, /--ignore-user-config/);
+  assert.match(windows.text, /--config windows\.sandbox="unelevated"/);
+
+  const linux = await new CodexProvider().run('task', {
+    ...dryRunOptions,
+    platform: 'linux',
+  });
+  assert.doesNotMatch(linux.text, /windows\.sandbox/);
+});
+
+test('provider arguments survive Windows command shims', async () => {
+  for (const writeAccess of [true, false]) {
+    for (const provider of [new CodexProvider(), new ClaudeProvider()]) {
+      const command = await provider.run('task', {
+        ...dryRunOptions,
+        writeAccess,
+        platform: 'win32',
+        model: 'test-model',
+        effort: 'high',
+      });
+      const args = command.text.replace(/^\[dry-run] \w+ /, '');
+      assert.doesNotMatch(
+        args,
+        /[\r\n]/,
+        `${provider.name} passes a multi-line argument, which Windows truncates`,
+      );
+    }
+  }
+});
+
+test('Claude is launched only with flags its CLI accepts', async () => {
+  const claude = await new ClaudeProvider().run('task', dryRunOptions);
+  assert.doesNotMatch(claude.text, /--safe-mode/);
+});
+
+test('accessible presentation stays a coordinator concern', async () => {
+  // Neither CLI has an accessibility flag; inventing one aborts every call.
+  for (const provider of [new CodexProvider(), new ClaudeProvider()]) {
+    const command = await provider.run('task', {
+      ...dryRunOptions,
+      screenReader: true,
+    });
+    assert.doesNotMatch(command.text, /screen-reader/);
+  }
 });
 
 test('retries transient read-only provider failures through the provider interface', async () => {

@@ -6,7 +6,7 @@ import { basename, resolve } from 'node:path';
 
 import { UserConfigStore } from './config.ts';
 import { ChatSessionStore } from './chat-state.ts';
-import type { ReasoningEffort } from './core.ts';
+import type { AgentName, ReasoningEffort } from './core.ts';
 import { initializeRepository, repositoryHasHead } from './git.ts';
 import type { AppPaths } from './paths.ts';
 import type { BridgeOptions } from './options.ts';
@@ -127,18 +127,23 @@ export async function configureAccessibility(
   });
 }
 
-const EFFORT_CHOICES: Array<{
-  choice: string;
-  value?: ReasoningEffort;
-  label: string;
-}> = [
-  { choice: '1', label: 'Provider default' },
-  { choice: '2', value: 'low', label: 'Low' },
-  { choice: '3', value: 'medium', label: 'Medium' },
-  { choice: '4', value: 'high', label: 'High' },
-  { choice: '5', value: 'xhigh', label: 'Extra high' },
-  { choice: '6', value: 'max', label: 'Maximum' },
+const EFFORT_LEVELS: Array<{ value?: ReasoningEffort; label: string }> = [
+  { label: 'Provider default' },
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'Extra high' },
+  { value: 'max', label: 'Maximum' },
 ];
+
+/** Claude Code's --effort flag has no extra-high level; Codex's does. */
+function effortChoicesFor(
+  agent: AgentName,
+): Array<{ choice: string; value?: ReasoningEffort; label: string }> {
+  return EFFORT_LEVELS.filter(
+    (level) => agent === 'codex' || level.value !== 'xhigh',
+  ).map((level, index) => ({ ...level, choice: String(index + 1) }));
+}
 
 async function askForModel(
   interface_: Questioner,
@@ -158,19 +163,20 @@ async function askForModel(
 
 async function askForEffort(
   interface_: Questioner,
-  provider: string,
+  agent: AgentName,
 ): Promise<ReasoningEffort | undefined> {
+  const choices = effortChoicesFor(agent);
   console.log(`
-${provider} reasoning effort:
-${EFFORT_CHOICES.map(({ choice, label }) => `  ${choice}) ${label}`).join('\n')}
+${agent === 'codex' ? 'Codex' : 'Claude'} reasoning effort:
+${choices.map(({ choice, label }) => `  ${choice}) ${label}`).join('\n')}
 `);
   const choice = await askForChoice(
     interface_,
-    'Choose 1–6 [1]: ',
-    EFFORT_CHOICES.map((item) => item.choice),
+    `Choose 1–${choices.length} [1]: `,
+    choices.map((item) => item.choice),
     '1',
   );
-  return EFFORT_CHOICES.find((item) => item.choice === choice)?.value;
+  return choices.find((item) => item.choice === choice)?.value;
 }
 
 export async function configureModels(
@@ -210,10 +216,10 @@ export async function configureModels(
     );
   }
   if (!options.codexEffort) {
-    options.codexEffort = await askForEffort(interface_, 'Codex');
+    options.codexEffort = await askForEffort(interface_, 'codex');
   }
   if (!options.claudeEffort) {
-    options.claudeEffort = await askForEffort(interface_, 'Claude');
+    options.claudeEffort = await askForEffort(interface_, 'claude');
   }
 }
 

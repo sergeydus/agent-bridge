@@ -85,6 +85,25 @@ Bash. Codex uses its workspace-write sandbox. Both receive instructions not to
 run package, build, deploy, or version-control mutations; approved checks are
 the coordinator's responsibility.
 
+Codex only activates its Windows restricted-token sandbox when `windows.sandbox`
+is set. Because Agent Bridge runs Codex with `--ignore-user-config`, it supplies
+that value itself on Windows; without it `--sandbox workspace-write` silently
+degrades to a read-only sandbox that rejects every edit.
+
+## Argument safety
+
+Every provider argument must stay on a single line. Windows resolves both
+provider CLIs to `.cmd` shims that run through `cmd.exe`, where a line break
+inside an argument truncates the command line and silently discards every later
+argument — including the permission flags. `runProcess` refuses to spawn such a
+command instead of running a partial one, and long instructions belong in the
+prompt on standard input rather than in an argument.
+
+Only flags the installed provider CLIs actually accept may be emitted. An
+unrecognized flag aborts the call, and one placed after a truncated argument
+hides that failure entirely. `agent-bridge --doctor` checks each CLI's help
+output for the flags the adapters depend on.
+
 ## Retry behavior
 
 Read-only calls may retry a small allowlist of transient failures. Write calls

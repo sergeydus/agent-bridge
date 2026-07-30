@@ -134,7 +134,7 @@ export async function runDoctor({
     );
   const claudeCapabilities =
     claudeHelp.status === 'fulfilled' &&
-    ['--json-schema', '--safe-mode', '--allowedTools'].every((flag) =>
+    ['--json-schema', '--permission-mode', '--allowedTools'].every((flag) =>
       claudeHelp.value.stdout.includes(flag),
     );
   passed &&= codexCapabilities && claudeCapabilities;

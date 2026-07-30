@@ -154,8 +154,10 @@ agent-bridge chat --screen-reader --cwd /path/to/project
 
 This mode uses append-only semantic status text, descriptive prompts, no ANSI
 color, and no decorative progress glyphs. It is saved with interactive chats
-and forwarded to child workflows. Claude also receives its native
-screen-reader CLI flag. Live text deltas are buffered into complete semantic
+and forwarded to child workflows. Neither provider CLI exposes an accessibility
+mode of its own, so Agent Bridge renders every agent exchange itself and no
+provider output is passed through unrendered. Live text deltas are buffered
+into complete semantic
 updates instead of being announced character by character. Use `--no-color`
 when you only want to disable Agent Bridge color output. The standard
 `NO_COLOR` environment variable is honored. Color is never the only way an
@@ -441,8 +443,8 @@ chat                     Open interactive human-guided chat mode
 --judge <agent>          Read-only synthesis agent
 --codex-model <name>     Codex model override
 --claude-model <name>    Claude model override
---codex-effort <level>   Codex reasoning effort
---claude-effort <level>  Claude reasoning effort
+--codex-effort <level>   Codex reasoning effort: low, medium, high, xhigh, max
+--claude-effort <level>  Claude reasoning effort: low, medium, high, max
 --screen-reader          Use screen-reader-friendly, append-only output
 --no-color               Disable Agent Bridge color output
 --project-config <path>  Alternate project configuration

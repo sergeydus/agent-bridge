@@ -4,7 +4,41 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import test from 'node:test';
 
-import { ProcessAbortError, runProcess } from '../src/process.ts';
+import {
+  findLineBreakArgument,
+  ProcessAbortError,
+  runProcess,
+} from '../src/process.ts';
+
+test('detects arguments Windows command shims would truncate', () => {
+  assert.equal(
+    findLineBreakArgument(['--system-prompt', 'one line'], 'win32'),
+    -1,
+  );
+  assert.equal(
+    findLineBreakArgument(['--system-prompt', 'first\nsecond'], 'win32'),
+    1,
+  );
+  assert.equal(
+    findLineBreakArgument(['--system-prompt', 'first\r\nsecond'], 'win32'),
+    1,
+  );
+  assert.equal(
+    findLineBreakArgument(['--system-prompt', 'first\nsecond'], 'linux'),
+    -1,
+  );
+});
+
+test(
+  'refuses to spawn a command that Windows would silently truncate',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    await assert.rejects(
+      () => runProcess(process.execPath, ['-e', 'process.exit(0)\n// tail']),
+      /line break/,
+    );
+  },
+);
 
 test(
   'launches an npm-style command shim on Windows',
