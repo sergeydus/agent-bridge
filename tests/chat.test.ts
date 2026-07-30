@@ -773,6 +773,65 @@ test('does not overwrite a chat when another process owns its lock', async () =>
   }
 });
 
+test('reports a lock conflict before an unrelated provider failure', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  let heldLock:
+    Awaited<ReturnType<ChatSessionStore['acquireLock']>> | undefined;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const initialOptions = parseArgs(['chat', '--cwd', project], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+    await runInteractiveChat({
+      options: initialOptions,
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal: new ScriptedTerminal(['/pause']),
+    });
+
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const before = await store.latest();
+    assert.ok(before);
+    heldLock = await store.acquireLock(before.id);
+    const resumeTerminal = new ScriptedTerminal(['/done']);
+    const resumeOptions = parseArgs(['chat', '--resume', before.id], {
+      initialCwd: project,
+      defaultOutput: paths.runsDirectory,
+    });
+
+    const unavailableProvider = (name: 'codex' | 'claude'): AgentProvider => ({
+      name,
+      label: name,
+      version: async () => {
+        throw new Error(`spawn ${name} ENOENT`);
+      },
+      authStatus: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+      run: async () => {
+        throw new Error('run should not be reached');
+      },
+    });
+
+    await assert.rejects(
+      runInteractiveChat({
+        options: resumeOptions,
+        appPaths: paths,
+        providers: {
+          codex: unavailableProvider('codex'),
+          claude: unavailableProvider('claude'),
+        },
+        terminal: resumeTerminal,
+      }),
+      /already open in another Agent Bridge process/,
+    );
+  } finally {
+    await heldLock?.release();
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('closes the terminal when chat initialization fails', async () => {
   const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
   const terminal = new ScriptedTerminal([]);

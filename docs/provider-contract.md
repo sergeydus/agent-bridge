@@ -93,9 +93,12 @@ never retry. Timeout and cancellation must terminate the provider process tree.
 Before a provider-backed session begins, both adapters must pass a lightweight
 version check. A failed check names the unavailable provider and directs the
 user to `agent-bridge --doctor`; one-shot editing performs this check before
-creating an isolated workspace. Provider calls retain fixed executables,
-argument-array execution, and `shell: false` at the Agent Bridge boundary,
-including escaped npm `.cmd` shim resolution on Windows.
+creating an isolated workspace, and a resumed run or chat performs it only
+after confirming exclusive ownership of the checkpoint, so a run or chat
+already active elsewhere reports that conflict rather than an unrelated
+provider error. Provider calls retain fixed executables, argument-array
+execution, and `shell: false` at the Agent Bridge boundary, including escaped
+npm `.cmd` shim resolution on Windows.
 
 ## Adding a provider
 

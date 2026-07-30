@@ -42,6 +42,7 @@ import { repositoryHasHead } from './git.ts';
 import { resolveProject } from './project.ts';
 import { interactiveChatPrompt } from './prompts.ts';
 import {
+  assertProvidersAvailable,
   createDefaultProviders,
   runProviderWithRetry,
   type ProviderMap,
@@ -566,6 +567,9 @@ export async function runInteractiveChat({
 
     try {
       lock = await store.acquireLock(session.id);
+      if (!options.dryRun) {
+        await assertProvidersAvailable(providers);
+      }
       await store.save(session);
       const instructions = async (): Promise<string> =>
         (await loadInstructionContext(session.projectRoot)).prompt;

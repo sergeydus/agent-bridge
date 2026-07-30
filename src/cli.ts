@@ -104,9 +104,6 @@ async function main(): Promise<void> {
     });
   }
   if (options.chat) {
-    if (!options.dryRun && !options.listChats && !options.deleteChat) {
-      await assertProvidersAvailable(PROVIDERS);
-    }
     await runInteractiveChat({
       options,
       appPaths: APP_PATHS,

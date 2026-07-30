@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed resuming a chat that is already open in another Agent Bridge process
+  reporting a provider-availability error instead of the actual lock conflict.
 - Fixed Windows editing when the target project and Agent Bridge run-data
   directory are on different drive letters.
 - Fixed launching npm-installed Codex and Claude `.cmd` shims on Windows, and
