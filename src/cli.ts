@@ -154,7 +154,7 @@ async function main(): Promise<void> {
     console.log(`Continuing run ${resumedRun.id}…`);
   }
 
-  if (!options.dryRun) {
+  if (!options.dryRun && !resumedRun) {
     await assertProvidersAvailable(PROVIDERS);
   }
 
@@ -358,6 +358,9 @@ continue from its actual state instead of repeating changes blindly.`;
   try {
     if (!options.dryRun) {
       runLock = await stateStore.acquireLock(runId);
+      if (resumedRun) {
+        await assertProvidersAvailable(PROVIDERS);
+      }
       ownsRunState = true;
     }
     if (needsDirectDirtyRecoveryPatch && !options.dryRun) {
