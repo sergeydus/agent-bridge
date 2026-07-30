@@ -1,10 +1,39 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 import test from 'node:test';
 
 import { ProcessAbortError, runProcess } from '../src/process.ts';
+
+test(
+  'launches an npm-style command shim on Windows',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-shim-'));
+    const command = 'agent-bridge-shim-probe';
+    try {
+      await writeFile(
+        join(directory, `${command}.cmd`),
+        [
+          '@echo off',
+          `"${process.execPath}" -e "process.stdout.write(process.argv[1])" %*`,
+          '',
+        ].join('\r\n'),
+      );
+      const result = await runProcess(command, ['argument with spaces'], {
+        env: {
+          ...process.env,
+          PATH: `${directory}${delimiter}${process.env.PATH ?? ''}`,
+        },
+      });
+
+      assert.equal(result.stdout, 'argument with spaces');
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
 
 test('terminates subprocesses that exceed their timeout', async () => {
   await assert.rejects(

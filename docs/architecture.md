@@ -87,6 +87,12 @@ for live progress, while a separate schema-constrained final response feeds
 the state machine. Live events are never persisted as decisions and cannot
 change convergence.
 
+The CLI performs a lightweight provider-version preflight before opening a
+provider-backed chat or creating a workflow workspace. `process.ts` keeps a
+fixed executable, argument-array execution, and `shell: false` at its public
+boundary while using a Windows-aware launcher so npm `.cmd` shims resolve and
+escape consistently across platforms.
+
 ## Turn data flow
 
 ```text
@@ -159,4 +165,5 @@ source maps. The launcher prefers compiled `dist/cli.js`. A source checkout can
 still run on Node 22.6+ using built-in TypeScript type stripping when `dist/`
 does not exist.
 
-There are no production npm dependencies.
+The only production dependency is the process-launch compatibility layer used
+to resolve provider command shims consistently on Windows.

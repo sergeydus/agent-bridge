@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  assertProvidersAvailable,
   ClaudeProvider,
   CodexProvider,
+  ProviderAvailabilityError,
   runProviderWithRetry,
   type AgentProvider,
+  type ProviderMap,
   type ProviderRunOptions,
 } from '../src/providers.ts';
 
@@ -20,6 +23,60 @@ const dryRunOptions: ProviderRunOptions = {
   isGitRepository: false,
   screenReader: false,
 };
+
+function fakeProvider(
+  name: 'codex' | 'claude',
+  version: AgentProvider['version'],
+): AgentProvider {
+  return {
+    name,
+    label: name === 'codex' ? 'Codex' : 'Claude',
+    version,
+    authStatus: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    run: async () => ({ text: 'done', decision: 'done' }),
+  };
+}
+
+test('provider preflight succeeds when both CLIs can start', async () => {
+  const providers: ProviderMap = {
+    codex: fakeProvider('codex', async () => ({
+      stdout: 'codex 1',
+      stderr: '',
+      exitCode: 0,
+    })),
+    claude: fakeProvider('claude', async () => ({
+      stdout: 'claude 1',
+      stderr: '',
+      exitCode: 0,
+    })),
+  };
+
+  await assertProvidersAvailable(providers);
+});
+
+test('provider preflight gives actionable diagnostics before agent work', async () => {
+  const providers: ProviderMap = {
+    codex: fakeProvider('codex', async () => ({
+      stdout: 'codex 1',
+      stderr: '',
+      exitCode: 0,
+    })),
+    claude: fakeProvider('claude', async () => {
+      throw new Error('spawn claude ENOENT');
+    }),
+  };
+
+  await assert.rejects(
+    () => assertProvidersAvailable(providers),
+    (error: unknown) => {
+      assert.ok(error instanceof ProviderAvailabilityError);
+      assert.match(error.message, /Claude: spawn claude ENOENT/);
+      assert.match(error.message, /claude --version/);
+      assert.match(error.message, /agent-bridge --doctor/);
+      return true;
+    },
+  );
+});
 
 test('provider commands require structured output and keep Claude shell-free', async () => {
   const codex = await new CodexProvider().run('task', dryRunOptions);

@@ -237,6 +237,51 @@ export function createDefaultProviders(): ProviderMap {
   };
 }
 
+export class ProviderAvailabilityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProviderAvailabilityError';
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export async function assertProvidersAvailable(
+  providers: ProviderMap,
+): Promise<void> {
+  const agents = ['codex', 'claude'] as const;
+  const checks = await Promise.allSettled(
+    agents.map(async (agent) => {
+      await providers[agent].version();
+    }),
+  );
+  const failures = checks.flatMap((check, index) => {
+    if (check.status === 'fulfilled') {
+      return [];
+    }
+    const agent = agents[index];
+    return agent
+      ? [`- ${providers[agent].label}: ${errorMessage(check.reason)}`]
+      : [];
+  });
+  if (failures.length === 0) {
+    return;
+  }
+
+  throw new ProviderAvailabilityError(
+    [
+      'Agent Bridge could not start every required provider CLI:',
+      ...failures,
+      '',
+      'Run `codex --version` and `claude --version` in this terminal.',
+      'For complete setup diagnostics, run `agent-bridge --doctor` ' +
+        '(or `npm run doctor` from the source checkout).',
+    ].join('\n'),
+  );
+}
+
 export async function runProviderWithRetry({
   provider,
   prompt,
