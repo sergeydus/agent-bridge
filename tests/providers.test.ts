@@ -5,6 +5,7 @@ import {
   assertProvidersAvailable,
   ClaudeProvider,
   CodexProvider,
+  probeSupportedFlags,
   ProviderAvailabilityError,
   runProviderWithRetry,
   type AgentProvider,
@@ -23,6 +24,15 @@ const dryRunOptions: ProviderRunOptions = {
   isGitRepository: false,
   screenReader: false,
 };
+
+const ALL_CLAUDE_FLAGS = new Set<string>(['--safe-mode', '--ax-screen-reader']);
+
+/** Tests must never depend on a real provider CLI being installed. */
+function claudeProvider(
+  flags: ReadonlySet<string> = ALL_CLAUDE_FLAGS,
+): ClaudeProvider {
+  return new ClaudeProvider(async () => flags);
+}
 
 function fakeProvider(
   name: 'codex' | 'claude',
@@ -80,7 +90,7 @@ test('provider preflight gives actionable diagnostics before agent work', async 
 
 test('provider commands require structured output and keep Claude shell-free', async () => {
   const codex = await new CodexProvider().run('task', dryRunOptions);
-  const claude = await new ClaudeProvider().run('task', dryRunOptions);
+  const claude = await claudeProvider().run('task', dryRunOptions);
   assert.match(codex.text, /--output-schema/);
   assert.match(codex.text, /--json/);
   assert.match(codex.text, /--skip-git-repo-check/);
@@ -95,13 +105,13 @@ test('provider commands require structured output and keep Claude shell-free', a
 
 test('write turns request write permission from both providers', async () => {
   const codex = await new CodexProvider().run('task', dryRunOptions);
-  const claude = await new ClaudeProvider().run('task', dryRunOptions);
+  const claude = await claudeProvider().run('task', dryRunOptions);
   assert.match(codex.text, /--sandbox workspace-write/);
   assert.match(claude.text, /--permission-mode acceptEdits/);
 
   const readOnly = { ...dryRunOptions, writeAccess: false };
   const codexReadOnly = await new CodexProvider().run('task', readOnly);
-  const claudeReadOnly = await new ClaudeProvider().run('task', readOnly);
+  const claudeReadOnly = await claudeProvider().run('task', readOnly);
   assert.match(codexReadOnly.text, /--sandbox read-only/);
   assert.match(claudeReadOnly.text, /--permission-mode plan/);
 });
@@ -123,7 +133,7 @@ test('Codex enables its Windows sandbox despite ignoring user config', async () 
 
 test('provider arguments survive Windows command shims', async () => {
   for (const writeAccess of [true, false]) {
-    for (const provider of [new CodexProvider(), new ClaudeProvider()]) {
+    for (const provider of [new CodexProvider(), claudeProvider()]) {
       const command = await provider.run('task', {
         ...dryRunOptions,
         writeAccess,
@@ -141,20 +151,69 @@ test('provider arguments survive Windows command shims', async () => {
   }
 });
 
-test('Claude is launched only with flags its CLI accepts', async () => {
-  const claude = await new ClaudeProvider().run('task', dryRunOptions);
-  assert.doesNotMatch(claude.text, /--safe-mode/);
+test('Claude uses optional flags exactly when its CLI advertises them', async () => {
+  const supported = new ClaudeProvider(
+    async () => new Set(['--safe-mode', '--ax-screen-reader']),
+  );
+  const withFlags = await supported.run('task', {
+    ...dryRunOptions,
+    screenReader: true,
+  });
+  assert.match(withFlags.text, /--safe-mode/);
+  assert.match(withFlags.text, /--ax-screen-reader/);
+
+  // An older CLI rejects unknown flags outright, aborting the whole call.
+  const older = new ClaudeProvider(async () => new Set(['--print']));
+  const withoutFlags = await older.run('task', {
+    ...dryRunOptions,
+    screenReader: true,
+  });
+  assert.doesNotMatch(withoutFlags.text, /--safe-mode/);
+  assert.doesNotMatch(withoutFlags.text, /--ax-screen-reader/);
 });
 
-test('accessible presentation stays a coordinator concern', async () => {
-  // Neither CLI has an accessibility flag; inventing one aborts every call.
-  for (const provider of [new CodexProvider(), new ClaudeProvider()]) {
-    const command = await provider.run('task', {
-      ...dryRunOptions,
-      screenReader: true,
-    });
-    assert.doesNotMatch(command.text, /screen-reader/);
-  }
+test('Claude asks for the native accessible renderer only when requested', async () => {
+  const provider = new ClaudeProvider(
+    async () => new Set(['--safe-mode', '--ax-screen-reader']),
+  );
+  const quiet = await provider.run('task', {
+    ...dryRunOptions,
+    screenReader: false,
+  });
+  assert.doesNotMatch(quiet.text, /--ax-screen-reader/);
+});
+
+test('Claude probes its CLI once and reuses the result', async () => {
+  let probes = 0;
+  const provider = new ClaudeProvider(async () => {
+    probes += 1;
+    return new Set(['--safe-mode']);
+  });
+  await provider.run('task', dryRunOptions);
+  await provider.run('task', dryRunOptions);
+  assert.equal(probes, 1);
+});
+
+test('an unreadable provider CLI omits optional flags instead of failing', async () => {
+  assert.deepEqual(
+    await probeSupportedFlags('agent-bridge-missing-command-probe'),
+    new Set(),
+  );
+  const provider = new ClaudeProvider(() =>
+    probeSupportedFlags('agent-bridge-missing-command-probe'),
+  );
+  const command = await provider.run('task', dryRunOptions);
+  assert.match(command.text, /--permission-mode acceptEdits/);
+  assert.doesNotMatch(command.text, /--safe-mode/);
+});
+
+test('reads advertised flags from a CLI help listing', async () => {
+  const flags = await probeSupportedFlags(process.execPath, [
+    '-e',
+    'console.log("  --safe-mode  Start with all customizations disabled")',
+  ]);
+  assert.ok(flags.has('--safe-mode'));
+  assert.ok(!flags.has('--ax-screen-reader'));
 });
 
 test('retries transient read-only provider failures through the provider interface', async () => {

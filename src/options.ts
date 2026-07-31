@@ -87,7 +87,7 @@ Options:
   --codex-model <name>    Optional Codex model override
   --claude-model <name>   Optional Claude model override
   --codex-effort <level>  low, medium, high, xhigh, or max
-  --claude-effort <level> low, medium, high, or max
+  --claude-effort <level> low, medium, high, xhigh, or max
   --output <directory>    Override transcript and workspace storage
   --no-transcript         Remove completed run or chat transcripts
   --screen-reader         Use append-only, screen-reader-friendly presentation
@@ -376,15 +376,10 @@ export function parseArgs(
   if (options.codexEffort && !validEfforts.includes(options.codexEffort)) {
     throw new Error('--codex-effort must be low, medium, high, xhigh, or max');
   }
-  // Claude Code's own --effort flag has no xhigh level.
-  const validClaudeEfforts = validEfforts.filter(
-    (effort) => effort !== 'xhigh',
-  );
-  if (
-    options.claudeEffort &&
-    !validClaudeEfforts.includes(options.claudeEffort)
-  ) {
-    throw new Error('--claude-effort must be low, medium, high, or max');
+  // Which levels a given model accepts is the provider's decision, not a fixed
+  // list here: Claude's xhigh support varies by model.
+  if (options.claudeEffort && !validEfforts.includes(options.claudeEffort)) {
+    throw new Error('--claude-effort must be low, medium, high, xhigh, or max');
   }
   if (!['plain', 'enhanced', 'auto'].includes(options.ui)) {
     throw new Error('--ui must be plain, enhanced, or auto');

@@ -12,12 +12,13 @@
   discarded the `windows.sandbox` setting that activates its restricted-token
   sandbox, so `--sandbox workspace-write` degraded to read-only. Agent Bridge
   now supplies that setting itself.
-- Removed the `--safe-mode` and `--ax-screen-reader` flags, which Claude Code
-  does not accept and which aborted the call once argument truncation was
-  fixed; `--doctor` now probes for flags the adapters really use. Accessible
-  output has always come from Agent Bridge's own renderer.
-- Fixed `--claude-effort xhigh`, a level Claude Code's `--effort` rejects. The
-  CLI and wizard now offer extra-high effort for Codex only.
+- Made `--safe-mode` and `--ax-screen-reader` capability-gated. Both exist in
+  current Claude Code but not in every installed version, and argument
+  truncation had been hiding the resulting aborted calls. Agent Bridge now
+  probes the CLI's own help output once per session and uses each flag only
+  where it is offered, so project customizations stay excluded and the native
+  accessible renderer stays available wherever the installed CLI supports them.
+  `--doctor` reports which optional flags were detected.
 - Fixed the change summary reporting the first changed file as staged and
   without its first character, caused by trimming the leading space of a
   porcelain status record.

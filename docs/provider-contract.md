@@ -104,6 +104,16 @@ unrecognized flag aborts the call, and one placed after a truncated argument
 hides that failure entirely. `agent-bridge --doctor` checks each CLI's help
 output for the flags the adapters depend on.
 
+Provider CLIs gain and lose flags between releases, so support is detected, not
+assumed in either direction. Flags an adapter uses only when available are
+declared as optional capabilities, probed once per session from the CLI's own
+help output, and omitted when absent; a failed probe omits them rather than
+risking a rejected call. Claude's optional capabilities are `--safe-mode`,
+which excludes the target project's discovered customizations — CLAUDE.md,
+hooks, plugins, and MCP servers — from an agent turn, and `--ax-screen-reader`,
+its native accessible renderer. A test may assert that an optional flag is
+gated, never that it is permanently absent.
+
 ## Retry behavior
 
 Read-only calls may retry a small allowlist of transient failures. Write calls

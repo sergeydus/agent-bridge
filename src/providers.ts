@@ -180,9 +180,55 @@ export class CodexProvider implements AgentProvider {
   }
 }
 
+/**
+ * Flags Agent Bridge uses when the installed CLI offers them. Provider CLIs
+ * gain and lose flags between releases, and an unrecognized flag aborts the
+ * whole call, so support is detected rather than assumed in either direction.
+ */
+export const CLAUDE_OPTIONAL_FLAGS = {
+  /** Excludes project and user customizations: CLAUDE.md, hooks, plugins, MCP. */
+  safeMode: '--safe-mode',
+  /** Provider-native accessible rendering. */
+  screenReader: '--ax-screen-reader',
+} as const;
+
+/**
+ * Reads the flags a CLI advertises in its own help output. A failed probe
+ * yields an empty set, which omits optional flags rather than risking a call
+ * that the installed CLI would reject outright.
+ */
+export async function probeSupportedFlags(
+  command: string,
+  args: string[] = ['--help'],
+): Promise<ReadonlySet<string>> {
+  try {
+    const { stdout, stderr } = await runProcess(command, args, {
+      timeoutMs: 10_000,
+    });
+    return new Set(`${stdout}\n${stderr}`.match(/--[a-zA-Z][\w-]*/g) ?? []);
+  } catch {
+    return new Set<string>();
+  }
+}
+
 export class ClaudeProvider implements AgentProvider {
   readonly name = 'claude';
   readonly label = 'Claude';
+  readonly #probeFlags: () => Promise<ReadonlySet<string>>;
+  #supportedFlags?: Promise<ReadonlySet<string>>;
+
+  constructor(
+    probeFlags: () => Promise<ReadonlySet<string>> = () =>
+      probeSupportedFlags('claude'),
+  ) {
+    this.#probeFlags = probeFlags;
+  }
+
+  /** Probed once per provider instance; every call reuses the result. */
+  supportedFlags(): Promise<ReadonlySet<string>> {
+    this.#supportedFlags ??= this.#probeFlags();
+    return this.#supportedFlags;
+  }
 
   version(): Promise<ProcessResult> {
     return runProcess('claude', ['--version'], { timeoutMs: 10_000 });
@@ -232,6 +278,19 @@ export class ClaudeProvider implements AgentProvider {
     }
     if (options.effort) {
       args.push('--effort', options.effort);
+    }
+
+    const supported = await this.supportedFlags();
+    // Isolating the agent from the target project's discovered customizations
+    // matters most here, because the project is untrusted input.
+    if (supported.has(CLAUDE_OPTIONAL_FLAGS.safeMode)) {
+      args.push(CLAUDE_OPTIONAL_FLAGS.safeMode);
+    }
+    if (
+      options.screenReader &&
+      supported.has(CLAUDE_OPTIONAL_FLAGS.screenReader)
+    ) {
+      args.push(CLAUDE_OPTIONAL_FLAGS.screenReader);
     }
 
     if (options.dryRun) {
