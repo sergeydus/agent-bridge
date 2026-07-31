@@ -4,13 +4,46 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
+import { summarizePorcelainStatus } from '../src/core.ts';
 import { execute } from '../src/git.ts';
 import {
   parseNullTerminatedStatus,
   pathFingerprint,
   workingTreePaths,
   workingTreeSnapshot,
+  workingTreeStatus,
 } from '../src/snapshot.ts';
+
+test('reports an unstaged edit without losing its status field', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-status-'));
+  try {
+    await execute('git', ['init', root], { cwd: root });
+    await writeFile(join(root, 'f.txt'), 'hello\n');
+    await execute('git', ['add', 'f.txt'], { cwd: root });
+    await execute(
+      'git',
+      [
+        '-c',
+        'user.email=t@example.com',
+        '-c',
+        'user.name=t',
+        'commit',
+        '-m',
+        'init',
+      ],
+      { cwd: root },
+    );
+    await writeFile(join(root, 'f.txt'), 'goodbye\n');
+
+    const status = await workingTreeStatus({ cwd: root });
+    const summary = summarizePorcelainStatus(status);
+    assert.deepEqual(summary.files, ['f.txt']);
+    assert.equal(summary.modifiedFiles, 1);
+    assert.equal(summary.stagedFiles, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test(
   'captures ordinary untracked files without following untracked symlinks',

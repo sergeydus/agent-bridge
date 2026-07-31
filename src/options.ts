@@ -376,6 +376,8 @@ export function parseArgs(
   if (options.codexEffort && !validEfforts.includes(options.codexEffort)) {
     throw new Error('--codex-effort must be low, medium, high, xhigh, or max');
   }
+  // Which levels a given model accepts is the provider's decision, not a fixed
+  // list here: Claude's xhigh support varies by model.
   if (options.claudeEffort && !validEfforts.includes(options.claudeEffort)) {
     throw new Error('--claude-effort must be low, medium, high, xhigh, or max');
   }

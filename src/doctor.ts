@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 import type { AppPaths } from './paths.ts';
 import { runProcess } from './process.ts';
-import type { ProviderMap } from './providers.ts';
+import { CLAUDE_OPTIONAL_FLAGS, type ProviderMap } from './providers.ts';
 
 export interface DoctorReport {
   passed: boolean;
@@ -134,7 +134,7 @@ export async function runDoctor({
     );
   const claudeCapabilities =
     claudeHelp.status === 'fulfilled' &&
-    ['--json-schema', '--safe-mode', '--allowedTools'].every((flag) =>
+    ['--json-schema', '--permission-mode', '--allowedTools'].every((flag) =>
       claudeHelp.value.stdout.includes(flag),
     );
   passed &&= codexCapabilities && claudeCapabilities;
@@ -144,6 +144,15 @@ export async function runDoctor({
   lines.push(
     `Claude capabilities: ${claudeCapabilities ? 'compatible' : 'missing required flags'}`,
   );
+
+  // Optional flags vary between provider releases and are used only when the
+  // installed CLI advertises them, so a missing one is reported, never fatal.
+  const claudeHelpText =
+    claudeHelp.status === 'fulfilled' ? claudeHelp.value.stdout : '';
+  const optional = Object.entries(CLAUDE_OPTIONAL_FLAGS).map(
+    ([, flag]) => `${flag} ${claudeHelpText.includes(flag) ? 'yes' : 'no'}`,
+  );
+  lines.push(`Claude optional flags: ${optional.join(', ')}`);
 
   return { passed, lines };
 }

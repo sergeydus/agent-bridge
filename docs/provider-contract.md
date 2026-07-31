@@ -85,6 +85,40 @@ Bash. Codex uses its workspace-write sandbox. Both receive instructions not to
 run package, build, deploy, or version-control mutations; approved checks are
 the coordinator's responsibility.
 
+Codex only activates its Windows restricted-token sandbox when `windows.sandbox`
+is set. Because Agent Bridge runs Codex with `--ignore-user-config`, it supplies
+that value itself on Windows; without it `--sandbox workspace-write` silently
+degrades to a read-only sandbox that rejects every edit.
+
+## Argument safety
+
+Every provider argument must stay on a single line. Windows resolves both
+provider CLIs to `.cmd` shims that run through `cmd.exe`, where a line break
+inside an argument truncates the command line and silently discards every later
+argument — including the permission flags. `runProcess` refuses to spawn such a
+command instead of running a partial one, and long instructions belong in the
+prompt on standard input rather than in an argument.
+
+Only flags the installed provider CLIs actually accept may be emitted. An
+unrecognized flag aborts the call, and one placed after a truncated argument
+hides that failure entirely. `agent-bridge --doctor` checks each CLI's help
+output for the flags the adapters depend on.
+
+Provider CLIs gain and lose flags between releases, so support is detected, not
+assumed in either direction. Flags an adapter uses only when available are
+declared as optional capabilities, probed once per session from the CLI's own
+help output, and omitted when absent; a failed probe omits them rather than
+risking a rejected call. Claude's optional capabilities are `--safe-mode`,
+which excludes the target project's discovered customizations — CLAUDE.md,
+hooks, plugins, and MCP servers — from an agent turn, and `--ax-screen-reader`,
+its native accessible renderer. A test may assert that an optional flag is
+gated, never that it is permanently absent.
+
+A dry run stays side-effect free: it launches nothing, including the capability
+probe, so it prints the version-independent command without capability-gated
+flags. Adapters keep argument construction in a pure function so both the dry
+run and the gate stay testable without a provider CLI installed.
+
 ## Retry behavior
 
 Read-only calls may retry a small allowlist of transient failures. Write calls

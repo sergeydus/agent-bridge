@@ -69,7 +69,11 @@ export async function workingTreeStatus({
     ['status', '--porcelain=v1', '--untracked-files=all'],
     { cwd, truncateOutputChars: MAX_SNAPSHOT_SECTION_CHARS },
   );
-  return stdout.trim();
+  // Porcelain records begin with a two-character status field whose first
+  // character is a space for unstaged-only changes. Trimming the start would
+  // shift every field of the first record, reporting it as a staged change to
+  // a path missing its first character.
+  return stdout.trimEnd();
 }
 
 export async function workingTreeSnapshot({

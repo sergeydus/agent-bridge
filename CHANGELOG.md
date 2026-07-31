@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- Fixed implementation agents never receiving write access on Windows. The
+  multi-line Claude system prompt truncated the `cmd.exe` command line used for
+  npm `.cmd` shims, silently discarding every later argument — including
+  `--permission-mode acceptEdits` — so Claude ran with default permissions and
+  refused every edit. Provider arguments are now single-line, and `runProcess`
+  refuses to spawn a command Windows would truncate instead of running it.
+- Fixed Codex rejecting every edit on Windows. `--ignore-user-config` also
+  discarded the `windows.sandbox` setting that activates its restricted-token
+  sandbox, so `--sandbox workspace-write` degraded to read-only. Agent Bridge
+  now supplies that setting itself.
+- Made `--safe-mode` and `--ax-screen-reader` capability-gated. Both exist in
+  current Claude Code but not in every installed version, and argument
+  truncation had been hiding the resulting aborted calls. Agent Bridge now
+  probes the CLI's own help output once per session and uses each flag only
+  where it is offered, so project customizations stay excluded and the native
+  accessible renderer stays available wherever the installed CLI supports them.
+  `--doctor` reports which optional flags were detected. `--dry-run` never
+  runs the probe, so it stays side-effect free and immediate.
+- Fixed the change summary reporting the first changed file as staged and
+  without its first character, caused by trimming the leading space of a
+  porcelain status record.
+
 - Fixed a failed provider preflight marking a resumed chat `paused`, and
   saving a ghost session for a new chat, instead of leaving persisted state
   untouched; also fixed a partially failed checkpoint save (JSON written,
