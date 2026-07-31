@@ -18,7 +18,8 @@
   probes the CLI's own help output once per session and uses each flag only
   where it is offered, so project customizations stay excluded and the native
   accessible renderer stays available wherever the installed CLI supports them.
-  `--doctor` reports which optional flags were detected.
+  `--doctor` reports which optional flags were detected. `--dry-run` never
+  runs the probe, so it stays side-effect free and immediate.
 - Fixed the change summary reporting the first changed file as staged and
   without its first character, caused by trimming the leading space of a
   porcelain status record.

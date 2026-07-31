@@ -211,11 +211,70 @@ export async function probeSupportedFlags(
   }
 }
 
+const NO_FLAGS: ReadonlySet<string> = new Set<string>();
+
+/**
+ * Builds Claude's argument vector. Optional flags appear only when
+ * `supportedFlags` advertises them; every value stays on a single line.
+ */
+export function claudeArguments(
+  options: Pick<
+    ProviderRunOptions,
+    'writeAccess' | 'responseKind' | 'screenReader' | 'model' | 'effort'
+  >,
+  supportedFlags: ReadonlySet<string>,
+): string[] {
+  const args = [
+    '--print',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--include-partial-messages',
+    '--json-schema',
+    JSON.stringify(schemaFor(options.responseKind)),
+    '--system-prompt',
+    options.writeAccess
+      ? CLAUDE_WRITE_SYSTEM_PROMPT
+      : CLAUDE_READ_ONLY_SYSTEM_PROMPT,
+    '--permission-mode',
+    options.writeAccess ? 'acceptEdits' : 'plan',
+    '--tools',
+    options.writeAccess ? 'Edit,Read,Write,Glob,Grep' : 'Read,Glob,Grep',
+    '--no-session-persistence',
+    '--max-turns',
+    '50',
+    '--allowedTools',
+    options.writeAccess
+      ? ['Read', 'Glob', 'Grep', 'Edit', 'Write'].join(',')
+      : 'Read,Glob,Grep',
+  ];
+
+  if (options.model) {
+    args.push('--model', options.model);
+  }
+  if (options.effort) {
+    args.push('--effort', options.effort);
+  }
+  // Isolating the agent from the target project's discovered customizations
+  // matters most here, because the project is untrusted input.
+  if (supportedFlags.has(CLAUDE_OPTIONAL_FLAGS.safeMode)) {
+    args.push(CLAUDE_OPTIONAL_FLAGS.safeMode);
+  }
+  if (
+    options.screenReader &&
+    supportedFlags.has(CLAUDE_OPTIONAL_FLAGS.screenReader)
+  ) {
+    args.push(CLAUDE_OPTIONAL_FLAGS.screenReader);
+  }
+  return args;
+}
+
 export class ClaudeProvider implements AgentProvider {
   readonly name = 'claude';
   readonly label = 'Claude';
-  readonly #probeFlags: () => Promise<ReadonlySet<string>>;
-  #supportedFlags?: Promise<ReadonlySet<string>>;
+  // Node 22.6 strips types without accepting `readonly` or `?` on a `#` field.
+  #probeFlags: () => Promise<ReadonlySet<string>>;
+  #supportedFlags: Promise<ReadonlySet<string>> | undefined;
 
   constructor(
     probeFlags: () => Promise<ReadonlySet<string>> = () =>
@@ -244,64 +303,18 @@ export class ClaudeProvider implements AgentProvider {
     prompt: string,
     options: ProviderRunOptions,
   ): Promise<AgentResponse> {
-    const systemPrompt = options.writeAccess
-      ? CLAUDE_WRITE_SYSTEM_PROMPT
-      : CLAUDE_READ_ONLY_SYSTEM_PROMPT;
-    const tools = options.writeAccess
-      ? 'Edit,Read,Write,Glob,Grep'
-      : 'Read,Glob,Grep';
-    const args = [
-      '--print',
-      '--output-format',
-      'stream-json',
-      '--verbose',
-      '--include-partial-messages',
-      '--json-schema',
-      JSON.stringify(schemaFor(options.responseKind)),
-      '--system-prompt',
-      systemPrompt,
-      '--permission-mode',
-      options.writeAccess ? 'acceptEdits' : 'plan',
-      '--tools',
-      tools,
-      '--no-session-persistence',
-      '--max-turns',
-      '50',
-      '--allowedTools',
-      options.writeAccess
-        ? ['Read', 'Glob', 'Grep', 'Edit', 'Write'].join(',')
-        : 'Read,Glob,Grep',
-    ];
-
-    if (options.model) {
-      args.push('--model', options.model);
-    }
-    if (options.effort) {
-      args.push('--effort', options.effort);
-    }
-
-    const supported = await this.supportedFlags();
-    // Isolating the agent from the target project's discovered customizations
-    // matters most here, because the project is untrusted input.
-    if (supported.has(CLAUDE_OPTIONAL_FLAGS.safeMode)) {
-      args.push(CLAUDE_OPTIONAL_FLAGS.safeMode);
-    }
-    if (
-      options.screenReader &&
-      supported.has(CLAUDE_OPTIONAL_FLAGS.screenReader)
-    ) {
-      args.push(CLAUDE_OPTIONAL_FLAGS.screenReader);
-    }
-
     if (options.dryRun) {
+      // A dry run stays side-effect free, so it never probes the installed CLI
+      // and prints the version-independent command.
       return {
-        text: `[dry-run] claude ${args.join(' ')}`,
+        text: `[dry-run] claude ${claudeArguments(options, NO_FLAGS).join(' ')}`,
         ...(options.responseKind === 'turn'
           ? { decision: 'continue' as const }
           : {}),
       };
     }
 
+    const args = claudeArguments(options, await this.supportedFlags());
     const events = new ClaudeEventStream(options.responseKind, options.onEvent);
     await runProcess('claude', args, {
       cwd: options.cwd,

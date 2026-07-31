@@ -114,6 +114,11 @@ hooks, plugins, and MCP servers — from an agent turn, and `--ax-screen-reader`
 its native accessible renderer. A test may assert that an optional flag is
 gated, never that it is permanently absent.
 
+A dry run stays side-effect free: it launches nothing, including the capability
+probe, so it prints the version-independent command without capability-gated
+flags. Adapters keep argument construction in a pure function so both the dry
+run and the gate stay testable without a provider CLI installed.
+
 ## Retry behavior
 
 Read-only calls may retry a small allowlist of transient failures. Write calls

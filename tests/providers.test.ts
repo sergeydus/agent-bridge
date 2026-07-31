@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   assertProvidersAvailable,
   ClaudeProvider,
+  claudeArguments,
   CodexProvider,
   probeSupportedFlags,
   ProviderAvailabilityError,
@@ -151,36 +152,26 @@ test('provider arguments survive Windows command shims', async () => {
   }
 });
 
-test('Claude uses optional flags exactly when its CLI advertises them', async () => {
-  const supported = new ClaudeProvider(
-    async () => new Set(['--safe-mode', '--ax-screen-reader']),
-  );
-  const withFlags = await supported.run('task', {
-    ...dryRunOptions,
-    screenReader: true,
-  });
-  assert.match(withFlags.text, /--safe-mode/);
-  assert.match(withFlags.text, /--ax-screen-reader/);
+test('Claude uses optional flags exactly when its CLI advertises them', () => {
+  const requested = { ...dryRunOptions, screenReader: true };
+  const withFlags = claudeArguments(requested, ALL_CLAUDE_FLAGS);
+  assert.ok(withFlags.includes('--safe-mode'));
+  assert.ok(withFlags.includes('--ax-screen-reader'));
 
   // An older CLI rejects unknown flags outright, aborting the whole call.
-  const older = new ClaudeProvider(async () => new Set(['--print']));
-  const withoutFlags = await older.run('task', {
-    ...dryRunOptions,
-    screenReader: true,
-  });
-  assert.doesNotMatch(withoutFlags.text, /--safe-mode/);
-  assert.doesNotMatch(withoutFlags.text, /--ax-screen-reader/);
+  const withoutFlags = claudeArguments(requested, new Set(['--print']));
+  assert.ok(!withoutFlags.includes('--safe-mode'));
+  assert.ok(!withoutFlags.includes('--ax-screen-reader'));
+  assert.ok(withoutFlags.includes('acceptEdits'));
 });
 
-test('Claude asks for the native accessible renderer only when requested', async () => {
-  const provider = new ClaudeProvider(
-    async () => new Set(['--safe-mode', '--ax-screen-reader']),
+test('Claude asks for the native accessible renderer only when requested', () => {
+  const quiet = claudeArguments(
+    { ...dryRunOptions, screenReader: false },
+    ALL_CLAUDE_FLAGS,
   );
-  const quiet = await provider.run('task', {
-    ...dryRunOptions,
-    screenReader: false,
-  });
-  assert.doesNotMatch(quiet.text, /--ax-screen-reader/);
+  assert.ok(!quiet.includes('--ax-screen-reader'));
+  assert.ok(quiet.includes('--safe-mode'));
 });
 
 test('Claude probes its CLI once and reuses the result', async () => {
@@ -189,9 +180,22 @@ test('Claude probes its CLI once and reuses the result', async () => {
     probes += 1;
     return new Set(['--safe-mode']);
   });
-  await provider.run('task', dryRunOptions);
-  await provider.run('task', dryRunOptions);
+  assert.deepEqual(await provider.supportedFlags(), new Set(['--safe-mode']));
+  assert.deepEqual(await provider.supportedFlags(), new Set(['--safe-mode']));
   assert.equal(probes, 1);
+});
+
+test('a dry run never launches the provider CLI', async () => {
+  let probes = 0;
+  const provider = new ClaudeProvider(async () => {
+    probes += 1;
+    return ALL_CLAUDE_FLAGS;
+  });
+  const command = await provider.run('task', dryRunOptions);
+
+  assert.equal(probes, 0);
+  assert.match(command.text, /--permission-mode acceptEdits/);
+  assert.doesNotMatch(command.text, /--safe-mode/);
 });
 
 test('an unreadable provider CLI omits optional flags instead of failing', async () => {
@@ -199,12 +203,6 @@ test('an unreadable provider CLI omits optional flags instead of failing', async
     await probeSupportedFlags('agent-bridge-missing-command-probe'),
     new Set(),
   );
-  const provider = new ClaudeProvider(() =>
-    probeSupportedFlags('agent-bridge-missing-command-probe'),
-  );
-  const command = await provider.run('task', dryRunOptions);
-  assert.match(command.text, /--permission-mode acceptEdits/);
-  assert.doesNotMatch(command.text, /--safe-mode/);
 });
 
 test('reads advertised flags from a CLI help listing', async () => {
