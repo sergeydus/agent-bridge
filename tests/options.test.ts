@@ -130,6 +130,13 @@ test('parses accessible presentation and validates model names', () => {
   });
   assert.equal(enhanced.ui, 'enhanced');
   assert.equal(enhanced.uiExplicit, true);
+  const wizardAuto = parseArgs(['--wizard', '--ui', 'auto'], {
+    initialCwd: temporaryDirectory,
+    defaultOutput: join(temporaryDirectory, 'runs'),
+  });
+  assert.equal(wizardAuto.wizard, true);
+  assert.equal(wizardAuto.ui, 'auto');
+  assert.equal(wizardAuto.uiExplicit, true);
   const explicitPlain = parseArgs(['--ui', 'plain'], {
     initialCwd: temporaryDirectory,
     defaultOutput: join(temporaryDirectory, 'runs'),

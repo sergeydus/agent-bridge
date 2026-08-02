@@ -384,7 +384,12 @@ export function parseArgs(
   if (!['plain', 'enhanced', 'auto'].includes(options.ui)) {
     throw new Error('--ui must be plain, enhanced, or auto');
   }
-  if (!options.chat && options.uiExplicit && options.ui !== 'plain') {
+  if (
+    !options.chat &&
+    !options.wizard &&
+    options.uiExplicit &&
+    options.ui !== 'plain'
+  ) {
     throw new Error('--ui enhanced and --ui auto currently require chat mode');
   }
   for (const [flag, model] of [

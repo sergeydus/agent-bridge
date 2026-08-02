@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed explicit `--ui auto` and `--ui enhanced` overrides being rejected at
+  wizard startup before the wizard could select interactive chat mode.
 - Made automatic enhanced chat presentation the default for new sessions on
   capable interactive terminals, while preserving saved choices and the plain
   fallback for screen readers, redirected streams, and unsupported terminals.
