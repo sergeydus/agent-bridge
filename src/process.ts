@@ -15,6 +15,16 @@ export interface ProcessResult {
   stderrTruncated?: boolean;
 }
 
+/**
+ * A CLI may write help and capability information to either stream. Callers
+ * that inspect human-readable output should treat both streams as one listing.
+ */
+export function combinedProcessOutput(
+  result: Pick<ProcessResult, 'stdout' | 'stderr'>,
+): string {
+  return `${result.stdout}\n${result.stderr}`;
+}
+
 const TRUNCATION_MARKER = '\n…[output truncated]…\n';
 
 /**

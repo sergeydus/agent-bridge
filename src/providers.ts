@@ -7,7 +7,11 @@ import {
   type AgentName,
   type ReasoningEffort,
 } from './core.ts';
-import { runProcess, type ProcessResult } from './process.ts';
+import {
+  combinedProcessOutput,
+  runProcess,
+  type ProcessResult,
+} from './process.ts';
 import {
   ClaudeEventStream,
   CodexEventStream,
@@ -63,9 +67,8 @@ export interface ProviderRunOptions {
   responseKind: ResponseKind;
   isGitRepository: boolean;
   /**
-   * Neither provider CLI exposes a native accessibility mode, so this only
-   * records the caller's preference. Accessible output is produced entirely by
-   * Agent Bridge's own renderer.
+   * Claude receives its native accessible renderer flag when the installed CLI
+   * advertises support. Agent Bridge always keeps its own semantic renderer.
    */
   screenReader: boolean;
   signal?: AbortSignal;
@@ -205,7 +208,10 @@ export async function probeSupportedFlags(
     const { stdout, stderr } = await runProcess(command, args, {
       timeoutMs: 10_000,
     });
-    return new Set(`${stdout}\n${stderr}`.match(/--[a-zA-Z][\w-]*/g) ?? []);
+    return new Set(
+      combinedProcessOutput({ stdout, stderr }).match(/--[a-zA-Z][\w-]*/g) ??
+        [],
+    );
   } catch {
     return new Set<string>();
   }

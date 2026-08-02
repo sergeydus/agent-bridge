@@ -444,7 +444,7 @@ chat                     Open interactive human-guided chat mode
 --codex-model <name>     Codex model override
 --claude-model <name>    Claude model override
 --codex-effort <level>   Codex reasoning effort: low, medium, high, xhigh, max
---claude-effort <level>  Claude reasoning effort: low, medium, high, max
+--claude-effort <level>  Claude reasoning effort: low, medium, high, xhigh, max
 --screen-reader          Use screen-reader-friendly, append-only output
 --no-color               Disable Agent Bridge color output
 --project-config <path>  Alternate project configuration
