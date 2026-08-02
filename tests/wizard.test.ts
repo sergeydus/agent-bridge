@@ -210,7 +210,7 @@ test('wizard asks accessibility first once and restores the preference', async (
   }
 });
 
-test('an explicit enhanced UI overrides a saved screen-reader preference', async () => {
+test('an explicit wizard UI overrides a saved screen-reader preference', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-ui-override-'));
   try {
     const store = new UserConfigStore(join(directory, 'config.json'));
@@ -219,13 +219,13 @@ test('an explicit enhanced UI overrides a saved screen-reader preference', async
       noColor: true,
       ui: 'plain',
     });
-    const options = parseArgs(['chat', '--ui', 'enhanced'], {
+    const options = parseArgs(['--wizard', '--ui', 'auto'], {
       initialCwd: directory,
       defaultOutput: join(directory, 'runs'),
     });
     await configureAccessibility(new ScriptedQuestioner([]), options, store);
     assert.equal(options.screenReader, false);
-    assert.equal(options.ui, 'enhanced');
+    assert.equal(options.ui, 'auto');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
