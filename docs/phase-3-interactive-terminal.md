@@ -114,10 +114,10 @@ Behavior:
 - `--no-color` and `NO_COLOR` remove color but do not otherwise disable the
   enhanced layout.
 
-For the first Phase 3 release, the CLI default remains `plain` to avoid changing
-existing terminal behavior. The novice wizard may offer enhanced mode with a
-preview and remember the choice. Changing the default to `auto` requires a
-later compatibility decision backed by manual terminal results.
+The CLI default is `auto`: capable interactive terminals use enhanced mode and
+all unsupported, redirected, or accessible contexts retain the complete plain
+interface. Explicit, saved, and resumed presentation preferences take
+precedence over this release default.
 
 Presentation preference precedence, from strongest to weakest:
 
@@ -207,8 +207,8 @@ show a clearer result, but all three layout classes are required.
 - The final response must not be visually mistaken for agreement.
 - A decision badge always includes text: `continue` or `done`.
 - Concurrent provider output is never interleaved inside one visual message.
-- Activity updates are deduplicated so repeated heartbeats do not flood the
-  conversation.
+- Streaming redraws are bounded and activity animation uses presentation-only
+  ticks, so neither provider events nor semantic heartbeats flood the terminal.
 - Reopening a session reconstructs completed conversation from the existing
   checkpoint. Ephemeral activity and partial live text are not restored.
 
@@ -502,7 +502,7 @@ inability to restore terminal ownership safely is a fatal error.
 - Perform screen-reader and narrow-terminal manual checks.
 - Update the wizard, README, `--help`, architecture, security notes, and
   changelog.
-- Keep enhanced mode opt-in for the initial release.
+- Default new chats to automatic capability-based enhanced presentation.
 
 Each slice must leave plain mode working and may be merged independently.
 
@@ -559,7 +559,8 @@ At minimum:
 
 Phase 3 is complete when:
 
-1. A user can opt into the enhanced interface from the CLI and novice wizard.
+1. A capable interactive terminal selects the enhanced interface automatically,
+   and users can override it from the CLI or novice wizard.
 2. The interface continuously identifies the active agent, model, role, phase,
    elapsed time, and safety mode.
 3. Existing chat commands and workflow handoffs work through the same parser
@@ -579,16 +580,14 @@ Phase 3 is complete when:
 
 ## Release safeguards
 
-The first release is opt-in and should be described as an enhanced preview.
-Plain mode remains the default until:
+Automatic mode remains the default while the release safeguards below hold:
 
 - terminal restoration tests are stable across supported CI platforms;
 - no high-severity accessibility issue remains;
 - at least one manual pass succeeds in VS Code, macOS, Windows, and Linux
   terminals;
 - fallback telemetry is not required, because Agent Bridge does not add usage
-  tracking for this feature;
-- maintainers explicitly approve changing the compatibility default.
+  tracking for this feature.
 
 If the enhanced renderer proves unreliable on a terminal, users can always
 select `--ui plain`; saved sessions remain readable because conversation state

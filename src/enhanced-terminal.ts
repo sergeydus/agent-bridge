@@ -3,6 +3,7 @@ import type { TerminalRenderer } from './presentation.ts';
 import type {
   PresentedActivity,
   PresentedMessage,
+  PresentedUsage,
   TerminalViewModel,
 } from './presentation-model.ts';
 import { sanitizeTerminalText } from './terminal-text.ts';
@@ -10,6 +11,11 @@ import { sanitizeTerminalText } from './terminal-text.ts';
 const ENTER_ALTERNATE_SCREEN = '\u001B[?1049h';
 const LEAVE_ALTERNATE_SCREEN = '\u001B[?1049l';
 const CLEAR_AND_HOME = '\u001B[2J\u001B[H';
+const HOME = '\u001B[H';
+const ERASE_DISPLAY_BELOW = '\u001B[J';
+const STREAM_REDRAW_INTERVAL_MS = 50;
+const ACTIVITY_FRAME_INTERVAL_MS = 250;
+const ACTIVITY_FRAMES = ['⠋', '⠙', '⠹', '⠸'] as const;
 const GRAPHEME_SEGMENTER = new Intl.Segmenter('en', {
   granularity: 'grapheme',
 });
@@ -144,6 +150,51 @@ function wrapText(
   return lines.slice(0, maxLines);
 }
 
+function tailWindow(
+  unsafeText: string,
+  maximumCharacters: number,
+): { text: string; truncated: boolean } {
+  const text = sanitizeTerminalText(unsafeText);
+  if (text.length <= maximumCharacters) {
+    return { text, truncated: false };
+  }
+
+  let start = text.length - maximumCharacters;
+  const first = text.charCodeAt(start);
+  const previous = text.charCodeAt(start - 1);
+  if (
+    first >= 0xdc00 &&
+    first <= 0xdfff &&
+    previous >= 0xd800 &&
+    previous <= 0xdbff
+  ) {
+    start -= 1;
+  }
+  return { text: text.slice(start), truncated: true };
+}
+
+function wrapTextTail(
+  unsafeText: string,
+  width: number,
+  maxLines: number,
+  alreadyTruncated = false,
+): string[] {
+  if (maxLines <= 0 || width <= 0) {
+    return [];
+  }
+
+  // Bound the wrapping work independently of the provider's response size.
+  const window = tailWindow(unsafeText, Math.max(256, width * maxLines * 4));
+  const wrapped = wrapText(window.text, width, window.text.length + 1);
+  const truncated =
+    alreadyTruncated || window.truncated || wrapped.length > maxLines;
+  const visible = wrapped.slice(-maxLines);
+  if (truncated && visible.length > 0) {
+    visible[0] = `…${clipLine(visible[0] ?? '', Math.max(0, width - 1))}`;
+  }
+  return visible;
+}
+
 function agentLabel(agent: AgentName): string {
   return agent === 'codex' ? 'Codex' : 'Claude';
 }
@@ -158,6 +209,38 @@ function messageLabel(message: PresentedMessage): string {
   return `${speaker}${message.decision ? ` [${message.decision}]` : ''}`;
 }
 
+function liveConversationLines(
+  activity: PresentedActivity,
+  width: number,
+  maxLines: number,
+): string[] {
+  if (maxLines <= 0) {
+    return [];
+  }
+  const label = `${agentLabel(activity.agent)} [Live]`;
+  if (maxLines === 1) {
+    const prefix = `${label}: `;
+    const contentWidth = Math.max(1, width - printableWidth(prefix));
+    const text =
+      wrapTextTail(
+        activity.liveText,
+        contentWidth,
+        1,
+        activity.liveTextTruncated,
+      )[0] ?? '';
+    return [clipLine(`${prefix}${text}`, width)];
+  }
+  return [
+    clipLine(label, width),
+    ...wrapTextTail(
+      activity.liveText,
+      width,
+      maxLines - 1,
+      activity.liveTextTruncated,
+    ),
+  ];
+}
+
 function conversationLines(
   model: TerminalViewModel,
   width: number,
@@ -169,13 +252,7 @@ function conversationLines(
       text: message.text,
     }),
   );
-  if (model.activity?.liveText) {
-    entries.push({
-      label: `${agentLabel(model.activity.agent)} [Live]`,
-      text: model.activity.liveText,
-    });
-  }
-  if (entries.length === 0) {
+  if (entries.length === 0 && !model.activity?.liveText) {
     return wrapText(
       'Type a message to discuss; files stay unchanged.\n' +
         'Make safe changes: /edit.\n' +
@@ -185,7 +262,9 @@ function conversationLines(
     );
   }
 
-  const result: string[] = [];
+  const result = model.activity?.liveText
+    ? liveConversationLines(model.activity, width, maxLines)
+    : [];
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
     if (!entry) {
@@ -209,16 +288,69 @@ function activityLines(
   if (!activity) {
     return wrapText('Ready · read-only chat', width, maxLines);
   }
+  const lines = [
+    activity.message ? `Current: ${activity.message}` : 'Preparing a response',
+    activity.state === 'retrying'
+      ? `Retrying ${activity.retryAttempt ?? '?'} of ${activity.retryLimit ?? '?'}`
+      : activity.liveText
+        ? 'Streaming response text'
+        : 'Waiting for provider output',
+  ];
+  return wrapText(lines.join('\n'), width, maxLines);
+}
+
+function activityIndicator(activity: PresentedActivity): string {
+  const elapsed = Math.max(0, activity.observedAt - activity.startedAt);
+  const index = Math.floor(elapsed / ACTIVITY_FRAME_INTERVAL_MS);
+  return ACTIVITY_FRAMES[index % ACTIVITY_FRAMES.length] ?? ACTIVITY_FRAMES[0];
+}
+
+function tokenCount(value: number): string {
+  const count = Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  if (count < 1_000) {
+    return String(count);
+  }
+  const thousands = count / 1_000;
+  return `${thousands >= 10 ? Math.round(thousands) : thousands.toFixed(1)}k`;
+}
+
+function usageSummary(usage: PresentedUsage | undefined): string | undefined {
+  const parts = [
+    usage?.inputTokens === undefined
+      ? undefined
+      : `in ${tokenCount(usage.inputTokens)}`,
+    usage?.cachedInputTokens === undefined
+      ? undefined
+      : `cached ${tokenCount(usage.cachedInputTokens)}`,
+    usage?.outputTokens === undefined
+      ? undefined
+      : `out ${tokenCount(usage.outputTokens)}`,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(' / ') : undefined;
+}
+
+function statusLine(model: TerminalViewModel, width: number): string {
+  const activity = model.activity;
+  if (!activity) {
+    const usage = usageSummary(model.lastUsage);
+    return clipLine(
+      `Ready · read-only chat${usage ? ` · last ${usage}` : ''} · /edit changes · /help commands`,
+      width,
+    );
+  }
   const elapsed = formatDuration(
     Math.max(0, activity.observedAt - activity.startedAt),
   );
-  const lines = [
-    `${agentLabel(activity.agent)} · ${
-      activity.model ?? 'provider default'
-    } · ${activity.state} · ${elapsed}`,
-    activity.message ? `Activity: ${activity.message}` : 'Response in progress',
-  ];
-  return wrapText(lines.join('\n'), width, maxLines);
+  const phase =
+    activity.state === 'retrying'
+      ? `retrying ${activity.retryAttempt ?? '?'}/${activity.retryLimit ?? '?'}`
+      : (activity.message ?? 'responding');
+  const usage = usageSummary(activity.usage);
+  return clipLine(
+    `${activityIndicator(activity)} ${agentLabel(activity.agent)} · ${phase} · ${elapsed}` +
+      `${usage ? ` · ${usage}` : ''} · ${activity.model ?? 'provider default'} · read-only`,
+    width,
+  );
 }
 
 function sessionHeading(model: TerminalViewModel): string {
@@ -244,10 +376,7 @@ function compactFrame(
     clipLine(sessionHeading(model), width),
     ...conversationLines(model, width, conversationRows),
     ...activityLines(model.activity, width, 1),
-    clipLine(
-      'Input · discuss normally · safe changes: /edit · help: /help',
-      width,
-    ),
+    statusLine(model, width),
   ].slice(0, rows - 1);
 }
 
@@ -267,10 +396,7 @@ function stackedFrame(
     'Activity',
     ...activityLines(model.activity, width, 2),
     divider,
-    clipLine(
-      'Input · discuss normally · safe changes with /edit · help: /help',
-      width,
-    ),
+    statusLine(model, width),
   ].slice(0, rows - 1);
 }
 
@@ -301,10 +427,7 @@ function wideFrame(
     '─'.repeat(width),
     ...body,
     '─'.repeat(width),
-    clipLine(
-      'Input · discuss normally · safe changes with /edit · help: /help',
-      width,
-    ),
+    statusLine(model, width),
   ].slice(0, rows - 1);
 }
 
@@ -329,16 +452,31 @@ export function renderEnhancedFrame(
   return `${CLEAR_AND_HOME}${lines.join('\n')}\n`;
 }
 
+function renderEnhancedUpdate(
+  model: TerminalViewModel,
+  dimensions: TerminalDimensions,
+): string {
+  const frame = renderEnhancedFrame(model, dimensions).slice(
+    CLEAR_AND_HOME.length,
+  );
+  return `${HOME}${frame}${ERASE_DISPLAY_BELOW}`;
+}
+
 export function createEnhancedTerminalRenderer({
   dimensions = () => ({
     columns: process.stdout.columns ?? 80,
     rows: process.stdout.rows ?? 24,
   }),
+  now = Date.now,
+  streamRedrawIntervalMs = STREAM_REDRAW_INTERVAL_MS,
 }: {
   dimensions?: () => TerminalDimensions;
+  now?: () => number;
+  streamRedrawIntervalMs?: number;
 } = {}): TerminalRenderer {
   let started = false;
   let suspended = false;
+  let lastStreamRedrawAt = Number.NEGATIVE_INFINITY;
 
   return {
     start(model): string {
@@ -347,21 +485,27 @@ export function createEnhancedTerminalRenderer({
       }
       started = true;
       suspended = false;
+      lastStreamRedrawAt = Number.NEGATIVE_INFINITY;
       return `${ENTER_ALTERNATE_SCREEN}${renderEnhancedFrame(
         model,
         dimensions(),
       )}`;
     },
     render(event, model): string {
+      if (!started || suspended) {
+        return '';
+      }
       if (
         event.type === 'provider-event' &&
         event.event.type === 'text-delta'
       ) {
-        return '';
+        const observedAt = now();
+        if (observedAt - lastStreamRedrawAt < streamRedrawIntervalMs) {
+          return '';
+        }
+        lastStreamRedrawAt = observedAt;
       }
-      return started && !suspended
-        ? renderEnhancedFrame(model, dimensions())
-        : '';
+      return renderEnhancedUpdate(model, dimensions());
     },
     redraw(model): string {
       return started && !suspended
@@ -390,6 +534,7 @@ export function createEnhancedTerminalRenderer({
         return '';
       }
       started = false;
+      lastStreamRedrawAt = Number.NEGATIVE_INFINITY;
       if (suspended) {
         suspended = false;
         return '';

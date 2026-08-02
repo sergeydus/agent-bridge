@@ -469,6 +469,9 @@ export function createPlainTerminalRenderer(
           preferences,
         })}`;
       }
+      if (event.type === 'agent-tick') {
+        return '';
+      }
       if (event.type === 'agent-retry') {
         const prefix = presenterFor(event.agent)?.reset() ?? '';
         return `${prefix}  Temporary ${agentLabel(

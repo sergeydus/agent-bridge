@@ -35,6 +35,7 @@ import {
 import {
   MAX_PRESENTED_MESSAGES,
   createTerminalViewModel,
+  type PresentationModelEvent,
   type PresentedMessage,
 } from './presentation-model.ts';
 import { ProcessAbortError } from './process.ts';
@@ -64,6 +65,8 @@ import {
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
+
+const ACTIVITY_TICK_INTERVAL_MS = 250;
 
 function addMessage(
   session: ChatSession,
@@ -256,6 +259,9 @@ async function runExchange({
   signal,
   presentation,
   participants,
+  animateActivity,
+  activityTickIntervalMs,
+  onPresentationError,
 }: {
   session: ChatSession;
   store: ChatSessionStore;
@@ -267,6 +273,9 @@ async function runExchange({
   signal: AbortSignal;
   presentation: PresentationPreferences;
   participants?: readonly AgentName[];
+  animateActivity: boolean;
+  activityTickIntervalMs: number;
+  onPresentationError: (error: unknown) => void;
 }): Promise<boolean> {
   const pending = session.pendingExchange;
   if (pending && participants) {
@@ -292,14 +301,41 @@ async function runExchange({
       model,
       startedAt,
     });
+    let timerFailed = false;
+    const dispatchTimerEvent = (
+      event: Extract<
+        PresentationModelEvent,
+        { type: 'agent-heartbeat' | 'agent-tick' }
+      >,
+    ): void => {
+      if (timerFailed) {
+        return;
+      }
+      try {
+        presenter.dispatch(event);
+      } catch (error) {
+        timerFailed = true;
+        onPresentationError(error);
+      }
+    };
     const heartbeat = setInterval(() => {
-      presenter.dispatch({
+      dispatchTimerEvent({
         type: 'agent-heartbeat',
         agent,
         now: Date.now(),
       });
     }, 30_000);
     heartbeat.unref();
+    const activityTick = animateActivity
+      ? setInterval(() => {
+          dispatchTimerEvent({
+            type: 'agent-tick',
+            agent,
+            now: Date.now(),
+          });
+        }, activityTickIntervalMs)
+      : undefined;
+    activityTick?.unref();
     try {
       let response: Awaited<ReturnType<typeof runProviderWithRetry>>;
       try {
@@ -339,6 +375,11 @@ async function runExchange({
             });
           },
         });
+        if (signal.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : new ProcessAbortError();
+        }
         presenter.dispatch({ type: 'agent-stream-finished', agent });
       } catch (error) {
         presenter.dispatch({ type: 'agent-failed', agent });
@@ -369,6 +410,9 @@ async function runExchange({
       });
     } finally {
       clearInterval(heartbeat);
+      if (activityTick) {
+        clearInterval(activityTick);
+      }
     }
   }
 
@@ -421,6 +465,7 @@ export async function runInteractiveChat({
   terminal: providedTerminal,
   terminalCapabilities,
   launchWorkflow = launchBridgeWorkflow,
+  activityTickIntervalMs = ACTIVITY_TICK_INTERVAL_MS,
 }: {
   options: BridgeOptions;
   appPaths: AppPaths;
@@ -428,6 +473,7 @@ export async function runInteractiveChat({
   terminal?: ChatTerminal;
   terminalCapabilities?: TerminalCapabilities;
   launchWorkflow?: WorkflowLauncher;
+  activityTickIntervalMs?: number;
 }): Promise<void> {
   const terminal = providedTerminal ?? createChatTerminal();
   try {
@@ -495,6 +541,11 @@ export async function runInteractiveChat({
       uiResolution.mode === 'enhanced' && !presenter.usingFallback
         ? 'enhanced'
         : 'plain';
+    const resolvedActivityTickIntervalMs = Number.isFinite(
+      activityTickIntervalMs,
+    )
+      ? Math.max(1, Math.floor(activityTickIntervalMs))
+      : ACTIVITY_TICK_INTERVAL_MS;
 
     let lock: ChatLock | undefined;
     let cleanupMayPersist = false;
@@ -592,11 +643,25 @@ export async function runInteractiveChat({
               options,
               signal: operation.signal,
               presentation,
+              animateActivity: activeUiMode() === 'enhanced',
+              activityTickIntervalMs: resolvedActivityTickIntervalMs,
+              onPresentationError: (error) => {
+                terminalFailure =
+                  error instanceof Error
+                    ? error
+                    : new Error('Terminal activity rendering failed', {
+                        cause: error,
+                      });
+                operation.abort(terminalFailure);
+              },
               ...(participants ? { participants } : {}),
             }),
             cancelled: false,
           };
         } catch (error) {
+          if (terminalFailure) {
+            throw terminalFailure;
+          }
           if (operation.signal.aborted || error instanceof ProcessAbortError) {
             await store.save(session);
             writeSupplemental(
