@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Made complete enhanced-chat responses automatically available in native
+  terminal scrollback while retaining the full-screen view for active work.
 - Fixed explicit `--ui auto` and `--ui enhanced` overrides being rejected at
   wizard startup before the wizard could select interactive chat mode.
 - Made automatic enhanced chat presentation the default for new sessions on

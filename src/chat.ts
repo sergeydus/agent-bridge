@@ -28,6 +28,7 @@ import type { AppPaths } from './paths.ts';
 import {
   agentLabel,
   createPlainTerminalRenderer,
+  formatAgentResponse,
   PresentationController,
   resolvePresentation,
   type PresentationPreferences,
@@ -200,6 +201,26 @@ function recentHistory(session: ChatSession, count: number): string {
       }${decision}: ${sanitizeTerminalText(message.text)}`;
     })
     .join('\n\n');
+}
+
+function formatCompletedResponses(
+  messages: readonly ChatMessage[],
+  preferences: PresentationPreferences,
+): string {
+  return messages
+    .flatMap((message) =>
+      message.role === 'codex' || message.role === 'claude'
+        ? [
+            formatAgentResponse({
+              agent: message.role,
+              decision: message.decision,
+              text: message.text,
+              preferences,
+            }),
+          ]
+        : [],
+    )
+    .join('');
 }
 
 function chatStatus(
@@ -607,7 +628,6 @@ export async function runInteractiveChat({
       )
         .trim()
         .toLowerCase();
-      resumeAfterSupplementalOutput();
       if (abortController.signal.aborted) {
         return false;
       }
@@ -629,36 +649,52 @@ export async function runInteractiveChat({
       const runCancellableExchange = async (
         participants?: readonly AgentName[],
       ): Promise<{ agreed: boolean; cancelled: boolean }> => {
+        resumeAfterSupplementalOutput();
+        const previousMessageCount = session.messages.length;
+        let responsesRevealed = false;
+        const revealCompletedResponses = (): void => {
+          if (responsesRevealed || activeUiMode() !== 'enhanced') {
+            return;
+          }
+          responsesRevealed = true;
+          const output = formatCompletedResponses(
+            session.messages.slice(previousMessageCount),
+            presentation,
+          );
+          if (output) {
+            writeSupplemental(output);
+          }
+        };
         const operation = new AbortController();
         activeOperation = operation;
         try {
-          return {
-            agreed: await runExchange({
-              session,
-              store,
-              providers,
-              presenter,
-              tempDirectory,
-              instructions: await instructions(),
-              options,
-              signal: operation.signal,
-              presentation,
-              animateActivity: activeUiMode() === 'enhanced',
-              activityTickIntervalMs: resolvedActivityTickIntervalMs,
-              onPresentationError: (error) => {
-                terminalFailure =
-                  error instanceof Error
-                    ? error
-                    : new Error('Terminal activity rendering failed', {
-                        cause: error,
-                      });
-                operation.abort(terminalFailure);
-              },
-              ...(participants ? { participants } : {}),
-            }),
-            cancelled: false,
-          };
+          const agreed = await runExchange({
+            session,
+            store,
+            providers,
+            presenter,
+            tempDirectory,
+            instructions: await instructions(),
+            options,
+            signal: operation.signal,
+            presentation,
+            animateActivity: activeUiMode() === 'enhanced',
+            activityTickIntervalMs: resolvedActivityTickIntervalMs,
+            onPresentationError: (error) => {
+              terminalFailure =
+                error instanceof Error
+                  ? error
+                  : new Error('Terminal activity rendering failed', {
+                      cause: error,
+                    });
+              operation.abort(terminalFailure);
+            },
+            ...(participants ? { participants } : {}),
+          });
+          revealCompletedResponses();
+          return { agreed, cancelled: false };
         } catch (error) {
+          revealCompletedResponses();
           if (terminalFailure) {
             throw terminalFailure;
           }
@@ -708,9 +744,6 @@ export async function runInteractiveChat({
         );
         if (terminalFailure) {
           throw terminalFailure;
-        }
-        if (input !== null) {
-          resumeAfterSupplementalOutput();
         }
         const command = parseChatInput(input ?? '/pause');
         if (command.kind === 'empty') {
@@ -783,7 +816,6 @@ export async function runInteractiveChat({
             terminal.write('No message sent.\n');
             continue;
           }
-          resumeAfterSupplementalOutput();
           if (await refreshProjectKind(session)) {
             await store.save(session);
           }
@@ -970,7 +1002,6 @@ them; it starts from committed HEAD and leaves those changes untouched.
             continue;
           }
           const startedAt = new Date().toISOString();
-          presenter.suspend();
           terminal.write(
             `\nStarting ${command.mode} workflow. The existing Git isolation and verification rules apply.\n`,
           );
@@ -993,7 +1024,6 @@ them; it starts from committed HEAD and leaves those changes untouched.
             launchError = errorMessage(error);
           } finally {
             terminal.resume();
-            presenter.resume();
           }
           session.workflows.push({
             sequence: session.workflows.length + 1,

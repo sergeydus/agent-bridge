@@ -207,6 +207,8 @@ show a clearer result, but all three layout classes are required.
 - The final response must not be visually mistaken for agreement.
 - A decision badge always includes text: `continue` or `done`.
 - Concurrent provider output is never interleaved inside one visual message.
+- Completed responses are emitted to the normal screen so native terminal
+  scrollback remains available without mouse capture or custom scroll state.
 - Streaming redraws are bounded and activity animation uses presentation-only
   ticks, so neither provider events nor semantic heartbeats flood the terminal.
 - Reopening a session reconstructs completed conversation from the existing
