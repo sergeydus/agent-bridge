@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type { AppPaths } from './paths.ts';
-import { runProcess } from './process.ts';
+import { combinedProcessOutput, runProcess } from './process.ts';
 import { CLAUDE_OPTIONAL_FLAGS, type ProviderMap } from './providers.ts';
 
 export interface DoctorReport {
@@ -130,12 +130,12 @@ export async function runDoctor({
   const codexCapabilities =
     codexHelp.status === 'fulfilled' &&
     ['--output-schema', '--sandbox', '--ignore-user-config'].every((flag) =>
-      codexHelp.value.stdout.includes(flag),
+      combinedProcessOutput(codexHelp.value).includes(flag),
     );
   const claudeCapabilities =
     claudeHelp.status === 'fulfilled' &&
     ['--json-schema', '--permission-mode', '--allowedTools'].every((flag) =>
-      claudeHelp.value.stdout.includes(flag),
+      combinedProcessOutput(claudeHelp.value).includes(flag),
     );
   passed &&= codexCapabilities && claudeCapabilities;
   lines.push(
@@ -148,7 +148,9 @@ export async function runDoctor({
   // Optional flags vary between provider releases and are used only when the
   // installed CLI advertises them, so a missing one is reported, never fatal.
   const claudeHelpText =
-    claudeHelp.status === 'fulfilled' ? claudeHelp.value.stdout : '';
+    claudeHelp.status === 'fulfilled'
+      ? combinedProcessOutput(claudeHelp.value)
+      : '';
   const optional = Object.entries(CLAUDE_OPTIONAL_FLAGS).map(
     ([, flag]) => `${flag} ${claudeHelpText.includes(flag) ? 'yes' : 'no'}`,
   );

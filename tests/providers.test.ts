@@ -208,7 +208,7 @@ test('an unreadable provider CLI omits optional flags instead of failing', async
 test('reads advertised flags from a CLI help listing', async () => {
   const flags = await probeSupportedFlags(process.execPath, [
     '-e',
-    'console.log("  --safe-mode  Start with all customizations disabled")',
+    'console.error("  --safe-mode  Start with all customizations disabled")',
   ]);
   assert.ok(flags.has('--safe-mode'));
   assert.ok(!flags.has('--ax-screen-reader'));
