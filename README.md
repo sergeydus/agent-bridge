@@ -173,11 +173,14 @@ agent-bridge chat --cwd /path/to/project
 It presents the saved conversation, active agent, model, phase, elapsed time,
 available token usage, safety mode, and safe activity in a responsive
 full-screen layout. Streaming updates are coalesced to keep redraws responsive
-without writing a frame for every text fragment. The renderer suspends before a
-linked workflow inherits the terminal and restores normal terminal state on
-exit. Supplemental command output such as help and history is shown on the
-normal screen until you enter the next command. If enhanced drawing fails after
-normal terminal state is restored, the chat continues with plain output. Use
+without writing a frame for every text fragment. When an exchange completes,
+the renderer returns to the normal screen and prints each complete response so
+native terminal scrollback remains available. It resumes the live view before
+the next agent starts. The renderer also suspends before a linked workflow
+inherits the terminal and restores normal terminal state on exit. Supplemental
+command output such as help and history stays on the normal screen until the
+next agent starts. If enhanced drawing fails after normal terminal state is
+restored, the chat continues with plain output. Use
 `--ui plain` to retain append-only output or `--ui enhanced` to request the
 full-screen view explicitly. Screen-reader mode, redirected streams,
 `TERM=dumb`, and terminals that are too small use the complete plain interface.

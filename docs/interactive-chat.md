@@ -139,10 +139,12 @@ resize, coalesces text-delta redraws, uses low-frequency activity animation,
 shows current model, phase, elapsed time, available token usage, and safety
 mode, neutralizes control sequences from conversation text, leaves one terminal
 row for the existing readline prompt, and never captures the mouse.
-It suspends and restores the normal screen before a linked workflow starts,
-then reconstructs its frame from the in-memory presentation model afterward.
-Help, history, status, and other supplemental command output temporarily use
-the normal screen so the text remains readable until the next command. A
+After an exchange, it prints the complete responses on the normal screen so
+native terminal scrollback remains available, then reconstructs its live frame
+before the next agent starts. It also suspends and restores the normal screen
+before a linked workflow starts. Help, history, status, and other supplemental
+command output stays on the normal screen so the text remains readable until
+the next agent starts. A
 recoverable enhanced-renderer failure restores the terminal and continues with
 the plain renderer.
 

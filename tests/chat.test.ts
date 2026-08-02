@@ -336,8 +336,8 @@ test('runs paired exchanges, autonomous agreement, and a linked workflow', async
     assert.ok(enhancedEntries > 2);
     assert.equal(enhancedEntries, enhancedExits);
     assert.ok(output.includes('\u001B[?1049l\nPaste or type multiple lines'));
-    assert.ok(output.includes('\u001B[?1049l\nWorkflow finished'));
-    assert.equal(output.includes('\u001B[?1049l\nChat '), true);
+    assert.match(output, /Workflow preview[\s\S]+\nWorkflow finished/);
+    assert.match(output, /\nChat chat-.* completed\./);
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
@@ -437,12 +437,72 @@ test('keeps supplemental enhanced-mode commands readable on the normal screen', 
 
     const output = terminal.output.join('');
     assert.ok(output.includes('\u001B[?1049l\nInteractive chat commands'));
-    assert.ok(output.includes('\u001B[?1049l\nSession:'));
+    assert.match(output, /Interactive chat commands[\s\S]+\nSession:/);
     assert.match(output, /Presentation: enhanced terminal/);
-    assert.ok(output.includes('\u001B[?1049l\nNo messages yet.'));
+    assert.match(
+      output,
+      /Presentation: enhanced terminal[\s\S]+No messages yet\./,
+    );
     const entries = output.split('\u001B[?1049h').length - 1;
     const exits = output.split('\u001B[?1049l').length - 1;
+    assert.equal(entries, 1);
     assert.equal(entries, exits);
+    assert.equal(terminal.closes, 1);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('reveals complete enhanced responses in native terminal scrollback', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const terminal = new ScriptedTerminal([
+    '/ask codex give a long response',
+    '/ask claude give another response',
+    '/done',
+  ]);
+  const codexResponse = [
+    'codex-first-marker',
+    ...Array.from({ length: 80 }, (_, index) => `codex-line-${index + 1}`),
+    'codex-last-marker',
+  ].join('\n');
+  const claudeResponse = 'claude-complete-response';
+  let calls = 0;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const options = parseArgs(['chat', '--cwd', project, '--ui', 'enhanced'], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+    await runInteractiveChat({
+      options,
+      appPaths: paths,
+      providers: providersWithRun(async () => {
+        calls += 1;
+        return {
+          text: calls === 1 ? codexResponse : claudeResponse,
+          decision: 'done',
+        };
+      }),
+      terminal,
+      terminalCapabilities: ENHANCED_TERMINAL_CAPABILITIES,
+    });
+
+    const output = terminal.output.join('');
+    const firstReveal = output.indexOf('\u001B[?1049l\nCodex [done]\n─────\n');
+    const resumedActivity = output.indexOf('\u001B[?1049h', firstReveal + 1);
+    const secondReveal = output.indexOf(
+      '\u001B[?1049l\nClaude [done]\n──────\n',
+      resumedActivity + 1,
+    );
+    assert.ok(firstReveal >= 0);
+    assert.ok(resumedActivity > firstReveal);
+    assert.ok(secondReveal > resumedActivity);
+    const firstNormalScreen = output.slice(firstReveal, resumedActivity);
+    assert.match(firstNormalScreen, /codex-first-marker/);
+    assert.match(firstNormalScreen, /codex-last-marker/);
+    assert.match(output.slice(secondReveal), /claude-complete-response/);
     assert.equal(terminal.closes, 1);
   } finally {
     await rm(project, { recursive: true, force: true });
