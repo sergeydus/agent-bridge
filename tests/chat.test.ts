@@ -85,6 +85,39 @@ class FailingRedrawTerminal extends ScriptedTerminal {
   }
 }
 
+class FailingActivityTerminal extends ScriptedTerminal {
+  #updateCount = 0;
+
+  override write(text: string): void {
+    if (text.startsWith('\u001B[H')) {
+      this.#updateCount += 1;
+      if (this.#updateCount === 2) {
+        throw new Error('activity redraw failed');
+      }
+    }
+    super.write(text);
+  }
+}
+
+const ENHANCED_TERMINAL_CAPABILITIES = {
+  stdinIsTty: true,
+  stdoutIsTty: true,
+  term: 'xterm-256color',
+  columns: 100,
+  rows: 24,
+} as const;
+
+function providersWithRun(run: AgentProvider['run']): ProviderMap {
+  const provider = (name: 'codex' | 'claude'): AgentProvider => ({
+    name,
+    label: name,
+    version: async () => ({ stdout: 'test', stderr: '', exitCode: 0 }),
+    authStatus: async () => ({ stdout: 'ok', stderr: '', exitCode: 0 }),
+    run,
+  });
+  return { codex: provider('codex'), claude: provider('claude') };
+}
+
 function fakeProviders(
   prompts: string[],
   optionsSeen: ProviderRunOptions[],
@@ -939,6 +972,102 @@ test('routes fatal resize callback failures through chat cleanup', async () => {
         },
       }),
       /prompt redraw failed/,
+    );
+
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const session = await store.latest();
+    assert.ok(session);
+    assert.equal(session.status, 'paused');
+    const lock = await store.acquireLock(session.id);
+    await lock.release();
+    assert.equal(terminal.closes, 1);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('animates enhanced activity while a provider is running', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const terminal = new ScriptedTerminal(['/ask codex wait briefly', '/done']);
+  let observedTimerUpdate = false;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const options = parseArgs(['chat', '--cwd', project, '--ui', 'enhanced'], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+    const providers = providersWithRun(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      observedTimerUpdate =
+        terminal.output.filter((text) => text.startsWith('\u001B[H')).length >=
+        2;
+      return { text: 'Finished waiting.', decision: 'done' };
+    });
+
+    await runInteractiveChat({
+      options,
+      appPaths: paths,
+      providers,
+      terminal,
+      terminalCapabilities: ENHANCED_TERMINAL_CAPABILITIES,
+      activityTickIntervalMs: 5,
+    });
+
+    assert.equal(observedTimerUpdate, true);
+    assert.equal(terminal.closes, 1);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('cancels provider work and cleans up after an activity redraw fails', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const terminal = new FailingActivityTerminal(['/ask codex wait']);
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const options = parseArgs(
+      ['chat', '--cwd', project, '--ui', 'enhanced', '--retries', '0'],
+      {
+        initialCwd: '/',
+        defaultOutput: paths.runsDirectory,
+      },
+    );
+    const providers = providersWithRun(async (_prompt, runOptions) => {
+      const signal = runOptions.signal;
+      assert.ok(signal);
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error('activity timer did not cancel provider')),
+          1_000,
+        );
+        signal.addEventListener(
+          'abort',
+          () => {
+            clearTimeout(timeout);
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      throw signal.reason instanceof Error
+        ? signal.reason
+        : new Error('provider aborted');
+    });
+
+    await assert.rejects(
+      runInteractiveChat({
+        options,
+        appPaths: paths,
+        providers,
+        terminal,
+        terminalCapabilities: ENHANCED_TERMINAL_CAPABILITIES,
+        activityTickIntervalMs: 5,
+      }),
+      /activity redraw failed/,
     );
 
     const store = new ChatSessionStore(paths.chatsDirectory);

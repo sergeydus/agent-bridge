@@ -115,11 +115,13 @@ decorative separators. It uses descriptive prompt labels and forwards
 Claude's native accessibility flag. `--no-color` disables bridge color without
 changing the rest of the standard layout. `NO_COLOR` is also honored.
 
-`--ui enhanced` opts into the Phase 3 alternate-screen preview. `--ui auto`
-uses it only when stdin and stdout are interactive, `TERM` is usable, and the
-terminal meets the minimum dimensions. `--ui plain` remains the release
-default. Screen-reader mode always selects plain output and explains the
-override when combined with an explicit enhanced request.
+New chats default to `--ui auto`, which uses the alternate-screen interface
+only when stdin and stdout are interactive, `TERM` is usable, and the terminal
+meets the minimum dimensions. `--ui plain` selects append-only output, while
+`--ui enhanced` requests the full-screen interface explicitly. Screen-reader
+mode always selects plain output and explains the override when combined with
+an explicit enhanced request. Saved and resumed presentation choices continue
+to take precedence over the release default.
 
 The wizard asks about screen-reader output before its first complex menu and
 persists the answer. Standard and automatic enhanced output remain available
@@ -133,8 +135,10 @@ session. This makes short scripted conversations possible without weakening the
 interactive lock and checkpoint rules.
 
 The enhanced renderer has compact, stacked, and wide layouts. It redraws on
-resize, neutralizes control sequences from conversation text, leaves one
-terminal row for the existing readline prompt, and never captures the mouse.
+resize, coalesces text-delta redraws, uses low-frequency activity animation,
+shows current model, phase, elapsed time, available token usage, and safety
+mode, neutralizes control sequences from conversation text, leaves one terminal
+row for the existing readline prompt, and never captures the mouse.
 It suspends and restores the normal screen before a linked workflow starts,
 then reconstructs its frame from the in-memory presentation model afterward.
 Help, history, status, and other supplemental command output temporarily use

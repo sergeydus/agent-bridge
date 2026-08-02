@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Made automatic enhanced chat presentation the default for new sessions on
+  capable interactive terminals, while preserving saved choices and the plain
+  fallback for screen readers, redirected streams, and unsupported terminals.
+- Made enhanced chat feel live during provider work with bounded 50 ms stream
+  redraws, low-frequency activity animation, lower-flicker in-place updates,
+  and a status footer showing the active agent, phase, elapsed time, model,
+  token usage when available, and read-only safety mode.
 - Fixed implementation agents never receiving write access on Windows. The
   multi-line Claude system prompt truncated the `cmd.exe` command line used for
   npm `.cmd` shims, silently discarding every later argument — including

@@ -46,6 +46,7 @@ export interface TerminalViewModel {
   readonly session: PresentedSession;
   readonly messages: readonly PresentedMessage[];
   readonly activity?: PresentedActivity;
+  readonly lastUsage?: PresentedUsage;
 }
 
 export type PresentationModelEvent =
@@ -70,6 +71,11 @@ export type PresentationModelEvent =
     }
   | {
       type: 'agent-heartbeat';
+      agent: AgentName;
+      now: number;
+    }
+  | {
+      type: 'agent-tick';
       agent: AgentName;
       now: number;
     }
@@ -117,9 +123,10 @@ function addMessage(
 function boundedLiveText(
   text: string,
 ): Pick<PresentedActivity, 'liveText' | 'liveTextTruncated'> {
+  const truncated = text.length > MAX_PRESENTED_LIVE_TEXT_CHARS;
   return {
-    liveText: text.slice(0, MAX_PRESENTED_LIVE_TEXT_CHARS),
-    liveTextTruncated: text.length > MAX_PRESENTED_LIVE_TEXT_CHARS,
+    liveText: truncated ? text.slice(-MAX_PRESENTED_LIVE_TEXT_CHARS) : text,
+    liveTextTruncated: truncated,
   };
 }
 
@@ -219,7 +226,7 @@ export function reducePresentationModel(
       return working;
     });
   }
-  if (event.type === 'agent-heartbeat') {
+  if (event.type === 'agent-heartbeat' || event.type === 'agent-tick') {
     return updateActivity(model, event.agent, (activity) => ({
       ...activity,
       // A renderer derives elapsed time from these two values. Keeping the
@@ -252,11 +259,13 @@ export function reducePresentationModel(
       : model;
   }
   if (event.type === 'agent-response') {
+    const completedActivity =
+      model.activity?.agent === event.agent ? model.activity : undefined;
     return {
       ...model,
       messages: addMessage(model.messages, event.message),
-      activity:
-        model.activity?.agent === event.agent ? undefined : model.activity,
+      activity: completedActivity ? undefined : model.activity,
+      lastUsage: completedActivity?.usage ?? model.lastUsage,
     };
   }
   event satisfies never;

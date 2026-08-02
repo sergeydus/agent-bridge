@@ -32,6 +32,8 @@ test('parses portable project and workflow options', async () => {
     assert.equal(options.maxRounds, 8);
     assert.equal(options.maxAutoRounds, 4);
     assert.equal(options.timeoutMinutes, 45);
+    assert.equal(options.ui, 'auto');
+    assert.equal(options.uiExplicit, false);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -128,6 +130,12 @@ test('parses accessible presentation and validates model names', () => {
   });
   assert.equal(enhanced.ui, 'enhanced');
   assert.equal(enhanced.uiExplicit, true);
+  const explicitPlain = parseArgs(['--ui', 'plain'], {
+    initialCwd: temporaryDirectory,
+    defaultOutput: join(temporaryDirectory, 'runs'),
+  });
+  assert.equal(explicitPlain.ui, 'plain');
+  assert.equal(explicitPlain.uiExplicit, true);
   assert.throws(
     () =>
       parseArgs(['chat', '--ui', 'unknown'], {

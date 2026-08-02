@@ -163,22 +163,24 @@ when you only want to disable Agent Bridge color output. The standard
 `NO_COLOR` environment variable is honored. Color is never the only way an
 agent or decision is identified.
 
-Phase 3 also includes an opt-in enhanced terminal preview:
+Interactive terminals use the enhanced conversation view automatically when
+capability checks pass:
 
 ```sh
-agent-bridge chat --ui enhanced --cwd /path/to/project
+agent-bridge chat --cwd /path/to/project
 ```
 
-It presents the saved conversation, active agent, model, elapsed time, and safe
-activity in a responsive full-screen layout. The renderer suspends before a
+It presents the saved conversation, active agent, model, phase, elapsed time,
+available token usage, safety mode, and safe activity in a responsive
+full-screen layout. Streaming updates are coalesced to keep redraws responsive
+without writing a frame for every text fragment. The renderer suspends before a
 linked workflow inherits the terminal and restores normal terminal state on
 exit. Supplemental command output such as help and history is shown on the
 normal screen until you enter the next command. If enhanced drawing fails after
 normal terminal state is restored, the chat continues with plain output. Use
-`--ui auto` to select enhanced mode only when terminal capability checks pass,
-or `--ui plain` to retain append-only output. Plain remains the default during
-the preview. Screen-reader mode, redirected streams, `TERM=dumb`, and terminals
-that are too small use the complete plain interface.
+`--ui plain` to retain append-only output or `--ui enhanced` to request the
+full-screen view explicitly. Screen-reader mode, redirected streams,
+`TERM=dumb`, and terminals that are too small use the complete plain interface.
 
 Enhanced mode is available under Advanced settings in the wizard and falls
 back to standard output if the current terminal cannot support it.
@@ -199,7 +201,7 @@ dependency as well as its development tooling.
 
 ## Roadmap
 
-Phase 3 is being delivered as an optional enhanced interactive terminal with a live
+Phase 3 provides an automatic enhanced interactive terminal with a live
 conversation view, workflow status, discoverable controls, responsive layouts,
 and a complete plain/screen-reader fallback. It is a presentation layer over
 the existing state machines and does not change editing permissions or

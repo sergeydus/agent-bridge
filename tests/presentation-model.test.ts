@@ -74,13 +74,18 @@ test('reduces safe provider activity without making it authoritative', () => {
     agent: 'codex',
     event: {
       type: 'text-delta',
-      text: 'x'.repeat(MAX_PRESENTED_LIVE_TEXT_CHARS + 10),
+      text: `oldest-${'x'.repeat(MAX_PRESENTED_LIVE_TEXT_CHARS)}-newest`,
     },
   });
   model = reducePresentationModel(model, {
     type: 'agent-heartbeat',
     agent: 'codex',
     now: 61_000,
+  });
+  model = reducePresentationModel(model, {
+    type: 'agent-tick',
+    agent: 'codex',
+    now: 61_250,
   });
   model = reducePresentationModel(model, {
     type: 'provider-event',
@@ -99,7 +104,9 @@ test('reduces safe provider activity without making it authoritative', () => {
   assert.equal(model.activity?.message, 'searching the project');
   assert.equal(model.activity?.liveText.length, MAX_PRESENTED_LIVE_TEXT_CHARS);
   assert.equal(model.activity?.liveTextTruncated, true);
-  assert.equal(model.activity?.observedAt, 61_000);
+  assert.equal(model.activity?.liveText.startsWith('oldest-'), false);
+  assert.equal(model.activity?.liveText.endsWith('-newest'), true);
+  assert.equal(model.activity?.observedAt, 61_250);
   assert.deepEqual(model.activity?.usage, {
     inputTokens: 12,
     cachedInputTokens: 5,
@@ -138,6 +145,11 @@ test('reduces safe provider activity without making it authoritative', () => {
     },
   });
   assert.equal(model.activity, undefined);
+  assert.deepEqual(model.lastUsage, {
+    inputTokens: 12,
+    cachedInputTokens: 5,
+    outputTokens: 7,
+  });
   assert.equal(model.messages.length, 2);
   assert.equal(model.messages.at(-1)?.decision, 'done');
 
@@ -175,6 +187,11 @@ test('controller preserves plain streaming output while updating the model', () 
     type: 'agent-heartbeat',
     agent: 'claude',
     now: 60_000,
+  });
+  controller.dispatch({
+    type: 'agent-tick',
+    agent: 'claude',
+    now: 60_250,
   });
   controller.dispatch({
     type: 'provider-event',

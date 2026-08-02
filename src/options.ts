@@ -138,7 +138,7 @@ export function parseArgs(
     screenReader: false,
     screenReaderExplicit: false,
     noColor: false,
-    ui: 'plain',
+    ui: 'auto',
     uiExplicit: false,
     trustProjectConfig: false,
     doctor: false,
@@ -384,7 +384,7 @@ export function parseArgs(
   if (!['plain', 'enhanced', 'auto'].includes(options.ui)) {
     throw new Error('--ui must be plain, enhanced, or auto');
   }
-  if (!options.chat && options.ui !== 'plain') {
+  if (!options.chat && options.uiExplicit && options.ui !== 'plain') {
     throw new Error('--ui enhanced and --ui auto currently require chat mode');
   }
   for (const [flag, model] of [
