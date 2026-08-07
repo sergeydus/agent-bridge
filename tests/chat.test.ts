@@ -20,6 +20,7 @@ import {
 } from '../src/chat-workflow.ts';
 import { parseArgs } from '../src/options.ts';
 import { getAppPaths } from '../src/paths.ts';
+import { ProcessAbortError } from '../src/process.ts';
 import type {
   AgentProvider,
   ProviderMap,
@@ -737,6 +738,94 @@ test('resume completes an interrupted peer response without repeating the first'
     assert.deepEqual(called, ['codex', 'claude', 'claude']);
     assert.equal(completed.pendingExchange, undefined);
     assert.equal(completed.status, 'completed');
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('a new message finishes the outstanding peer reply before its own exchange', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const called: string[] = [];
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const providers = providersWithRun(async () => {
+      // Cancelling the peer half of a paired exchange leaves it outstanding.
+      if (called.length === 1) {
+        called.push('cancelled');
+        throw new ProcessAbortError();
+      }
+      called.push('answered');
+      return { text: `answer ${called.length}`, decision: 'continue' };
+    });
+    const terminal = new ScriptedTerminal([
+      'Inspect this',
+      '@codex follow up',
+      '/pause',
+    ]);
+    const options = parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+      initialCwd: project,
+      defaultOutput: paths.runsDirectory,
+    });
+
+    await runInteractiveChat({ options, appPaths: paths, providers, terminal });
+
+    const saved = await new ChatSessionStore(paths.chatsDirectory).latest();
+    assert.equal(saved?.status, 'paused');
+    assert.equal(saved?.pendingExchange, undefined);
+    // The interrupted exchange completes with its own history first, so the new
+    // targeted message is never folded into it and gets its own turn.
+    assert.deepEqual(
+      saved?.messages.map((message) => message.role),
+      ['user', 'codex', 'claude', 'user', 'codex'],
+    );
+    assert.match(saved?.messages[3]?.text ?? '', /follow up/);
+    // Four provider calls: the pair, the cancelled half retried, then Codex.
+    assert.equal(called.length, 4);
+    const output = terminal.output.join('');
+    assert.match(output, /Finishing Claude's outstanding reply/);
+    assert.match(output, /Chat saved/);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('cancelling the outstanding reply again drops the new message unsaved', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const called: string[] = [];
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const providers = providersWithRun(async () => {
+      called.push('call');
+      if (called.length >= 2) {
+        throw new ProcessAbortError();
+      }
+      return { text: `answer ${called.length}`, decision: 'continue' };
+    });
+    const terminal = new ScriptedTerminal([
+      'Inspect this',
+      'follow up',
+      '/pause',
+    ]);
+    const options = parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+      initialCwd: project,
+      defaultOutput: paths.runsDirectory,
+    });
+
+    await runInteractiveChat({ options, appPaths: paths, providers, terminal });
+
+    const saved = await new ChatSessionStore(paths.chatsDirectory).latest();
+    assert.equal(saved?.status, 'paused');
+    assert.ok(saved?.pendingExchange, 'the reply is still outstanding');
+    // No orphan user message, and the chat survived to run `/pause`.
+    assert.deepEqual(
+      saved?.messages.map((message) => message.role),
+      ['user', 'codex'],
+    );
+    assert.match(terminal.output.join(''), /Chat saved/);
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

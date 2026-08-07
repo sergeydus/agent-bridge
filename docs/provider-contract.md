@@ -85,6 +85,12 @@ Bash. Codex uses its workspace-write sandbox. Both receive instructions not to
 run package, build, deploy, or version-control mutations; approved checks are
 the coordinator's responsibility.
 
+Claude's tool set is declared twice on purpose, because the two flags act at
+different layers. `--tools` selects which built-in tools exist for the turn,
+and `--allowedTools` is the allow-without-prompting list that keeps a
+non-interactive call from stalling on a confirmation. One shared constant per
+access level feeds both, so availability and permission cannot drift apart.
+
 Codex only activates its Windows restricted-token sandbox when `windows.sandbox`
 is set. Because Agent Bridge runs Codex with `--ignore-user-config`, it supplies
 that value itself on Windows; without it `--sandbox workspace-write` silently
@@ -101,18 +107,42 @@ prompt on standard input rather than in an argument.
 
 Only flags the installed provider CLIs actually accept may be emitted. An
 unrecognized flag aborts the call, and one placed after a truncated argument
-hides that failure entirely. `agent-bridge --doctor` checks each CLI's help
-output for the flags the adapters depend on.
+hides that failure entirely.
 
 Provider CLIs gain and lose flags between releases, so support is detected, not
-assumed in either direction. Flags an adapter uses only when available are
-declared as optional capabilities, probed once per session from the CLI's own
-help output, and omitted when absent; a failed probe omits them rather than
-risking a rejected call. Claude's optional capabilities are `--safe-mode`,
-which excludes the target project's discovered customizations — CLAUDE.md,
-hooks, plugins, and MCP servers — from an agent turn, and `--ax-screen-reader`,
-its native accessible renderer. A test may assert that an optional flag is
-gated, never that it is permanently absent.
+assumed in either direction. Each adapter therefore sorts the flags it emits
+into three kinds, and a test asserts that the declared sets match what the
+adapter really emits.
+
+**Required and advertised.** Emitted on every call and listed in the CLI's own
+help output. `CODEX_REQUIRED_FLAGS` and `CLAUDE_REQUIRED_FLAGS` name them in one
+place, and `agent-bridge --doctor` verifies that exact list, reporting any flag
+by name. Conditional flags stay out of it — Codex's `--skip-git-repo-check`,
+`--config`, and `--model`, and Claude's `--model` and `--effort` appear only
+when the project or the user asks for them, so a missing one should not condemn
+an otherwise working installation.
+
+Help text is matched as whole flag tokens, never as substrings: a CLI that
+advertises `--json-schema` must not be read as offering `--json`.
+
+**Required but hidden.** A CLI may implement a flag while omitting it from
+`--help`. Claude Code registers `--max-turns` this way. Help inspection cannot
+confirm such a flag, and it must not gate it either: dropping `--max-turns`
+would remove the turn bound from every write call. Because a probe cannot cover
+these, `--doctor` checks the installed release against
+`CLAUDE_MINIMUM_VERSION`, the oldest Claude Code that Agent Bridge is tested
+against, and fails below it. That floor is a tested minimum rather than the
+release that introduced any particular flag; raise it when a hidden dependency
+is known to be newer. An unreadable version number is reported as unverified
+instead of passing silently.
+
+**Optional capabilities.** Used only when available, probed once per session
+from the CLI's own help output, and omitted when absent; a failed probe omits
+them rather than risking a rejected call. Claude's are `--safe-mode`, which
+excludes the target project's discovered customizations — CLAUDE.md, hooks,
+plugins, and MCP servers — from an agent turn, and `--ax-screen-reader`, its
+native accessible renderer. A test may assert that an optional flag is gated,
+never that it is permanently absent.
 
 A dry run stays side-effect free: it launches nothing, including the capability
 probe, so it prints the version-independent command without capability-gated

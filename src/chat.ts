@@ -300,6 +300,8 @@ async function runExchange({
 }): Promise<boolean> {
   const pending = session.pendingExchange;
   if (pending && participants) {
+    // The chat loop rejects this before persisting a message, so reaching it
+    // here is a coordinator bug rather than recoverable user input.
     throw new Error('Cannot target an agent while a peer response is pending.');
   }
   const first =
@@ -712,6 +714,26 @@ export async function runInteractiveChat({
           }
         }
       };
+      /**
+       * A cancelled paired exchange leaves the peer response outstanding.
+       * Finish it before accepting new input, matching what reopening a chat
+       * already does. Persisting a new message first would fold it into the
+       * interrupted exchange, where it would draw one agent's reply instead of
+       * the two an ordinary message gets. Returns false when the outstanding
+       * reply is cancelled again, so the caller drops the new input unsaved.
+       */
+      const settlePendingExchange = async (): Promise<boolean> => {
+        if (!session.pendingExchange) {
+          return true;
+        }
+        writeSupplemental(
+          `\nFinishing ${agentLabel(
+            session.pendingExchange.secondAgent,
+          )}'s outstanding reply from the interrupted exchange first.\n`,
+        );
+        const { cancelled } = await runCancellableExchange();
+        return !cancelled && !session.pendingExchange;
+      };
       if (uiResolution.notice) {
         terminal.write(`${uiResolution.notice}. Continuing in plain mode.\n`);
       }
@@ -816,6 +838,9 @@ export async function runInteractiveChat({
             terminal.write('No message sent.\n');
             continue;
           }
+          if (!(await settlePendingExchange())) {
+            continue;
+          }
           if (await refreshProjectKind(session)) {
             await store.save(session);
           }
@@ -842,6 +867,9 @@ export async function runInteractiveChat({
           return;
         }
         if (command.kind === 'message') {
+          if (!(await settlePendingExchange())) {
+            continue;
+          }
           if (await refreshProjectKind(session)) {
             await store.save(session);
           }

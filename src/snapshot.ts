@@ -100,11 +100,15 @@ export async function workingTreeSnapshot({
   const untrackedSections: string[] = [];
   const untrackedPaths = untrackedResult.stdout.split('\0').filter(Boolean);
   let untrackedCharacterCount = 0;
+  // Normalize once: comparing against an unnormalized `cwd` would treat every
+  // path as outside the workspace and silently drop the evidence.
+  const workspaceRoot = resolve(cwd);
 
   for (const path of untrackedPaths) {
-    const absolutePath = resolve(cwd, path);
+    const absolutePath = resolve(workspaceRoot, path);
     const isInsideWorkspace =
-      absolutePath === cwd || absolutePath.startsWith(`${cwd}${sep}`);
+      absolutePath === workspaceRoot ||
+      absolutePath.startsWith(`${workspaceRoot}${sep}`);
     if (!isInsideWorkspace) {
       continue;
     }

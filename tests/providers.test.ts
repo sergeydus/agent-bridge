@@ -3,9 +3,17 @@ import test from 'node:test';
 
 import {
   assertProvidersAvailable,
+  CLAUDE_MINIMUM_VERSION,
+  CLAUDE_OPTIONAL_FLAGS,
+  CLAUDE_REQUIRED_FLAGS,
+  CLAUDE_REQUIRED_HIDDEN_FLAGS,
   ClaudeProvider,
   claudeArguments,
+  CODEX_REQUIRED_FLAGS,
+  codexArguments,
   CodexProvider,
+  meetsMinimumVersion,
+  parseAdvertisedFlags,
   probeSupportedFlags,
   ProviderAvailabilityError,
   runProviderWithRetry,
@@ -163,6 +171,157 @@ test('Claude uses optional flags exactly when its CLI advertises them', () => {
   assert.ok(!withoutFlags.includes('--safe-mode'));
   assert.ok(!withoutFlags.includes('--ax-screen-reader'));
   assert.ok(withoutFlags.includes('acceptEdits'));
+});
+
+/** Flags emitted only when the project or the user asks for them. */
+const CODEX_CONDITIONAL_FLAGS = [
+  '--skip-git-repo-check',
+  '--config',
+  '--model',
+];
+const CLAUDE_CONDITIONAL_FLAGS = ['--model', '--effort'];
+
+function emittedFlags(args: readonly string[]): Set<string> {
+  return new Set(args.filter((value) => value.startsWith('--')));
+}
+
+test('the Claude flags doctor requires match the flags the adapter emits', () => {
+  // Forward: everything declared must really be emitted.
+  const emitted = emittedFlags(
+    claudeArguments(dryRunOptions, ALL_CLAUDE_FLAGS),
+  );
+  for (const flag of [
+    ...CLAUDE_REQUIRED_FLAGS,
+    ...CLAUDE_REQUIRED_HIDDEN_FLAGS,
+  ]) {
+    assert.ok(emitted.has(flag), `${flag} is declared but never emitted`);
+  }
+
+  // Reverse: a newly emitted flag must be declared somewhere, or doctor would
+  // silently stop covering a dependency the adapter now relies on.
+  const accountedFor = new Set<string>([
+    ...CLAUDE_REQUIRED_FLAGS,
+    ...CLAUDE_REQUIRED_HIDDEN_FLAGS,
+    ...Object.values(CLAUDE_OPTIONAL_FLAGS),
+    ...CLAUDE_CONDITIONAL_FLAGS,
+  ]);
+  const everyClaudeFlag = emittedFlags(
+    claudeArguments(
+      { ...dryRunOptions, model: 'test-model', effort: 'high' },
+      ALL_CLAUDE_FLAGS,
+    ),
+  );
+  for (const flag of everyClaudeFlag) {
+    assert.ok(accountedFor.has(flag), `${flag} is emitted but undeclared`);
+  }
+
+  // A required flag must not also be optional; that would gate a dependency.
+  for (const optional of Object.values(CLAUDE_OPTIONAL_FLAGS)) {
+    assert.ok(
+      !accountedForAsRequired(optional),
+      `${optional} cannot be both required and capability-gated`,
+    );
+  }
+});
+
+function accountedForAsRequired(flag: string): boolean {
+  return (
+    (CLAUDE_REQUIRED_FLAGS as readonly string[]).includes(flag) ||
+    (CLAUDE_REQUIRED_HIDDEN_FLAGS as readonly string[]).includes(flag)
+  );
+}
+
+test('the Codex flags doctor requires match the flags the adapter emits', () => {
+  const paths = { outputPath: '/tmp/out.txt', schemaPath: '/tmp/schema.json' };
+  const emitted = emittedFlags(
+    codexArguments(
+      { ...dryRunOptions, platform: 'linux', isGitRepository: true },
+      paths,
+    ),
+  );
+  for (const flag of CODEX_REQUIRED_FLAGS) {
+    assert.ok(emitted.has(flag), `${flag} is declared but never emitted`);
+  }
+
+  const accountedFor = new Set<string>([
+    ...CODEX_REQUIRED_FLAGS,
+    ...CODEX_CONDITIONAL_FLAGS,
+  ]);
+  // Every conditional path at once, so a new flag cannot hide behind a branch.
+  const everyCodexFlag = emittedFlags(
+    codexArguments(
+      {
+        ...dryRunOptions,
+        platform: 'win32',
+        isGitRepository: false,
+        model: 'test-model',
+        effort: 'high',
+      },
+      paths,
+    ),
+  );
+  for (const flag of everyCodexFlag) {
+    assert.ok(accountedFor.has(flag), `${flag} is emitted but undeclared`);
+  }
+});
+
+test('advertised flags are matched as whole tokens', () => {
+  const help =
+    'Options:\n  --json-schema <schema>  Use a schema\n  --tools <t>';
+  const advertised = parseAdvertisedFlags(help);
+  assert.ok(advertised.has('--json-schema'));
+  assert.ok(advertised.has('--tools'));
+  // Substring matching would wrongly accept both of these.
+  assert.ok(!advertised.has('--json'));
+  assert.ok(!advertised.has('--tool'));
+});
+
+test('the tested Claude version floor stands in for hidden flag detection', () => {
+  assert.equal(
+    meetsMinimumVersion('2.1.74 (Claude Code)', CLAUDE_MINIMUM_VERSION),
+    true,
+  );
+  assert.equal(meetsMinimumVersion('2.0.0', CLAUDE_MINIMUM_VERSION), true);
+  assert.equal(meetsMinimumVersion('1.9.99', CLAUDE_MINIMUM_VERSION), false);
+  assert.equal(meetsMinimumVersion('10.0.0', CLAUDE_MINIMUM_VERSION), true);
+  // An unreadable version is reported as unknown, never as a silent pass.
+  assert.equal(
+    meetsMinimumVersion('unknown build', CLAUDE_MINIMUM_VERSION),
+    undefined,
+  );
+});
+
+test('hidden required flags are never capability-gated', () => {
+  // Claude Code implements --max-turns but omits it from --help, so a help
+  // probe can never confirm it. Gating on the probe would drop the turn bound.
+  const withoutAnyAdvertisedFlags = claudeArguments(
+    dryRunOptions,
+    new Set<string>(),
+  );
+  for (const flag of CLAUDE_REQUIRED_HIDDEN_FLAGS) {
+    assert.ok(withoutAnyAdvertisedFlags.includes(flag));
+  }
+});
+
+test('Claude separates tool availability from tool permission', () => {
+  // --tools selects which built-in tools exist; --allowedTools is the
+  // allow-without-prompting list. Both are needed, and neither may allow Bash.
+  const args = claudeArguments(dryRunOptions, ALL_CLAUDE_FLAGS);
+  const valueAfter = (flag: string): string | undefined =>
+    args[args.indexOf(flag) + 1];
+  assert.ok(args.includes('--tools'));
+  assert.ok(args.includes('--allowedTools'));
+  assert.equal(valueAfter('--tools'), 'Read,Glob,Grep,Edit,Write');
+  assert.equal(valueAfter('--allowedTools'), 'Read,Glob,Grep,Edit,Write');
+
+  const readOnly = claudeArguments(
+    { ...dryRunOptions, writeAccess: false },
+    ALL_CLAUDE_FLAGS,
+  );
+  const readOnlyValueAfter = (flag: string): string | undefined =>
+    readOnly[readOnly.indexOf(flag) + 1];
+  assert.equal(readOnlyValueAfter('--tools'), 'Read,Glob,Grep');
+  assert.equal(readOnlyValueAfter('--allowedTools'), 'Read,Glob,Grep');
 });
 
 test('Claude asks for the native accessible renderer only when requested', () => {

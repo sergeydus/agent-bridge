@@ -106,6 +106,7 @@ export function runProcess(
     input = '',
     inheritStderr = false,
     allowedExitCodes = [0],
+    acceptAnyExitCode = false,
     timeoutMs,
     signal,
     env = process.env,
@@ -119,6 +120,13 @@ export function runProcess(
     input?: string;
     inheritStderr?: boolean;
     allowedExitCodes?: number[];
+    /**
+     * Treat any ordinary exit as success and report its real code, instead of
+     * enumerating the codes a command might use. Callers that must distinguish
+     * a failing command from a broken one still get rejections for spawn
+     * failures, timeouts, cancellation, and exceeded output budgets.
+     */
+    acceptAnyExitCode?: boolean;
     timeoutMs?: number;
     signal?: AbortSignal;
     env?: NodeJS.ProcessEnv;
@@ -332,7 +340,7 @@ export function runProcess(
       const exitCode = code ?? -1;
       const stdout = stdoutCapture.text();
       const stderr = stderrCapture.text();
-      if (!allowedExitCodes.includes(exitCode)) {
+      if (!acceptAnyExitCode && !allowedExitCodes.includes(exitCode)) {
         rejectOnce(
           new Error(
             `${command} exited with ${exitCode}\n${

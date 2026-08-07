@@ -30,7 +30,22 @@ Required properties:
 - `protectedPaths`: array of paths relative to the project root
 
 A command contains a bare executable name, an argument array, and an optional
-timeout from 1 to 180 minutes. Path separators in `command` are rejected.
+timeout from 1 to 180 minutes. Path separators and whitespace in `command` are
+rejected.
+
+Bounds are enforced so an oversized or generated file cannot expand the trusted
+surface without notice: at most 50 verification commands, 100 arguments per
+command, and 100 unique protected paths. Unknown top-level or command
+properties are rejected rather than ignored.
+
+## Missing and invalid files
+
+A project with no `.agent-bridge.json` is treated as having no verification
+commands and no protected paths. A malformed or out-of-bounds file is an error
+rather than an empty configuration, because silently ignoring it would present
+a project as unprotected when its author intended otherwise. An explicit
+`--project-config <path>` that does not exist is likewise an error, since the
+caller named a specific file.
 
 ## Trust
 
@@ -45,6 +60,12 @@ the selected project. Review configuration before trusting it.
 Trusted commands run after each implementation pass and before read-only
 review. Output is bounded and included as reviewer evidence. A failed command
 does not suppress the review; it becomes an explicit finding for the agents.
+
+A nonzero exit is ordinary evidence, so the reviewer receives the real exit code
+along with both stdout and stderr — test runners commonly report the failing
+assertions on stdout while writing unrelated notices to stderr. A command that
+could not run to completion at all, because it failed to spawn, timed out, or
+exceeded its output budget, is reported separately with exit code `-1`.
 
 ## Protected paths
 

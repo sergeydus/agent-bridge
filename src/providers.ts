@@ -57,6 +57,58 @@ const CLAUDE_READ_ONLY_SYSTEM_PROMPT = [
   'Discover and read applicable AGENTS.md and CLAUDE.md files before analysis.',
 ].join(' ');
 
+/**
+ * Flags the adapters emit on every call and that the provider CLIs advertise in
+ * their own help output. `--doctor` verifies these, so a provider release that
+ * renames or drops one is reported instead of failing mid-run. Conditional
+ * flags are deliberately absent: Codex's `--skip-git-repo-check`, `--config`,
+ * and `--model`, and Claude's `--model` and `--effort`, only appear when the
+ * project or the user asks for them, so a missing one is not a reason to call
+ * an installation incompatible.
+ */
+export const CODEX_REQUIRED_FLAGS = [
+  '--sandbox',
+  '--ephemeral',
+  '--ignore-user-config',
+  '--color',
+  '--cd',
+  '--json',
+  '--output-last-message',
+  '--output-schema',
+] as const;
+
+export const CLAUDE_REQUIRED_FLAGS = [
+  '--print',
+  '--output-format',
+  '--verbose',
+  '--include-partial-messages',
+  '--json-schema',
+  '--system-prompt',
+  '--permission-mode',
+  '--tools',
+  '--no-session-persistence',
+  '--allowedTools',
+] as const;
+
+/**
+ * Required flags the CLI implements but omits from `--help`. Claude Code
+ * registers `--max-turns` as a hidden option, so help inspection cannot confirm
+ * it and must not gate it either: omitting the flag would remove the turn bound
+ * on every write call. These need a version rule or a parser probe rather than
+ * the capability gate used for `CLAUDE_OPTIONAL_FLAGS`.
+ */
+export const CLAUDE_REQUIRED_HIDDEN_FLAGS = ['--max-turns'] as const;
+
+/**
+ * Claude separates tool availability from tool permission, so both flags are
+ * needed and are not redundant. `--tools` selects which built-in tools exist
+ * for the turn; `--allowedTools` is the allow-without-prompting list that keeps
+ * a non-interactive call from stalling on a confirmation. Bash is absent from
+ * both: approved project commands are the coordinator's responsibility.
+ */
+const CLAUDE_WRITE_TOOLS = ['Read', 'Glob', 'Grep', 'Edit', 'Write'] as const;
+const CLAUDE_READ_ONLY_TOOLS = ['Read', 'Glob', 'Grep'] as const;
+
 export interface ProviderRunOptions {
   cwd: string;
   tempDirectory: string;
@@ -87,6 +139,56 @@ export interface AgentProvider {
   authStatus(): Promise<ProcessResult>;
 }
 
+/**
+ * Builds Codex's argument vector. Kept pure so the dry run, the drift test that
+ * compares emitted flags against `CODEX_REQUIRED_FLAGS`, and the single-line
+ * argument check all work without a provider CLI installed.
+ */
+export function codexArguments(
+  options: Pick<
+    ProviderRunOptions,
+    'cwd' | 'writeAccess' | 'isGitRepository' | 'model' | 'effort' | 'platform'
+  >,
+  { outputPath, schemaPath }: { outputPath: string; schemaPath: string },
+): string[] {
+  const args = [
+    'exec',
+    '--sandbox',
+    options.writeAccess ? 'workspace-write' : 'read-only',
+    '--ephemeral',
+    '--ignore-user-config',
+    '--color',
+    'never',
+    '--cd',
+    options.cwd,
+    '--json',
+    '--output-last-message',
+    outputPath,
+    '--output-schema',
+    schemaPath,
+  ];
+  if (!options.isGitRepository) {
+    args.push('--skip-git-repo-check');
+  }
+  if ((options.platform ?? process.platform) === 'win32') {
+    args.push(
+      '--config',
+      `windows.sandbox=${JSON.stringify(CODEX_WINDOWS_SANDBOX)}`,
+    );
+  }
+  if (options.model) {
+    args.push('--model', options.model);
+  }
+  if (options.effort) {
+    args.push(
+      '--config',
+      `model_reasoning_effort=${JSON.stringify(options.effort)}`,
+    );
+  }
+  args.push('-');
+  return args;
+}
+
 export class CodexProvider implements AgentProvider {
   readonly name = 'codex';
   readonly label = 'Codex';
@@ -108,42 +210,7 @@ export class CodexProvider implements AgentProvider {
       options.tempDirectory,
       `codex-schema-${randomUUID()}.json`,
     );
-    const args = [
-      'exec',
-      '--sandbox',
-      options.writeAccess ? 'workspace-write' : 'read-only',
-      '--ephemeral',
-      '--ignore-user-config',
-      '--color',
-      'never',
-      '--cd',
-      options.cwd,
-      '--json',
-      '--output-last-message',
-      outputPath,
-      '--output-schema',
-      schemaPath,
-    ];
-    if (!options.isGitRepository) {
-      args.push('--skip-git-repo-check');
-    }
-    if ((options.platform ?? process.platform) === 'win32') {
-      args.push(
-        '--config',
-        `windows.sandbox=${JSON.stringify(CODEX_WINDOWS_SANDBOX)}`,
-      );
-    }
-
-    if (options.model) {
-      args.push('--model', options.model);
-    }
-    if (options.effort) {
-      args.push(
-        '--config',
-        `model_reasoning_effort=${JSON.stringify(options.effort)}`,
-      );
-    }
-    args.push('-');
+    const args = codexArguments(options, { outputPath, schemaPath });
 
     if (options.dryRun) {
       return {
@@ -196,6 +263,15 @@ export const CLAUDE_OPTIONAL_FLAGS = {
 } as const;
 
 /**
+ * Extracts whole flag tokens from help text. Substring matching would accept
+ * `--tool` because `--tools` is present, or `--json` because `--json-schema`
+ * is, so every reader tokenizes instead.
+ */
+export function parseAdvertisedFlags(helpText: string): ReadonlySet<string> {
+  return new Set(helpText.match(/--[a-zA-Z][\w-]*/g) ?? []);
+}
+
+/**
  * Reads the flags a CLI advertises in its own help output. A failed probe
  * yields an empty set, which omits optional flags rather than risking a call
  * that the installed CLI would reject outright.
@@ -208,13 +284,44 @@ export async function probeSupportedFlags(
     const { stdout, stderr } = await runProcess(command, args, {
       timeoutMs: 10_000,
     });
-    return new Set(
-      combinedProcessOutput({ stdout, stderr }).match(/--[a-zA-Z][\w-]*/g) ??
-        [],
-    );
+    return parseAdvertisedFlags(combinedProcessOutput({ stdout, stderr }));
   } catch {
     return new Set<string>();
   }
+}
+
+/**
+ * The oldest Claude Code release Agent Bridge is tested against. It is a tested
+ * floor, not the release that introduced any particular flag. It exists so
+ * `CLAUDE_REQUIRED_HIDDEN_FLAGS` — which help inspection cannot confirm — still
+ * has a check behind it rather than an unverified assumption.
+ */
+export const CLAUDE_MINIMUM_VERSION = '2.0.0';
+
+/** Parses a leading `major.minor.patch` from a `--version` line. */
+export function parseProviderVersion(output: string): number[] | undefined {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(output);
+  return match
+    ? [Number(match[1]), Number(match[2]), Number(match[3])]
+    : undefined;
+}
+
+export function meetsMinimumVersion(
+  output: string,
+  minimum: string,
+): boolean | undefined {
+  const actual = parseProviderVersion(output);
+  const required = parseProviderVersion(minimum);
+  if (!actual || !required) {
+    return undefined;
+  }
+  for (const [index, floor] of required.entries()) {
+    const value = actual[index] ?? 0;
+    if (value !== floor) {
+      return value > floor;
+    }
+  }
+  return true;
 }
 
 const NO_FLAGS: ReadonlySet<string> = new Set<string>();
@@ -245,14 +352,16 @@ export function claudeArguments(
     '--permission-mode',
     options.writeAccess ? 'acceptEdits' : 'plan',
     '--tools',
-    options.writeAccess ? 'Edit,Read,Write,Glob,Grep' : 'Read,Glob,Grep',
+    (options.writeAccess ? CLAUDE_WRITE_TOOLS : CLAUDE_READ_ONLY_TOOLS).join(
+      ',',
+    ),
     '--no-session-persistence',
     '--max-turns',
     '50',
     '--allowedTools',
-    options.writeAccess
-      ? ['Read', 'Glob', 'Grep', 'Edit', 'Write'].join(',')
-      : 'Read,Glob,Grep',
+    (options.writeAccess ? CLAUDE_WRITE_TOOLS : CLAUDE_READ_ONLY_TOOLS).join(
+      ',',
+    ),
   ];
 
   if (options.model) {
