@@ -112,7 +112,9 @@ Behavior:
 - redirected stdin or stdout selects plain mode.
 - `TERM=dumb` selects plain mode.
 - `--no-color` and `NO_COLOR` remove color but do not otherwise disable the
-  enhanced layout.
+  enhanced layout, and `--color` restores it. Color follows its own precedence
+  chain — explicit flag, saved chat, stored preference, then detection — which
+  is independent of the interface mode selected here.
 
 The CLI default is `auto`: capable interactive terminals use enhanced mode and
 all unsupported, redirected, or accessible contexts retain the complete plain

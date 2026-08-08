@@ -21,7 +21,8 @@ export interface PresentationPreferences {
 
 export interface PresentationInput {
   screenReader: boolean;
-  noColor: boolean;
+  /** Resolved color choice, or `undefined` to defer to terminal detection. */
+  color?: boolean;
 }
 
 export interface ProviderEventPresenter {
@@ -174,6 +175,29 @@ function hasNoColor(environment: NodeJS.ProcessEnv): boolean {
   return Object.hasOwn(environment, 'NO_COLOR');
 }
 
+/**
+ * Applies the color precedence chain, most specific first:
+ *
+ * 1. an explicit `--color` or `--no-color` on this command line;
+ * 2. the presentation saved with the chat being resumed;
+ * 3. the global preference stored by the wizard;
+ * 4. automatic detection, when no layer above expressed a choice.
+ *
+ * Each argument is "is color wanted", so `undefined` means that layer is
+ * silent. Returning `undefined` hands the decision to automatic detection.
+ */
+export function resolveColorChoice({
+  explicit,
+  savedSession,
+  savedGlobal,
+}: {
+  explicit?: boolean;
+  savedSession?: boolean;
+  savedGlobal?: boolean;
+}): boolean | undefined {
+  return explicit ?? savedSession ?? savedGlobal;
+}
+
 export function resolvePresentation(
   input: PresentationInput,
   {
@@ -185,10 +209,16 @@ export function resolvePresentation(
   } = {},
 ): PresentationPreferences {
   const screenReader = input.screenReader;
-  return {
-    screenReader,
-    color: isTty && !screenReader && !input.noColor && !hasNoColor(environment),
-  };
+  if (screenReader) {
+    return { screenReader, color: false };
+  }
+  // A stated choice outranks NO_COLOR, which is itself automatic detection.
+  // Nothing outranks the terminal check: escape sequences written into a pipe
+  // corrupt output that something else is meant to read.
+  if (input.color !== undefined) {
+    return { screenReader, color: input.color && isTty };
+  }
+  return { screenReader, color: isTty && !hasNoColor(environment) };
 }
 
 export function agentLabel(agent: AgentName): string {

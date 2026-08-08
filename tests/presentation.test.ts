@@ -6,30 +6,88 @@ import {
   formatAgentHeartbeat,
   formatAgentResponse,
   formatAgentStarted,
+  resolveColorChoice,
   resolvePresentation,
 } from '../src/presentation.ts';
 
 test('resolves color only for an enhanced terminal', () => {
   assert.deepEqual(
     resolvePresentation(
-      { screenReader: false, noColor: false },
+      { screenReader: false },
       { environment: {}, isTty: true },
     ),
     { screenReader: false, color: true },
   );
   assert.equal(
     resolvePresentation(
-      { screenReader: false, noColor: false },
+      { screenReader: false },
       { environment: { NO_COLOR: '' }, isTty: true },
     ).color,
     false,
   );
   assert.deepEqual(
     resolvePresentation(
-      { screenReader: true, noColor: false },
+      { screenReader: true },
       { environment: {}, isTty: true },
     ),
     { screenReader: true, color: false },
+  );
+});
+
+test('a stated color choice outranks NO_COLOR but never a non-terminal', () => {
+  // Automatic detection is the last resort, so NO_COLOR loses to a real choice.
+  assert.equal(
+    resolvePresentation(
+      { screenReader: false, color: true },
+      { environment: { NO_COLOR: '' }, isTty: true },
+    ).color,
+    true,
+  );
+  assert.equal(
+    resolvePresentation(
+      { screenReader: false, color: false },
+      { environment: {}, isTty: true },
+    ).color,
+    false,
+  );
+  // Escape sequences in a pipe would corrupt output meant for another reader.
+  assert.equal(
+    resolvePresentation(
+      { screenReader: false, color: true },
+      { environment: {}, isTty: false },
+    ).color,
+    false,
+  );
+  // Screen-reader mode outranks everything, including an explicit --color.
+  assert.equal(
+    resolvePresentation(
+      { screenReader: true, color: true },
+      { environment: {}, isTty: true },
+    ).color,
+    false,
+  );
+});
+
+test('color precedence runs most specific layer first', () => {
+  assert.equal(
+    resolveColorChoice({
+      explicit: true,
+      savedSession: false,
+      savedGlobal: false,
+    }),
+    true,
+  );
+  assert.equal(
+    resolveColorChoice({ savedSession: false, savedGlobal: true }),
+    false,
+  );
+  assert.equal(resolveColorChoice({ savedGlobal: false }), false);
+  // Nothing stated: automatic detection decides.
+  assert.equal(resolveColorChoice({}), undefined);
+  // `false` is a real choice, not an absent one.
+  assert.equal(
+    resolveColorChoice({ explicit: false, savedGlobal: true }),
+    false,
   );
 });
 

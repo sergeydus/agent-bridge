@@ -13,7 +13,7 @@ import {
 
 function makeSession(id = 'chat-test'): ChatSession {
   return {
-    version: 2,
+    version: 3,
     id,
     createdAt: '2026-07-29T00:00:00.000Z',
     updatedAt: '2026-07-29T00:00:00.000Z',
@@ -37,6 +37,80 @@ function makeSession(id = 'chat-test'): ChatSession {
     workflows: [],
   };
 }
+
+test('migrates a saved chat without inventing a color choice', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-v2-'));
+  try {
+    const store = new ChatSessionStore(directory);
+    const load = async (
+      id: string,
+      noColor: boolean | undefined,
+    ): Promise<boolean | undefined | 'absent'> => {
+      const { color, ...rest } = makeSession(id);
+      void color;
+      await writeFile(
+        join(directory, `${id}.json`),
+        JSON.stringify({
+          ...rest,
+          version: 2,
+          ...(noColor === undefined ? {} : { noColor }),
+        }),
+      );
+      const session = await store.load(id);
+      assert.equal(session.version, 3);
+      return 'color' in session ? session.color : 'absent';
+    };
+
+    // An intentional `--no-color` survives as an explicit "no color".
+    assert.equal(await load('chat-nocolor', true), false);
+    // The CLI that wrote `noColor: false` had no `--color`, so it only meant
+    // "nothing was chosen" and NO_COLOR still applied. Promoting it to an
+    // explicit color-on would make legacy chats start overriding NO_COLOR.
+    assert.equal(await load('chat-default', false), 'absent');
+    assert.equal(await load('chat-absent', undefined), 'absent');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('rejects legacy chats whose version-specific fields were never valid', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-bad-'));
+  try {
+    const store = new ChatSessionStore(directory);
+    const write = async (
+      id: string,
+      legacy: Record<string, unknown>,
+    ): Promise<void> => {
+      const { color, ...rest } = makeSession(id);
+      void color;
+      await writeFile(
+        join(directory, `${id}.json`),
+        JSON.stringify({ ...rest, version: 2, ...legacy }),
+      );
+    };
+
+    // Migration drops `noColor`, so an unchecked malformed value would be
+    // laundered into an accepted record claiming no color choice was made.
+    await write('chat-bad-nocolor', { noColor: 'yes' });
+    await assert.rejects(() => store.load('chat-bad-nocolor'), /Invalid saved/);
+
+    // `color` did not exist before version 3, so a version 2 record carrying it
+    // was never legitimate and must not pass by surviving the migration.
+    await write('chat-early-color', { color: true });
+    await assert.rejects(() => store.load('chat-early-color'), /Invalid saved/);
+
+    // A version 1 record is held to the same rule.
+    const { color, ...rest } = makeSession('chat-v1-color');
+    void color;
+    await writeFile(
+      join(directory, 'chat-v1-color.json'),
+      JSON.stringify({ ...rest, version: 1, color: false }),
+    );
+    await assert.rejects(() => store.load('chat-v1-color'), /Invalid saved/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('persists private chat state and a readable transcript', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-state-'));
@@ -96,7 +170,7 @@ test('migrates version 1 chat limits and presentation safely', async () => {
       `${JSON.stringify(legacy)}\n`,
     );
     const migrated = await store.load('chat-legacy');
-    assert.equal(migrated.version, 2);
+    assert.equal(migrated.version, 3);
     assert.equal(migrated.maxWorkflowRounds, 6);
     assert.equal(migrated.ui, 'plain');
   } finally {

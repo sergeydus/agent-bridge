@@ -8,18 +8,22 @@ const MAX_RECENT_PROJECTS = 8;
 
 export interface PresentationPreferences {
   screenReader: boolean;
-  noColor: boolean;
+  /**
+   * `true` chose color, `false` chose no color, `undefined` made no choice and
+   * defers to automatic detection.
+   */
+  color?: boolean;
   ui: UiMode;
 }
 
 export interface UserConfig {
-  version: 2;
+  version: 3;
   recentProjects: string[];
   presentation?: PresentationPreferences;
 }
 
 const EMPTY_CONFIG: UserConfig = {
-  version: 2,
+  version: 3,
   recentProjects: [],
 };
 
@@ -36,12 +40,45 @@ function isPresentationPreferences(
   const candidate = value as Partial<PresentationPreferences>;
   return (
     Object.keys(value).every((key) =>
-      ['screenReader', 'noColor', 'ui'].includes(key),
+      ['screenReader', 'color', 'ui'].includes(key),
     ) &&
     typeof candidate.screenReader === 'boolean' &&
-    typeof candidate.noColor === 'boolean' &&
+    (candidate.color === undefined || typeof candidate.color === 'boolean') &&
     ['plain', 'enhanced', 'auto'].includes(String(candidate.ui))
   );
+}
+
+/**
+ * The CLI that stored `noColor` had no positive `--color`, so a stored `false`
+ * only meant nothing was chosen and must not become an explicit color-on that
+ * would then outrank `NO_COLOR`. See `migratedColorChoice` in `chat-state.ts`.
+ */
+function migratePresentation(
+  value: unknown,
+): PresentationPreferences | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+  const candidate = value as {
+    screenReader?: unknown;
+    noColor?: unknown;
+    ui?: unknown;
+  };
+  if (
+    !Object.keys(value).every((key) =>
+      ['screenReader', 'noColor', 'ui'].includes(key),
+    ) ||
+    typeof candidate.screenReader !== 'boolean' ||
+    typeof candidate.noColor !== 'boolean' ||
+    !['plain', 'enhanced', 'auto'].includes(String(candidate.ui))
+  ) {
+    return undefined;
+  }
+  return {
+    screenReader: candidate.screenReader,
+    ...(candidate.noColor === true ? { color: false } : {}),
+    ui: candidate.ui as UiMode,
+  };
 }
 
 function isRecentProjects(value: unknown): value is string[] {
@@ -74,20 +111,38 @@ function parseUserConfig(value: unknown): UserConfig | undefined {
       ['version', 'recentProjects'].includes(key),
     )
   ) {
-    return { version: 2, recentProjects: candidate.recentProjects };
+    return { version: 3, recentProjects: candidate.recentProjects };
   }
   if (
-    candidate.version !== 2 ||
     !Object.keys(value).every((key) =>
       ['version', 'recentProjects', 'presentation'].includes(key),
-    ) ||
+    )
+  ) {
+    return undefined;
+  }
+  if (candidate.version === 2) {
+    const presentation =
+      candidate.presentation === undefined
+        ? undefined
+        : migratePresentation(candidate.presentation);
+    if (candidate.presentation !== undefined && !presentation) {
+      return undefined;
+    }
+    return {
+      version: 3,
+      recentProjects: candidate.recentProjects,
+      ...(presentation ? { presentation } : {}),
+    };
+  }
+  if (
+    candidate.version !== 3 ||
     (candidate.presentation !== undefined &&
       !isPresentationPreferences(candidate.presentation))
   ) {
     return undefined;
   }
   return {
-    version: 2,
+    version: 3,
     recentProjects: candidate.recentProjects,
     ...(candidate.presentation ? { presentation: candidate.presentation } : {}),
   };
@@ -134,7 +189,7 @@ export class UserConfigStore {
     ].slice(0, MAX_RECENT_PROJECTS);
     const updated: UserConfig = {
       ...current,
-      version: 2,
+      version: 3,
       recentProjects,
     };
     await this.save(updated);
@@ -147,7 +202,7 @@ export class UserConfigStore {
     const current = await this.load();
     const updated: UserConfig = {
       ...current,
-      version: 2,
+      version: 3,
       presentation,
     };
     await this.save(updated);

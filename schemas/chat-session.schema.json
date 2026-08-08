@@ -22,7 +22,7 @@
     "workflows"
   ],
   "properties": {
-    "version": { "const": 2 },
+    "version": { "const": 3 },
     "id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
@@ -38,7 +38,10 @@
     "timeoutMinutes": { "type": "integer", "minimum": 1, "maximum": 180 },
     "noTranscript": { "type": "boolean" },
     "screenReader": { "type": "boolean" },
-    "noColor": { "type": "boolean" },
+    "color": {
+      "type": "boolean",
+      "description": "Explicit color choice; absent means defer to the global preference and then automatic detection"
+    },
     "ui": { "enum": ["plain", "enhanced", "auto"] },
     "codexModel": { "type": "string" },
     "claudeModel": { "type": "string" },

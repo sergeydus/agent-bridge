@@ -45,7 +45,7 @@ export interface PendingChatExchange {
 }
 
 export interface ChatSession {
-  version: 2;
+  version: 3;
   id: string;
   createdAt: string;
   updatedAt: string;
@@ -58,7 +58,11 @@ export interface ChatSession {
   timeoutMinutes: number;
   noTranscript: boolean;
   screenReader?: boolean;
-  noColor?: boolean;
+  /**
+   * `true` chose color, `false` chose no color, `undefined` made no choice and
+   * defers to the global preference and then to automatic detection.
+   */
+  color?: boolean;
   ui: UiMode;
   codexModel?: string;
   claudeModel?: string;
@@ -205,7 +209,7 @@ export function isChatSession(value: unknown): value is ChatSession {
       'timeoutMinutes',
       'noTranscript',
       'screenReader',
-      'noColor',
+      'color',
       'ui',
       'codexModel',
       'claudeModel',
@@ -221,7 +225,7 @@ export function isChatSession(value: unknown): value is ChatSession {
   }
   const session = value as Partial<ChatSession>;
   return (
-    session.version === 2 &&
+    session.version === 3 &&
     typeof session.id === 'string' &&
     isSafeRunId(session.id) &&
     isIsoDateTime(session.createdAt) &&
@@ -246,7 +250,7 @@ export function isChatSession(value: unknown): value is ChatSession {
     typeof session.noTranscript === 'boolean' &&
     (session.screenReader === undefined ||
       typeof session.screenReader === 'boolean') &&
-    (session.noColor === undefined || typeof session.noColor === 'boolean') &&
+    (session.color === undefined || typeof session.color === 'boolean') &&
     ['plain', 'enhanced', 'auto'].includes(String(session.ui)) &&
     (session.codexModel === undefined ||
       typeof session.codexModel === 'string') &&
@@ -269,16 +273,66 @@ export function isChatSession(value: unknown): value is ChatSession {
   );
 }
 
+/**
+ * Converts a stored `noColor` boolean into the tri-state `color` choice.
+ *
+ * The asymmetry is deliberate. The CLI that wrote `noColor` had no positive
+ * `--color`, so `false` only ever meant "nothing was said" — `NO_COLOR` and a
+ * redirected stream still suppressed color. Reading it as an explicit `true`
+ * would silently promote every legacy session to overriding `NO_COLOR`.
+ * `true`, by contrast, could only come from `--no-color` or the screen-reader
+ * choice, so it carries forward as a real preference.
+ */
+function migratedColorChoice(noColor: unknown): boolean | undefined {
+  return noColor === true ? false : undefined;
+}
+
+/**
+ * Rejects legacy records whose version-specific fields were never valid, so a
+ * migration cannot launder them into an acceptable current record. Migration
+ * transforms a record before validation runs, so anything it drops or rewrites
+ * has to be checked here instead: dropping a malformed `noColor` would present
+ * it as "no choice was made", and `color` did not exist before version 3, so a
+ * record carrying it was never a legitimate version 1 or 2 checkpoint.
+ */
+function hasValidLegacyFields(value: Record<string, unknown>): boolean {
+  return (
+    !('color' in value) &&
+    (!('noColor' in value) || typeof value.noColor === 'boolean')
+  );
+}
+
 function migrateChatSession(value: unknown): unknown {
-  if (!isRecord(value) || value.version !== 1) {
+  if (!isRecord(value)) {
     return value;
   }
-  return {
-    ...value,
-    version: 2,
-    maxWorkflowRounds: value.maxAutoRounds,
-    ui: 'plain',
-  };
+  // An unmigrated version is rejected by validation, which is what an invalid
+  // legacy record should get rather than a silently repaired one.
+  if (
+    (value.version === 1 || value.version === 2) &&
+    !hasValidLegacyFields(value)
+  ) {
+    return value;
+  }
+  let migrated = value;
+  if (migrated.version === 1) {
+    migrated = {
+      ...migrated,
+      version: 2,
+      maxWorkflowRounds: migrated.maxAutoRounds,
+      ui: 'plain',
+    };
+  }
+  if (migrated.version === 2) {
+    const { noColor, ...rest } = migrated;
+    const color = migratedColorChoice(noColor);
+    migrated = {
+      ...rest,
+      version: 3,
+      ...(color === undefined ? {} : { color }),
+    };
+  }
+  return migrated;
 }
 
 export function formatChatTranscript(session: ChatSession): string {

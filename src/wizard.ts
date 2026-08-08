@@ -10,6 +10,7 @@ import type { ReasoningEffort } from './core.ts';
 import { initializeRepository, repositoryHasHead } from './git.ts';
 import type { AppPaths } from './paths.ts';
 import type { BridgeOptions } from './options.ts';
+import { resolveColorChoice } from './presentation.ts';
 import { resolveProject, type SelectedProject } from './project.ts';
 import { workingTreeStatus } from './snapshot.ts';
 import { RunStateStore } from './state.ts';
@@ -71,17 +72,20 @@ ${presentations
     choices,
     defaultPresentation,
   );
+  // These answers choose a layout, not a color policy, and none of them
+  // mentions color. Leaving the choice untouched keeps `undefined` meaning
+  // "nobody said", so automatic detection and NO_COLOR still apply. Screen
+  // reader mode needs no entry here either: it suppresses color when the
+  // presentation is resolved, without claiming a preference the user never
+  // expressed and would keep after leaving that mode.
   if (enhancedAvailable && presentation === '2') {
     options.screenReader = false;
-    options.noColor = false;
     options.ui = 'auto';
   } else if (presentation === String(presentations.length)) {
     options.screenReader = true;
-    options.noColor = true;
     options.ui = 'plain';
   } else {
     options.screenReader = false;
-    options.noColor = false;
     options.ui = 'plain';
   }
 }
@@ -96,7 +100,12 @@ export async function configureAccessibility(
     if (!options.screenReaderExplicit) {
       options.screenReader = config.presentation.screenReader;
     }
-    options.noColor ||= config.presentation.noColor;
+    // An explicit flag wins over the stored preference, so a saved `--no-color`
+    // choice can be reversed with `--color` instead of becoming permanent.
+    options.color = resolveColorChoice({
+      explicit: options.colorExplicit ? options.color : undefined,
+      savedGlobal: config.presentation.color,
+    });
     if (!options.uiExplicit) {
       options.ui = config.presentation.ui;
     }
@@ -109,7 +118,6 @@ export async function configureAccessibility(
     );
     options.screenReader = ['y', 'yes'].includes(accessible);
     if (options.screenReader) {
-      options.noColor = true;
       options.ui = 'plain';
     }
   }
@@ -117,12 +125,13 @@ export async function configureAccessibility(
     options.screenReader = false;
   }
   if (options.screenReader) {
-    options.noColor = true;
     options.ui = 'plain';
   }
+  // Only a stated choice is stored. Screen-reader mode suppresses color when
+  // the presentation is resolved, so it needs no preference of its own.
   await configStore.rememberPresentation({
     screenReader: options.screenReader,
-    noColor: options.noColor,
+    ...(options.color === undefined ? {} : { color: options.color }),
     ui: options.ui,
   });
 }
@@ -221,7 +230,7 @@ export function presentationLabel(options: BridgeOptions): string {
   if (options.screenReader) {
     return 'screen-reader-friendly';
   }
-  const colorSuffix = options.noColor ? ', no color' : '';
+  const colorSuffix = options.color === false ? ', no color' : '';
   if (options.ui === 'enhanced') {
     return `enhanced${colorSuffix}`;
   }
@@ -591,7 +600,7 @@ async function configureAdvancedSettings(
   }
   await configStore.rememberPresentation({
     screenReader: options.screenReader,
-    noColor: options.noColor,
+    ...(options.color === undefined ? {} : { color: options.color }),
     ui: options.ui,
   });
 }

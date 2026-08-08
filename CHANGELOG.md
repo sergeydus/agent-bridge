@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- Fixed `/ask <agent>` and `/both` collapsing runs of whitespace in the message,
+  which reformatted pasted code. The command and its target are still located by
+  splitting on whitespace, but the message keeps the spacing that was typed.
+- Added `--color` as the explicit counterpart to `--no-color`, and gave both a
+  documented precedence chain: an explicit flag, then the presentation saved
+  with a resumed chat, then the wizard's stored preference, then automatic
+  detection. A saved `--no-color` is now a default rather than a permanent
+  state. Screen-reader mode and a redirected stream still override every layer,
+  and passing both flags is rejected.
+- Made the stored color choice three-valued, so "chose no color" and "never
+  chose" stop being the same value. Chat sessions and user configuration are
+  now version 3. A stored `noColor: true` migrates to an explicit no-color
+  choice; a stored `noColor: false` migrates to no choice at all, because the
+  CLI that wrote it had no positive `--color` and `NO_COLOR` still applied.
+  Reading it as an explicit color-on would have made existing chats and
+  configurations start overriding `NO_COLOR`.
+- Stopped the wizard's presentation choices from implying a color preference.
+  Selecting Standard or Enhanced picks a layout and says nothing about color,
+  and screen-reader mode suppresses color when the presentation is resolved
+  instead of recording a preference that would outlive the mode.
+- Fixed a resumed chat with no saved color choice skipping the stored global
+  preference and falling straight through to automatic detection.
+- Fixed chat migration accepting legacy records whose version-specific fields
+  were never valid. Migration transforms a record before validation runs, so a
+  malformed `noColor` was dropped and presented as "no choice", and a version 1
+  or 2 record carrying the version 3 `color` property was let through. Both are
+  now rejected as invalid saved chats.
+- Removed the redundant `--until-agreement` from chat-launched review
+  workflows, which `--require-agreement` already implies.
+- Removed Codex's per-call response-schema and last-message files after each
+  call instead of leaving them until the whole run ends, on success, failure,
+  and cancellation alike.
+
 - Fixed a message sent while a peer response was still outstanding, after a
   cancelled exchange, being folded into that interrupted exchange and drawing
   one agent's reply instead of two. A targeted message in the same state ended

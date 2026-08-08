@@ -82,11 +82,11 @@ export function buildWorkflowArguments(
     '--output',
     options.output,
   ];
-  if (mode === 'review') {
-    args.push('--until-agreement');
-  } else if (mode === 'collaborative') {
+  // A review run needs no role flag. `--require-agreement` above already sets
+  // `--until-agreement`, so naming it again would only be noise.
+  if (mode === 'collaborative') {
     args.push('--collaborative', firstAgent ?? 'claude');
-  } else {
+  } else if (mode === 'fixed') {
     args.push('--implementer', firstAgent ?? 'codex');
   }
   if (options.codexModel) {
@@ -112,8 +112,12 @@ export function buildWorkflowArguments(
   }
   if (options.screenReader) {
     args.push('--screen-reader');
-  } else if (options.noColor) {
+  } else if (options.color === false) {
     args.push('--no-color');
+  } else if (options.color === true) {
+    // The parent already resolved the choice, so pass it explicitly rather than
+    // letting the child re-detect and possibly decide differently.
+    args.push('--color');
   }
   if (options.fromHead) {
     args.push('--from-head');
