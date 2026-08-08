@@ -51,7 +51,10 @@ test('wizard configures accessible presentation and optional models', async () =
   await configureModels(questioner, options);
 
   assert.equal(options.screenReader, true);
-  assert.equal(options.color, false);
+  // Choosing a presentation says nothing about color: screen-reader mode
+  // suppresses it when the presentation is resolved, without recording a
+  // preference the user never stated and would keep after leaving the mode.
+  assert.equal(options.color, undefined);
   assert.equal(options.codexModel, 'codex-test');
   assert.equal(options.claudeModel, 'claude-test');
   assert.equal(options.codexEffort, 'high');
@@ -216,7 +219,7 @@ test('an explicit wizard UI overrides a saved screen-reader preference', async (
     const store = new UserConfigStore(join(directory, 'config.json'));
     await store.rememberPresentation({
       screenReader: true,
-      noColor: true,
+      color: false,
       ui: 'plain',
     });
     const options = parseArgs(['--wizard', '--ui', 'auto'], {
@@ -237,7 +240,7 @@ test('an explicit color flag outranks the stored global preference', async () =>
     const store = new UserConfigStore(join(directory, 'config.json'));
     await store.rememberPresentation({
       screenReader: false,
-      noColor: true,
+      color: false,
       ui: 'plain',
     });
     const merge = async (argv: string[]): Promise<boolean | undefined> => {
@@ -255,12 +258,31 @@ test('an explicit color flag outranks the stored global preference', async () =>
     // An explicit flag outranks it, so a saved `--no-color` is a preference
     // rather than a permanent state, and the reversal is itself persisted.
     assert.equal(await merge(['--wizard', '--color']), true);
-    assert.equal((await store.load()).presentation?.noColor, false);
+    assert.equal((await store.load()).presentation?.color, true);
 
     // The stored preference now says color, and `--no-color` reverses it back.
     assert.equal(await merge(['--wizard']), true);
     assert.equal(await merge(['--wizard', '--no-color']), false);
-    assert.equal((await store.load()).presentation?.noColor, true);
+    assert.equal((await store.load()).presentation?.color, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('a stored preference with no color choice defers to detection', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-no-choice-'));
+  try {
+    const store = new UserConfigStore(join(directory, 'config.json'));
+    await store.rememberPresentation({ screenReader: false, ui: 'plain' });
+    assert.equal('color' in ((await store.load()).presentation ?? {}), false);
+
+    const options = parseArgs(['--wizard'], {
+      initialCwd: directory,
+      defaultOutput: join(directory, 'runs'),
+    });
+    await configureAccessibility(new ScriptedQuestioner([]), options, store);
+    // Nothing anywhere stated a choice, so automatic detection still decides.
+    assert.equal(options.color, undefined);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

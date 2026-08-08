@@ -13,6 +13,7 @@ import {
   type ChatTerminal,
 } from '../src/chat-input.ts';
 import { ChatSessionStore } from '../src/chat-state.ts';
+import { UserConfigStore } from '../src/config.ts';
 import { runInteractiveChat } from '../src/chat.ts';
 import {
   buildWorkflowArguments,
@@ -1066,19 +1067,58 @@ test('an explicit --color reverses a chat saved with --no-color', async () => {
     await open(['chat', '--cwd', project, '--no-color']);
     const saved = await store.latest();
     assert.ok(saved);
-    assert.equal(saved.noColor, true);
+    assert.equal(saved.color, false);
 
     // Without a flag the saved choice still governs the reopened session.
     await open(['chat', '--resume', saved.id]);
-    assert.equal((await store.load(saved.id)).noColor, true);
+    assert.equal((await store.load(saved.id)).color, false);
 
     // An explicit flag outranks it, and the reversal is what gets saved.
     await open(['chat', '--resume', saved.id, '--color']);
-    assert.equal((await store.load(saved.id)).noColor, false);
+    assert.equal((await store.load(saved.id)).color, true);
 
     // ...and is itself reversible, so neither choice becomes permanent.
     await open(['chat', '--resume', saved.id, '--no-color']);
-    assert.equal((await store.load(saved.id)).noColor, true);
+    assert.equal((await store.load(saved.id)).color, false);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('a chat with no saved color choice uses the global preference', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const open = async (argv: string[]): Promise<void> => {
+      await runInteractiveChat({
+        options: parseArgs(argv, {
+          initialCwd: project,
+          defaultOutput: paths.runsDirectory,
+        }),
+        appPaths: paths,
+        providers: fakeProviders([], []),
+        terminal: new ScriptedTerminal(['/pause']),
+      });
+    };
+
+    // A chat opened with no flag records no choice of its own.
+    await open(['chat', '--cwd', project]);
+    const saved = await store.latest();
+    assert.ok(saved);
+    assert.equal(saved.color, undefined);
+
+    // The global preference is the next layer down, so resuming that chat must
+    // consult it rather than dropping straight to automatic detection.
+    await new UserConfigStore(paths.configFile).rememberPresentation({
+      screenReader: false,
+      color: false,
+      ui: 'plain',
+    });
+    await open(['chat', '--resume', saved.id]);
+    assert.equal((await store.load(saved.id)).color, false);
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

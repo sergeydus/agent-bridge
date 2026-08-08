@@ -21,6 +21,7 @@ import {
   launchBridgeWorkflow,
   type WorkflowLauncher,
 } from './chat-workflow.ts';
+import { UserConfigStore } from './config.ts';
 import { makeRunId, otherAgent, type AgentName } from './core.ts';
 import { loadInstructionContext } from './instructions.ts';
 import type { BridgeOptions } from './options.ts';
@@ -456,7 +457,7 @@ function createSession(
 ): ChatSession {
   const now = new Date().toISOString();
   return {
-    version: 2,
+    version: 3,
     id: `chat-${makeRunId(new Date(now))}`,
     createdAt: now,
     updatedAt: now,
@@ -469,7 +470,7 @@ function createSession(
     timeoutMinutes: options.timeoutMinutes,
     noTranscript: options.noTranscript,
     screenReader: options.screenReader,
-    noColor: options.color === undefined ? undefined : !options.color,
+    color: options.color,
     ui: options.ui,
     codexModel: options.codexModel,
     claudeModel: options.claudeModel,
@@ -519,6 +520,9 @@ export async function runInteractiveChat({
       terminal.write(`Deleted chat ${session.id}.\n`);
       return;
     }
+    const savedGlobalColor = (
+      await new UserConfigStore(appPaths.configFile).load()
+    ).presentation?.color;
     let session: ChatSession;
     if (options.resume) {
       const resumed =
@@ -533,22 +537,29 @@ export async function runInteractiveChat({
         options.screenReader = session.screenReader ?? false;
       }
       // An explicit flag wins; otherwise the chat keeps the presentation it was
-      // saved with, so reopening a session looks like leaving it did.
+      // saved with, so reopening a session looks like leaving it did. A session
+      // that never stated a choice falls through to the global preference
+      // rather than skipping a layer straight to automatic detection.
       options.color = resolveColorChoice({
         explicit: options.colorExplicit ? options.color : undefined,
-        savedSession:
-          session.noColor === undefined ? undefined : !session.noColor,
+        savedSession: session.color,
+        savedGlobal: savedGlobalColor,
       });
       if (!options.uiExplicit) {
         options.ui = session.ui;
       }
       session.screenReader = options.screenReader;
-      session.noColor =
-        options.color === undefined ? undefined : !options.color;
+      session.color = options.color;
       session.ui = options.ui;
       await refreshProjectKind(session);
       session.status = 'active';
     } else {
+      // A new chat has no saved session layer, so the global preference is the
+      // next most specific source after an explicit flag.
+      options.color = resolveColorChoice({
+        explicit: options.colorExplicit ? options.color : undefined,
+        savedGlobal: savedGlobalColor,
+      });
       session = createSession(options, await resolveProject(options.cwd));
     }
     const presentation = resolvePresentation({

@@ -172,10 +172,13 @@ Color is decided by the most specific source that expresses a choice:
    the standard `NO_COLOR` environment variable is set.
 
 So a saved preference is a preference, not a permanent state — a chat saved
-with `--no-color` can be reopened with `--color`. Two rules override all of the
-above: screen-reader mode never uses color, and color is never written to a
-redirected stream, because escape sequences would corrupt output meant for
-another reader.
+with `--no-color` can be reopened with `--color`. Only those two flags record a
+choice: picking a presentation style in the wizard selects a layout and says
+nothing about color, so automatic detection still applies afterwards.
+
+Two rules override every layer above: screen-reader mode never uses color, and
+color is never written to a redirected stream, because escape sequences would
+corrupt output meant for another reader.
 
 Interactive terminals use the enhanced conversation view automatically when
 capability checks pass:
@@ -465,7 +468,7 @@ chat                     Open interactive human-guided chat mode
 --codex-effort <level>   Codex reasoning effort: low, medium, high, xhigh, max
 --claude-effort <level>  Claude reasoning effort: low, medium, high, xhigh, max
 --screen-reader          Use screen-reader-friendly, append-only output
---color                  Force Agent Bridge color output on
+--color                  Enable color on interactive terminals
 --no-color               Disable Agent Bridge color output
 --ui <mode>              Chat interface: plain, enhanced, or auto
 --project-config <path>  Alternate project configuration

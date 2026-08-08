@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": ["version", "recentProjects"],
   "properties": {
-    "version": { "const": 2 },
+    "version": { "const": 3 },
     "recentProjects": {
       "type": "array",
       "maxItems": 8,
@@ -16,10 +16,13 @@
     "presentation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["screenReader", "noColor", "ui"],
+      "required": ["screenReader", "ui"],
       "properties": {
         "screenReader": { "type": "boolean" },
-        "noColor": { "type": "boolean" },
+        "color": {
+          "type": "boolean",
+          "description": "Explicit color choice; absent means defer to automatic detection"
+        },
         "ui": { "enum": ["plain", "enhanced", "auto"] }
       }
     }

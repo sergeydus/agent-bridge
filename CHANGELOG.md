@@ -11,6 +11,19 @@
   detection. A saved `--no-color` is now a default rather than a permanent
   state. Screen-reader mode and a redirected stream still override every layer,
   and passing both flags is rejected.
+- Made the stored color choice three-valued, so "chose no color" and "never
+  chose" stop being the same value. Chat sessions and user configuration are
+  now version 3. A stored `noColor: true` migrates to an explicit no-color
+  choice; a stored `noColor: false` migrates to no choice at all, because the
+  CLI that wrote it had no positive `--color` and `NO_COLOR` still applied.
+  Reading it as an explicit color-on would have made existing chats and
+  configurations start overriding `NO_COLOR`.
+- Stopped the wizard's presentation choices from implying a color preference.
+  Selecting Standard or Enhanced picks a layout and says nothing about color,
+  and screen-reader mode suppresses color when the presentation is resolved
+  instead of recording a preference that would outlive the mode.
+- Fixed a resumed chat with no saved color choice skipping the stored global
+  preference and falling straight through to automatic detection.
 - Removed the redundant `--until-agreement` from chat-launched review
   workflows, which `--require-agreement` already implies.
 - Removed Codex's per-call response-schema and last-message files after each

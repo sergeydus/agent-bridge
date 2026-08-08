@@ -98,7 +98,7 @@ Options:
   --output <directory>    Override transcript and workspace storage
   --no-transcript         Remove completed run or chat transcripts
   --screen-reader         Use append-only, screen-reader-friendly presentation
-  --color                 Force Agent Bridge color output on
+  --color                 Enable color on interactive terminals
   --no-color              Disable Agent Bridge color output
   --ui <mode>             Chat interface: plain, enhanced, or auto
   --project-config <path> Use a specific .agent-bridge.json configuration

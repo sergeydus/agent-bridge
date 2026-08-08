@@ -13,7 +13,7 @@ import {
 
 function makeSession(id = 'chat-test'): ChatSession {
   return {
-    version: 2,
+    version: 3,
     id,
     createdAt: '2026-07-29T00:00:00.000Z',
     updatedAt: '2026-07-29T00:00:00.000Z',
@@ -37,6 +37,41 @@ function makeSession(id = 'chat-test'): ChatSession {
     workflows: [],
   };
 }
+
+test('migrates a saved chat without inventing a color choice', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-v2-'));
+  try {
+    const store = new ChatSessionStore(directory);
+    const load = async (
+      id: string,
+      noColor: boolean | undefined,
+    ): Promise<boolean | undefined | 'absent'> => {
+      const { color, ...rest } = makeSession(id);
+      void color;
+      await writeFile(
+        join(directory, `${id}.json`),
+        JSON.stringify({
+          ...rest,
+          version: 2,
+          ...(noColor === undefined ? {} : { noColor }),
+        }),
+      );
+      const session = await store.load(id);
+      assert.equal(session.version, 3);
+      return 'color' in session ? session.color : 'absent';
+    };
+
+    // An intentional `--no-color` survives as an explicit "no color".
+    assert.equal(await load('chat-nocolor', true), false);
+    // The CLI that wrote `noColor: false` had no `--color`, so it only meant
+    // "nothing was chosen" and NO_COLOR still applied. Promoting it to an
+    // explicit color-on would make legacy chats start overriding NO_COLOR.
+    assert.equal(await load('chat-default', false), 'absent');
+    assert.equal(await load('chat-absent', undefined), 'absent');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('persists private chat state and a readable transcript', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-state-'));
@@ -96,7 +131,7 @@ test('migrates version 1 chat limits and presentation safely', async () => {
       `${JSON.stringify(legacy)}\n`,
     );
     const migrated = await store.load('chat-legacy');
-    assert.equal(migrated.version, 2);
+    assert.equal(migrated.version, 3);
     assert.equal(migrated.maxWorkflowRounds, 6);
     assert.equal(migrated.ui, 'plain');
   } finally {

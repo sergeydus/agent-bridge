@@ -123,12 +123,28 @@ detection, which honors `NO_COLOR` and requires an interactive terminal.
 
 A resumed chat therefore reopens looking the way it was left, but the saved
 choice is a default rather than a lock: a chat saved with `--no-color` reopens
-in color when `--color` is passed, and the reversal is saved in turn. The same
-chain runs in the wizard against the stored global preference, so neither entry
-point can strand a choice. A chat-launched workflow inherits the parent's
+in color when `--color` is passed, and the reversal is saved in turn. A chat
+that never stated a choice falls through to the global preference rather than
+skipping that layer. The same chain runs in the wizard, so neither entry point
+can strand a choice. A chat-launched workflow inherits the parent's
 already-resolved choice as an explicit flag, so the child cannot decide
 differently. Screen-reader mode and a redirected stream still override
 everything above.
+
+The stored choice is genuinely three-valued: `true` chose color, `false` chose
+no color, and an absent value means nobody chose. Only `--color` and
+`--no-color` record one. Selecting a presentation style in the wizard picks a
+layout and leaves color unstated, and screen-reader mode suppresses color when
+the presentation is resolved rather than recording a preference that would
+outlive the mode.
+
+Chat sessions are version 3 and user configuration is version 3 for this
+reason. Both previously stored a `noColor` boolean. Migration reads a stored
+`true` as an explicit "no color", because only `--no-color` or the
+screen-reader choice could produce it, and reads a stored `false` as no choice
+at all, because the CLI that wrote it had no positive `--color` and `NO_COLOR`
+still applied. Treating that `false` as an explicit color-on would silently
+promote every existing chat and configuration to overriding `NO_COLOR`.
 
 New chats default to `--ui auto`, which uses the alternate-screen interface
 only when stdin and stdout are interactive, `TERM` is usable, and the terminal
