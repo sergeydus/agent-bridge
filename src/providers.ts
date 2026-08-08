@@ -263,12 +263,27 @@ export const CLAUDE_OPTIONAL_FLAGS = {
 } as const;
 
 /**
- * Extracts whole flag tokens from help text. Substring matching would accept
- * `--tool` because `--tools` is present, or `--json` because `--json-schema`
- * is, so every reader tokenizes instead.
+ * Extracts the flags a CLI declares as options in its own help output.
+ *
+ * Two narrowings matter. Whole tokens only, because substring matching would
+ * accept `--json` merely because `--json-schema` is present. And declarations
+ * only: a flag named inside another option's description is a mention, not an
+ * offer, so a removed option must not look supported because some other
+ * description still references it. Help lists an option at the start of its
+ * line and separates the description by a gap of two or more spaces.
  */
 export function parseAdvertisedFlags(helpText: string): ReadonlySet<string> {
-  return new Set(helpText.match(/--[a-zA-Z][\w-]*/g) ?? []);
+  const flags = new Set<string>();
+  for (const line of helpText.split('\n')) {
+    const declaration = /^\s*(-[^\s].*?)(?:\s{2,}|$)/.exec(line)?.[1];
+    if (!declaration) {
+      continue;
+    }
+    for (const flag of declaration.match(/--[a-zA-Z][\w-]*/g) ?? []) {
+      flags.add(flag);
+    }
+  }
+  return flags;
 }
 
 /**

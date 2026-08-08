@@ -183,6 +183,10 @@ export async function runDoctor({
         `unsupported below Claude Code ${CLAUDE_MINIMUM_VERSION}`,
     );
   } else if (claudeVersionMeetsMinimum === undefined) {
+    // The version floor is the only check standing behind these flags, so an
+    // unreadable version means compatibility was never established. Reporting
+    // that as a pass would be the silent failure this check exists to prevent.
+    passed = false;
     lines.push(
       `Claude hidden required flags (${CLAUDE_REQUIRED_HIDDEN_FLAGS.join(', ')}): ` +
         'unverified, could not read a version number',

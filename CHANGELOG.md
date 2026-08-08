@@ -8,7 +8,9 @@
   the whole chat process. Both now finish the outstanding reply first, the way
   reopening a chat already did, and only then run the new message's own
   exchange. Cancelling the outstanding reply again leaves the new message
-  unsaved rather than persisting an orphan.
+  unsaved rather than persisting an orphan. Resuming with a startup task and
+  cancelling the outstanding reply likewise leaves the task unsent instead of
+  appending it to the interrupted exchange.
 - Fixed verification reporting every failing command as exit code `-1` and
   replacing its output with an error message that kept only one stream. The
   reviewer-facing evidence now names the real exit code and carries both
@@ -21,7 +23,10 @@
   whole flag tokens rather than substrings. Flags a CLI implements but omits
   from `--help`, such as Claude's `--max-turns`, are checked against a tested
   minimum Claude Code version instead of being silently unchecked or wrongly
-  capability-gated.
+  capability-gated; a version number that cannot be read now fails the check
+  rather than passing as unverified. Help output is read as option declarations,
+  so a flag named only inside another option's description no longer counts as
+  supported.
 - Documented that Claude's `--tools` and `--allowedTools` act at different
   layers and fed both from one shared per-access-level constant.
 - Normalized the project path once before the untracked-file containment check,

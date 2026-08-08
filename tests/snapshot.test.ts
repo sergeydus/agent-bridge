@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import test from 'node:test';
 
 import { summarizePorcelainStatus } from '../src/core.ts';
@@ -40,6 +40,27 @@ test('reports an unstaged edit without losing its status field', async () => {
     assert.deepEqual(summary.files, ['f.txt']);
     assert.equal(summary.modifiedFiles, 1);
     assert.equal(summary.stagedFiles, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('captures untracked evidence for an unnormalized project path', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-cwd-'));
+  try {
+    await execute('git', ['init', root], { cwd: root });
+    await writeFile(join(root, 'new.txt'), 'untracked contents\n');
+
+    // A trailing separator or a `.` segment made the containment check compare
+    // against an unnormalized root, silently dropping every untracked file.
+    for (const cwd of [`${root}${sep}`, join(root, '.')]) {
+      const snapshot = await workingTreeSnapshot({ cwd });
+      assert.match(
+        snapshot,
+        /untracked contents/,
+        `untracked evidence lost for ${cwd}`,
+      );
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

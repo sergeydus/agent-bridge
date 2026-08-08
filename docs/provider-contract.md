@@ -122,8 +122,10 @@ by name. Conditional flags stay out of it — Codex's `--skip-git-repo-check`,
 when the project or the user asks for them, so a missing one should not condemn
 an otherwise working installation.
 
-Help text is matched as whole flag tokens, never as substrings: a CLI that
-advertises `--json-schema` must not be read as offering `--json`.
+Help text is read as option declarations, not as prose. Flags are matched as
+whole tokens, so a CLI advertising `--json-schema` is not read as offering
+`--json`, and only the declaration part of a line counts, so a flag named inside
+another option's description does not make a removed option look supported.
 
 **Required but hidden.** A CLI may implement a flag while omitting it from
 `--help`. Claude Code registers `--max-turns` this way. Help inspection cannot
@@ -131,10 +133,12 @@ confirm such a flag, and it must not gate it either: dropping `--max-turns`
 would remove the turn bound from every write call. Because a probe cannot cover
 these, `--doctor` checks the installed release against
 `CLAUDE_MINIMUM_VERSION`, the oldest Claude Code that Agent Bridge is tested
-against, and fails below it. That floor is a tested minimum rather than the
-release that introduced any particular flag; raise it when a hidden dependency
-is known to be newer. An unreadable version number is reported as unverified
-instead of passing silently.
+against, and fails below it. That release is confirmed to carry the current
+hidden flags; it is a tested floor rather than the release that introduced them,
+so raise it when a new hidden dependency is known to be newer. Because this
+check is the only evidence behind those flags, a version number that cannot be
+read fails the check too — reporting it as a pass would be the silent failure
+the check exists to prevent.
 
 **Optional capabilities.** Used only when available, probed once per session
 from the CLI's own help output, and omitted when absent; a failed probe omits

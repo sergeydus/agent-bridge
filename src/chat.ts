@@ -745,15 +745,23 @@ export async function runInteractiveChat({
         );
       }
 
+      let pendingSettled = true;
       if (session.pendingExchange) {
         terminal.write('\nResuming the interrupted peer response…\n');
-        await runCancellableExchange();
+        const { cancelled } = await runCancellableExchange();
+        pendingSettled = !cancelled && !session.pendingExchange;
       }
       const initialMessage =
         options.task || options.taskFile
           ? await resolveTask(options)
           : undefined;
-      if (initialMessage) {
+      if (initialMessage && !pendingSettled) {
+        // Sending it now would fold the task into the still-interrupted
+        // exchange, where it would draw one agent's reply instead of two.
+        writeSupplemental(
+          '\nThe interrupted reply was cancelled, so the startup task was not sent. Send it as a message when you are ready.\n',
+        );
+      } else if (initialMessage) {
         addPresentedMessage(session, presenter, 'user', initialMessage);
         await store.save(session);
         await runCancellableExchange();

@@ -265,15 +265,26 @@ test('the Codex flags doctor requires match the flags the adapter emits', () => 
   }
 });
 
-test('advertised flags are matched as whole tokens', () => {
-  const help =
-    'Options:\n  --json-schema <schema>  Use a schema\n  --tools <t>';
+test('advertised flags come from declarations, matched as whole tokens', () => {
+  const help = [
+    'Options:',
+    '  -p, --print                 Print mode',
+    '  --json-schema <schema>      Use a schema',
+    '  --tools <tools...>          Available tools',
+    '  --permission-mode <mode>    Replaces the removed --old-permissions flag',
+  ].join('\n');
   const advertised = parseAdvertisedFlags(help);
+  assert.ok(advertised.has('--print'));
   assert.ok(advertised.has('--json-schema'));
   assert.ok(advertised.has('--tools'));
-  // Substring matching would wrongly accept both of these.
+  assert.ok(advertised.has('--permission-mode'));
+
+  // Substring matching would wrongly accept these.
   assert.ok(!advertised.has('--json'));
   assert.ok(!advertised.has('--tool'));
+  // A flag named inside another option's description is a mention, not an
+  // offer: a removed option must not look supported because prose cites it.
+  assert.ok(!advertised.has('--old-permissions'));
 });
 
 test('the tested Claude version floor stands in for hidden flag detection', () => {

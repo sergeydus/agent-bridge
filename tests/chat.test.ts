@@ -792,6 +792,69 @@ test('a new message finishes the outstanding peer reply before its own exchange'
   }
 });
 
+test('a cancelled resume does not send the startup task into the old exchange', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    // Leave a session with an outstanding peer response.
+    const failing = providersWithRun(async (_prompt, options) => {
+      if (options.cwd && called.push('call') === 2) {
+        throw new Error('interrupted peer');
+      }
+      return { text: 'first answer', decision: 'continue' };
+    });
+    const called: string[] = [];
+    await assert.rejects(
+      runInteractiveChat({
+        options: parseArgs(['chat', '--cwd', project], {
+          initialCwd: project,
+          defaultOutput: paths.runsDirectory,
+        }),
+        appPaths: paths,
+        providers: failing,
+        terminal: new ScriptedTerminal(['Inspect this']),
+      }),
+      /interrupted peer/,
+    );
+    const paused = await new ChatSessionStore(paths.chatsDirectory).latest();
+    assert.ok(paused?.pendingExchange);
+
+    // Resume with a startup task, but cancel the outstanding reply again.
+    const cancelling = providersWithRun(async () => {
+      throw new ProcessAbortError();
+    });
+    const terminal = new ScriptedTerminal([]);
+    await runInteractiveChat({
+      options: parseArgs(
+        ['chat', '--resume', paused.id, '--task', 'brand new task'],
+        { initialCwd: project, defaultOutput: paths.runsDirectory },
+      ),
+      appPaths: paths,
+      providers: cancelling,
+      terminal,
+    });
+
+    const saved = await new ChatSessionStore(paths.chatsDirectory).load(
+      paused.id,
+    );
+    assert.ok(saved.pendingExchange, 'the reply is still outstanding');
+    // The task must not be folded into the still-interrupted exchange.
+    assert.deepEqual(
+      saved.messages.map((message) => message.role),
+      ['user', 'codex'],
+    );
+    assert.ok(
+      !saved.messages.some((message) => message.text.includes('brand new')),
+      'the startup task was persisted into the interrupted exchange',
+    );
+    assert.match(terminal.output.join(''), /startup task was not sent/);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('cancelling the outstanding reply again drops the new message unsaved', async () => {
   const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
   const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
