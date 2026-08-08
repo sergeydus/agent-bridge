@@ -24,7 +24,8 @@ bin/agent-bridge.mjs
       │                           workflow-preflight.ts
       ├─ terminal presentation ──── presentation-model.ts,
       │                           presentation.ts, enhanced-terminal.ts,
-      │                           terminal-capabilities.ts, ui.ts
+      │                           terminal-capabilities.ts, ui.ts,
+      │                           terminal-text.ts
       ├─ interactive chat ──────── chat.ts, chat-input.ts,
       │                           chat-state.ts, chat-workflow.ts
       ├─ task + review evidence ── task.ts
@@ -42,8 +43,16 @@ bin/agent-bridge.mjs
       ├─ checkpoints + history ─── state.ts, runs.ts
       │                              run-management.ts
       ├─ transcripts ───────────── transcript.ts
+      ├─ shared primitives ─────── filesystem.ts, file-lock.ts
       └─ diagnostics ───────────── doctor.ts
 ```
+
+Three primitives are deliberately shared rather than reimplemented per
+subsystem. `terminal-text.ts` is the only sanitizer for untrusted text reaching
+a terminal. `filesystem.ts` is the only writer of persisted state, so every
+format gets the same atomic rename and owner-only mode. `file-lock.ts` is the
+only exclusive lock, so run checkpoints and chat sessions share one definition
+of ownership and one stale-owner check.
 
 The CLI composes modules but does not decide turn order. The orchestrator does
 not know Codex or Claude command-line syntax. Provider adapters do not decide

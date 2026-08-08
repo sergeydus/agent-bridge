@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- Fixed a message sent while a peer response was still outstanding, after a
+  cancelled exchange, being folded into that interrupted exchange and drawing
+  one agent's reply instead of two. A targeted message in the same state ended
+  the whole chat process. Both now finish the outstanding reply first, the way
+  reopening a chat already did, and only then run the new message's own
+  exchange. Cancelling the outstanding reply again leaves the new message
+  unsaved rather than persisting an orphan. Resuming with a startup task and
+  cancelling the outstanding reply likewise leaves the task unsent instead of
+  appending it to the interrupted exchange.
+- Fixed verification reporting every failing command as exit code `-1` and
+  replacing its output with an error message that kept only one stream. The
+  reviewer-facing evidence now names the real exit code and carries both
+  streams, while a command that never ran to completion stays distinguishable.
+  `runProcess` gained an explicit `acceptAnyExitCode` option instead of
+  requiring callers to enumerate codes.
+- Centralized the provider flags `--doctor` verifies so the list cannot drift
+  from what the adapters emit in either direction, and expanded it from three
+  flags to every unconditional one for both CLIs. Help output is now matched as
+  whole flag tokens rather than substrings. Flags a CLI implements but omits
+  from `--help`, such as Claude's `--max-turns`, are checked against a tested
+  minimum Claude Code version instead of being silently unchecked or wrongly
+  capability-gated; a version number that cannot be read now fails the check
+  rather than passing as unverified. Help output is read as option declarations,
+  so a flag named only inside another option's description no longer counts as
+  supported.
+- Documented that Claude's `--tools` and `--allowedTools` act at different
+  layers and fed both from one shared per-access-level constant.
+- Normalized the project path once before the untracked-file containment check,
+  which would otherwise have dropped every untracked file from reviewer evidence
+  for a relative or trailing-separator project path.
+
 - Made complete enhanced-chat responses automatically available in native
   terminal scrollback while retaining the full-screen view for active work.
 - Fixed explicit `--ui auto` and `--ui enhanced` overrides being rejected at

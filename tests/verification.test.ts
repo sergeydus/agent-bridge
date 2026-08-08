@@ -22,19 +22,39 @@ test('runs approved commands as executable and argument arrays', async () => {
   assert.match(formatVerificationResults(results), /PASS/);
 });
 
-test('records verification failures without aborting later review evidence', async () => {
+test('reports a failing command with its real exit code and both streams', async () => {
+  const script =
+    "process.stdout.write('assertion detail'); " +
+    "process.stderr.write('npm noise'); process.exit(7)";
   const results = await runVerificationCommands({
-    commands: [
-      {
-        command: process.execPath,
-        args: ['-e', 'process.exit(7)'],
-      },
-    ],
+    commands: [{ command: process.execPath, args: ['-e', script] }],
     cwd: process.cwd(),
     defaultTimeoutMs: 5_000,
   });
   assert.equal(results[0]?.passed, false);
-  assert.match(formatVerificationResults(results), /FAIL/);
+  // A nonzero exit is evidence, not an error: the reviewer needs the code and
+  // the stdout detail, which a stderr-only error message would have replaced.
+  assert.equal(results[0]?.exitCode, 7);
+  assert.match(results[0]?.output ?? '', /assertion detail/);
+  assert.match(results[0]?.output ?? '', /npm noise/);
+  // The formatted text is what reaches the reviewer, so assert there too.
+  const reviewerEvidence = formatVerificationResults(results);
+  assert.match(reviewerEvidence, /FAIL \(exit 7\)/);
+  assert.match(reviewerEvidence, /assertion detail/);
+  assert.match(reviewerEvidence, /npm noise/);
+});
+
+test('separates a command that never ran from one that ran and failed', async () => {
+  const results = await runVerificationCommands({
+    commands: [{ command: 'agent-bridge-missing-verification', args: [] }],
+    cwd: process.cwd(),
+    defaultTimeoutMs: 5_000,
+  });
+  assert.equal(results[0]?.passed, false);
+  assert.equal(results[0]?.exitCode, -1);
+  const reviewerEvidence = formatVerificationResults(results);
+  assert.match(reviewerEvidence, /FAIL \(did not run to completion\)/);
+  assert.doesNotMatch(reviewerEvidence, /exit -1/);
 });
 
 test('bounds noisy verification output while preserving both ends', async () => {

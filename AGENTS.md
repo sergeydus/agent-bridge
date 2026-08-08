@@ -28,12 +28,15 @@ location of Agent Bridge itself.
 - `chat-workflow.ts` owns safe handoff to editing and review workflows.
 - `chat-state.ts` owns chat validation, locking, persistence, and transcripts.
 - `wizard.ts` owns novice-facing interactive setup.
+- `workflow-preflight.ts` owns the one inspection and preview shared by the
+  wizard and chat before any read-only-to-editing transition.
 - `options.ts` owns CLI types, help, parsing, and validation.
 - `presentation-model.ts` owns bounded, renderer-neutral terminal state.
 - `presentation.ts` owns accessible plain rendering, presentation control, and
   color resolution.
-- `enhanced-terminal.ts` owns responsive alternate-screen rendering and
-  terminal-text sanitization.
+- `enhanced-terminal.ts` owns responsive alternate-screen rendering.
+- `terminal-text.ts` is the single sanitizer for untrusted text reaching a
+  terminal; every renderer, reporter, and diagnostic goes through it.
 - `terminal-capabilities.ts` owns UI mode selection and process-free capability
   checks.
 - `orchestrator.ts` owns the provider-independent state machine.
@@ -49,6 +52,10 @@ location of Agent Bridge itself.
 - `snapshot.ts` captures bounded evidence and fingerprints protected paths.
 - `artifacts.ts` owns completion choices for isolated workspaces.
 - `state.ts` owns checkpoint validation, migration, atomic writes, and locks.
+- `filesystem.ts` owns atomic owner-only writes and bounded prefix reads. Every
+  persisted format goes through it instead of writing files directly.
+- `file-lock.ts` owns the single exclusive-lock primitive, including stale-owner
+  detection, shared by run checkpoints and chat sessions.
 - `runs.ts` owns run listing and conservative artifact deletion.
 - `run-management.ts` maps CLI history actions to run operations.
 - `task.ts` loads task input and bounded Git review evidence.

@@ -3,7 +3,16 @@ import { join } from 'node:path';
 
 import type { AppPaths } from './paths.ts';
 import { combinedProcessOutput, runProcess } from './process.ts';
-import { CLAUDE_OPTIONAL_FLAGS, type ProviderMap } from './providers.ts';
+import {
+  CLAUDE_MINIMUM_VERSION,
+  CLAUDE_OPTIONAL_FLAGS,
+  CLAUDE_REQUIRED_FLAGS,
+  CLAUDE_REQUIRED_HIDDEN_FLAGS,
+  CODEX_REQUIRED_FLAGS,
+  meetsMinimumVersion,
+  parseAdvertisedFlags,
+  type ProviderMap,
+} from './providers.ts';
 
 export interface DoctorReport {
   passed: boolean;
@@ -127,32 +136,76 @@ export async function runDoctor({
     lines.push(`Claude auth: unavailable (${errorMessage(claudeAuth.reason)})`);
   }
 
-  const codexCapabilities =
-    codexHelp.status === 'fulfilled' &&
-    ['--output-schema', '--sandbox', '--ignore-user-config'].every((flag) =>
-      combinedProcessOutput(codexHelp.value).includes(flag),
+  const missingFlags = (
+    help: PromiseSettledResult<{ stdout: string; stderr: string }>,
+    required: readonly string[],
+  ): string[] | undefined => {
+    if (help.status !== 'fulfilled') {
+      return undefined;
+    }
+    // Whole tokens only: a substring search would accept `--json` merely
+    // because the CLI advertises `--json-schema`.
+    const advertised = parseAdvertisedFlags(combinedProcessOutput(help.value));
+    return required.filter((flag) => !advertised.has(flag));
+  };
+
+  for (const [label, help, required] of [
+    ['Codex', codexHelp, CODEX_REQUIRED_FLAGS] as const,
+    ['Claude', claudeHelp, CLAUDE_REQUIRED_FLAGS] as const,
+  ]) {
+    const missing = missingFlags(help, required);
+    if (missing === undefined) {
+      passed = false;
+      lines.push(`${label} capabilities: help output unavailable`);
+      continue;
+    }
+    if (missing.length > 0) {
+      passed = false;
+      lines.push(`${label} capabilities: missing ${missing.join(', ')}`);
+      continue;
+    }
+    lines.push(`${label} capabilities: compatible`);
+  }
+
+  // Claude implements these but omits them from help, so a flag probe can never
+  // confirm them. The tested-version floor is the check that stands in for it.
+  const claudeVersionMeetsMinimum =
+    claudeVersion.status === 'fulfilled'
+      ? meetsMinimumVersion(
+          combinedProcessOutput(claudeVersion.value),
+          CLAUDE_MINIMUM_VERSION,
+        )
+      : false;
+  if (claudeVersionMeetsMinimum === false) {
+    passed = false;
+    lines.push(
+      `Claude hidden required flags (${CLAUDE_REQUIRED_HIDDEN_FLAGS.join(', ')}): ` +
+        `unsupported below Claude Code ${CLAUDE_MINIMUM_VERSION}`,
     );
-  const claudeCapabilities =
-    claudeHelp.status === 'fulfilled' &&
-    ['--json-schema', '--permission-mode', '--allowedTools'].every((flag) =>
-      combinedProcessOutput(claudeHelp.value).includes(flag),
+  } else if (claudeVersionMeetsMinimum === undefined) {
+    // The version floor is the only check standing behind these flags, so an
+    // unreadable version means compatibility was never established. Reporting
+    // that as a pass would be the silent failure this check exists to prevent.
+    passed = false;
+    lines.push(
+      `Claude hidden required flags (${CLAUDE_REQUIRED_HIDDEN_FLAGS.join(', ')}): ` +
+        'unverified, could not read a version number',
     );
-  passed &&= codexCapabilities && claudeCapabilities;
-  lines.push(
-    `Codex capabilities: ${codexCapabilities ? 'compatible' : 'missing required flags'}`,
-  );
-  lines.push(
-    `Claude capabilities: ${claudeCapabilities ? 'compatible' : 'missing required flags'}`,
-  );
+  } else {
+    lines.push(
+      `Claude hidden required flags (${CLAUDE_REQUIRED_HIDDEN_FLAGS.join(', ')}): ` +
+        `covered by Claude Code >= ${CLAUDE_MINIMUM_VERSION}`,
+    );
+  }
 
   // Optional flags vary between provider releases and are used only when the
   // installed CLI advertises them, so a missing one is reported, never fatal.
-  const claudeHelpText =
+  const claudeAdvertised =
     claudeHelp.status === 'fulfilled'
-      ? combinedProcessOutput(claudeHelp.value)
-      : '';
+      ? parseAdvertisedFlags(combinedProcessOutput(claudeHelp.value))
+      : new Set<string>();
   const optional = Object.entries(CLAUDE_OPTIONAL_FLAGS).map(
-    ([, flag]) => `${flag} ${claudeHelpText.includes(flag) ? 'yes' : 'no'}`,
+    ([, flag]) => `${flag} ${claudeAdvertised.has(flag) ? 'yes' : 'no'}`,
   );
   lines.push(`Claude optional flags: ${optional.join(', ')}`);
 

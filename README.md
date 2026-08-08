@@ -452,6 +452,7 @@ chat                     Open interactive human-guided chat mode
 --claude-effort <level>  Claude reasoning effort: low, medium, high, xhigh, max
 --screen-reader          Use screen-reader-friendly, append-only output
 --no-color               Disable Agent Bridge color output
+--ui <mode>              Chat interface: plain, enhanced, or auto
 --project-config <path>  Alternate project configuration
 --trust-project-config   Run configured verification commands
 --output <directory>     Override run-data storage
