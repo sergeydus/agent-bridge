@@ -73,6 +73,45 @@ test('migrates a saved chat without inventing a color choice', async () => {
   }
 });
 
+test('rejects legacy chats whose version-specific fields were never valid', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-bad-'));
+  try {
+    const store = new ChatSessionStore(directory);
+    const write = async (
+      id: string,
+      legacy: Record<string, unknown>,
+    ): Promise<void> => {
+      const { color, ...rest } = makeSession(id);
+      void color;
+      await writeFile(
+        join(directory, `${id}.json`),
+        JSON.stringify({ ...rest, version: 2, ...legacy }),
+      );
+    };
+
+    // Migration drops `noColor`, so an unchecked malformed value would be
+    // laundered into an accepted record claiming no color choice was made.
+    await write('chat-bad-nocolor', { noColor: 'yes' });
+    await assert.rejects(() => store.load('chat-bad-nocolor'), /Invalid saved/);
+
+    // `color` did not exist before version 3, so a version 2 record carrying it
+    // was never legitimate and must not pass by surviving the migration.
+    await write('chat-early-color', { color: true });
+    await assert.rejects(() => store.load('chat-early-color'), /Invalid saved/);
+
+    // A version 1 record is held to the same rule.
+    const { color, ...rest } = makeSession('chat-v1-color');
+    void color;
+    await writeFile(
+      join(directory, 'chat-v1-color.json'),
+      JSON.stringify({ ...rest, version: 1, color: false }),
+    );
+    await assert.rejects(() => store.load('chat-v1-color'), /Invalid saved/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('persists private chat state and a readable transcript', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-state-'));
   try {

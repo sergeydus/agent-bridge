@@ -24,6 +24,11 @@
   instead of recording a preference that would outlive the mode.
 - Fixed a resumed chat with no saved color choice skipping the stored global
   preference and falling straight through to automatic detection.
+- Fixed chat migration accepting legacy records whose version-specific fields
+  were never valid. Migration transforms a record before validation runs, so a
+  malformed `noColor` was dropped and presented as "no choice", and a version 1
+  or 2 record carrying the version 3 `color` property was let through. Both are
+  now rejected as invalid saved chats.
 - Removed the redundant `--until-agreement` from chat-launched review
   workflows, which `--require-agreement` already implies.
 - Removed Codex's per-call response-schema and last-message files after each

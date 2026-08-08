@@ -287,8 +287,31 @@ function migratedColorChoice(noColor: unknown): boolean | undefined {
   return noColor === true ? false : undefined;
 }
 
+/**
+ * Rejects legacy records whose version-specific fields were never valid, so a
+ * migration cannot launder them into an acceptable current record. Migration
+ * transforms a record before validation runs, so anything it drops or rewrites
+ * has to be checked here instead: dropping a malformed `noColor` would present
+ * it as "no choice was made", and `color` did not exist before version 3, so a
+ * record carrying it was never a legitimate version 1 or 2 checkpoint.
+ */
+function hasValidLegacyFields(value: Record<string, unknown>): boolean {
+  return (
+    !('color' in value) &&
+    (!('noColor' in value) || typeof value.noColor === 'boolean')
+  );
+}
+
 function migrateChatSession(value: unknown): unknown {
   if (!isRecord(value)) {
+    return value;
+  }
+  // An unmigrated version is rejected by validation, which is what an invalid
+  // legacy record should get rather than a silently repaired one.
+  if (
+    (value.version === 1 || value.version === 2) &&
+    !hasValidLegacyFields(value)
+  ) {
     return value;
   }
   let migrated = value;
