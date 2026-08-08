@@ -30,6 +30,7 @@ import {
   createPlainTerminalRenderer,
   formatAgentResponse,
   PresentationController,
+  resolveColorChoice,
   resolvePresentation,
   type PresentationPreferences,
 } from './presentation.ts';
@@ -468,7 +469,7 @@ function createSession(
     timeoutMinutes: options.timeoutMinutes,
     noTranscript: options.noTranscript,
     screenReader: options.screenReader,
-    noColor: options.noColor,
+    noColor: options.color === undefined ? undefined : !options.color,
     ui: options.ui,
     codexModel: options.codexModel,
     claudeModel: options.claudeModel,
@@ -531,12 +532,19 @@ export async function runInteractiveChat({
       if (!options.screenReaderExplicit) {
         options.screenReader = session.screenReader ?? false;
       }
-      options.noColor ||= session.noColor ?? false;
+      // An explicit flag wins; otherwise the chat keeps the presentation it was
+      // saved with, so reopening a session looks like leaving it did.
+      options.color = resolveColorChoice({
+        explicit: options.colorExplicit ? options.color : undefined,
+        savedSession:
+          session.noColor === undefined ? undefined : !session.noColor,
+      });
       if (!options.uiExplicit) {
         options.ui = session.ui;
       }
       session.screenReader = options.screenReader;
-      session.noColor = options.noColor;
+      session.noColor =
+        options.color === undefined ? undefined : !options.color;
       session.ui = options.ui;
       await refreshProjectKind(session);
       session.status = 'active';
@@ -545,7 +553,7 @@ export async function runInteractiveChat({
     }
     const presentation = resolvePresentation({
       screenReader: options.screenReader,
-      noColor: options.noColor,
+      color: options.color,
     });
     const uiResolution = resolveUiMode(
       {
@@ -975,7 +983,9 @@ It stops early if both agents agree.
             claudeEffort: session.claudeEffort,
             noTranscript: session.noTranscript,
             screenReader: session.screenReader ?? options.screenReader,
-            noColor: session.noColor ?? options.noColor,
+            // The session's presentation already went through the precedence
+            // chain at startup, so the child inherits the same resolved choice.
+            color: options.color,
             fromHead: false,
             trustProjectConfig: false,
           };

@@ -159,9 +159,23 @@ screen-reader CLI flag when the installed version offers it; `--doctor` reports
 which optional provider flags were detected. Live text deltas are buffered into
 complete semantic
 updates instead of being announced character by character. Use `--no-color`
-when you only want to disable Agent Bridge color output. The standard
-`NO_COLOR` environment variable is honored. Color is never the only way an
+when you only want to disable Agent Bridge color output, or `--color` to turn
+it back on; the two are mutually exclusive. Color is never the only way an
 agent or decision is identified.
+
+Color is decided by the most specific source that expresses a choice:
+
+1. `--color` or `--no-color` on the current command line;
+2. the presentation saved with the chat being resumed;
+3. the preference stored by the wizard;
+4. automatic detection, which enables color for an interactive terminal unless
+   the standard `NO_COLOR` environment variable is set.
+
+So a saved preference is a preference, not a permanent state — a chat saved
+with `--no-color` can be reopened with `--color`. Two rules override all of the
+above: screen-reader mode never uses color, and color is never written to a
+redirected stream, because escape sequences would corrupt output meant for
+another reader.
 
 Interactive terminals use the enhanced conversation view automatically when
 capability checks pass:
@@ -451,6 +465,7 @@ chat                     Open interactive human-guided chat mode
 --codex-effort <level>   Codex reasoning effort: low, medium, high, xhigh, max
 --claude-effort <level>  Claude reasoning effort: low, medium, high, xhigh, max
 --screen-reader          Use screen-reader-friendly, append-only output
+--color                  Force Agent Bridge color output on
 --no-color               Disable Agent Bridge color output
 --ui <mode>              Chat interface: plain, enhanced, or auto
 --project-config <path>  Alternate project configuration

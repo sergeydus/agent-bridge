@@ -10,6 +10,7 @@ import type { ReasoningEffort } from './core.ts';
 import { initializeRepository, repositoryHasHead } from './git.ts';
 import type { AppPaths } from './paths.ts';
 import type { BridgeOptions } from './options.ts';
+import { resolveColorChoice } from './presentation.ts';
 import { resolveProject, type SelectedProject } from './project.ts';
 import { workingTreeStatus } from './snapshot.ts';
 import { RunStateStore } from './state.ts';
@@ -71,17 +72,21 @@ ${presentations
     choices,
     defaultPresentation,
   );
+  // The wizard's own answer is not a command-line flag, so it never overrides
+  // an explicit `--color` or `--no-color` given for this run.
+  const chosenColor = (wanted: boolean): boolean =>
+    options.colorExplicit ? (options.color ?? wanted) : wanted;
   if (enhancedAvailable && presentation === '2') {
     options.screenReader = false;
-    options.noColor = false;
+    options.color = chosenColor(true);
     options.ui = 'auto';
   } else if (presentation === String(presentations.length)) {
     options.screenReader = true;
-    options.noColor = true;
+    options.color = chosenColor(false);
     options.ui = 'plain';
   } else {
     options.screenReader = false;
-    options.noColor = false;
+    options.color = chosenColor(true);
     options.ui = 'plain';
   }
 }
@@ -96,7 +101,12 @@ export async function configureAccessibility(
     if (!options.screenReaderExplicit) {
       options.screenReader = config.presentation.screenReader;
     }
-    options.noColor ||= config.presentation.noColor;
+    // An explicit flag wins over the stored preference, so a saved `--no-color`
+    // choice can be reversed with `--color` instead of becoming permanent.
+    options.color = resolveColorChoice({
+      explicit: options.colorExplicit ? options.color : undefined,
+      savedGlobal: !config.presentation.noColor,
+    });
     if (!options.uiExplicit) {
       options.ui = config.presentation.ui;
     }
@@ -109,7 +119,7 @@ export async function configureAccessibility(
     );
     options.screenReader = ['y', 'yes'].includes(accessible);
     if (options.screenReader) {
-      options.noColor = true;
+      options.color ??= false;
       options.ui = 'plain';
     }
   }
@@ -117,12 +127,14 @@ export async function configureAccessibility(
     options.screenReader = false;
   }
   if (options.screenReader) {
-    options.noColor = true;
+    options.color = options.colorExplicit ? options.color : false;
     options.ui = 'plain';
   }
   await configStore.rememberPresentation({
     screenReader: options.screenReader,
-    noColor: options.noColor,
+    // The stored preference is a plain boolean, so an unstated choice is
+    // recorded as wanting color; detection still applies at render time.
+    noColor: options.color === false,
     ui: options.ui,
   });
 }
@@ -221,7 +233,7 @@ export function presentationLabel(options: BridgeOptions): string {
   if (options.screenReader) {
     return 'screen-reader-friendly';
   }
-  const colorSuffix = options.noColor ? ', no color' : '';
+  const colorSuffix = options.color === false ? ', no color' : '';
   if (options.ui === 'enhanced') {
     return `enhanced${colorSuffix}`;
   }
@@ -591,7 +603,7 @@ async function configureAdvancedSettings(
   }
   await configStore.rememberPresentation({
     screenReader: options.screenReader,
-    noColor: options.noColor,
+    noColor: options.color === false,
     ui: options.ui,
   });
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
@@ -192,6 +192,13 @@ export function codexArguments(
 export class CodexProvider implements AgentProvider {
   readonly name = 'codex';
   readonly label = 'Codex';
+  // Node 22.6 strips types without accepting `readonly` or `?` on a `#` field.
+  #runProcess: typeof runProcess;
+
+  /** The launcher is injected only so per-call cleanup stays unit-testable. */
+  constructor(processRunner: typeof runProcess = runProcess) {
+    this.#runProcess = processRunner;
+  }
 
   version(): Promise<ProcessResult> {
     return runProcess('codex', ['--version'], { timeoutMs: 10_000 });
@@ -221,32 +228,47 @@ export class CodexProvider implements AgentProvider {
       };
     }
 
-    await writeFile(
-      schemaPath,
-      `${JSON.stringify(schemaFor(options.responseKind), null, 2)}\n`,
-      { mode: 0o600 },
-    );
-    const events = new CodexEventStream(options.responseKind, options.onEvent);
-    await runProcess('codex', args, {
-      cwd: options.cwd,
-      input: prompt,
-      inheritStderr: options.verbose,
-      timeoutMs: options.timeoutMs,
-      signal: options.signal,
-      maxOutputChars: MAX_PROVIDER_PROCESS_OUTPUT_CHARS,
-      captureStdout: false,
-      onStdoutChunk: (chunk) => events.push(chunk),
-    });
-    events.finish();
-    if ((await stat(outputPath)).size > MAX_PROVIDER_RESPONSE_BYTES) {
-      throw new Error(
-        `Codex response exceeded ${MAX_PROVIDER_RESPONSE_BYTES} bytes.`,
+    try {
+      await writeFile(
+        schemaPath,
+        `${JSON.stringify(schemaFor(options.responseKind), null, 2)}\n`,
+        { mode: 0o600 },
       );
+      const events = new CodexEventStream(
+        options.responseKind,
+        options.onEvent,
+      );
+      await this.#runProcess('codex', args, {
+        cwd: options.cwd,
+        input: prompt,
+        inheritStderr: options.verbose,
+        timeoutMs: options.timeoutMs,
+        signal: options.signal,
+        maxOutputChars: MAX_PROVIDER_PROCESS_OUTPUT_CHARS,
+        captureStdout: false,
+        onStdoutChunk: (chunk) => events.push(chunk),
+      });
+      events.finish();
+      if ((await stat(outputPath)).size > MAX_PROVIDER_RESPONSE_BYTES) {
+        throw new Error(
+          `Codex response exceeded ${MAX_PROVIDER_RESPONSE_BYTES} bytes.`,
+        );
+      }
+      return parseProviderResponse(
+        (await readFile(outputPath, 'utf8')).trim(),
+        options.responseKind,
+      );
+    } finally {
+      // These are per-call scratch files holding the prompt's response schema
+      // and Codex's last message. The run's temporary directory is only removed
+      // when the whole run ends, so a long run would otherwise accumulate one
+      // pair per turn. Cleanup runs on success, failure, and cancellation
+      // alike, and always after the response has been read.
+      await Promise.all([
+        rm(schemaPath, { force: true }).catch(() => {}),
+        rm(outputPath, { force: true }).catch(() => {}),
+      ]);
     }
-    return parseProviderResponse(
-      (await readFile(outputPath, 'utf8')).trim(),
-      options.responseKind,
-    );
   }
 }
 

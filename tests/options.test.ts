@@ -111,9 +111,54 @@ test('parses accessible presentation and validates model names', () => {
   );
   assert.equal(options.screenReader, true);
   assert.equal(options.screenReaderExplicit, true);
-  assert.equal(options.noColor, true);
+  assert.equal(options.color, false);
   assert.equal(options.codexModel, 'codex-test');
   assert.equal(options.claudeModel, 'claude-test');
+
+  const colored = parseArgs(['--color'], {
+    initialCwd: temporaryDirectory,
+    defaultOutput: join(temporaryDirectory, 'runs'),
+  });
+  assert.equal(colored.color, true);
+  assert.equal(colored.colorExplicit, true);
+
+  const uncolored = parseArgs(['--no-color'], {
+    initialCwd: temporaryDirectory,
+    defaultOutput: join(temporaryDirectory, 'runs'),
+  });
+  assert.equal(uncolored.color, false);
+  assert.equal(uncolored.colorExplicit, true);
+
+  // No flag leaves the choice unstated so detection can decide.
+  const undecided = parseArgs([], {
+    initialCwd: temporaryDirectory,
+    defaultOutput: join(temporaryDirectory, 'runs'),
+  });
+  assert.equal(undecided.color, undefined);
+  assert.equal(undecided.colorExplicit, false);
+
+  for (const conflicting of [
+    ['--color', '--no-color'],
+    ['--no-color', '--color'],
+  ]) {
+    assert.throws(
+      () =>
+        parseArgs(conflicting, {
+          initialCwd: temporaryDirectory,
+          defaultOutput: join(temporaryDirectory, 'runs'),
+        }),
+      /--color or --no-color, not both/,
+    );
+  }
+
+  // `--screen-reader` implies no color without claiming an explicit choice, so
+  // it must not collide with a stated flag.
+  const readerThenColor = parseArgs(['--screen-reader', '--color'], {
+    initialCwd: temporaryDirectory,
+    defaultOutput: join(temporaryDirectory, 'runs'),
+  });
+  assert.equal(readerThenColor.color, true);
+  assert.equal(readerThenColor.colorExplicit, true);
 
   assert.throws(
     () =>

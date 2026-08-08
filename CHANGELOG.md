@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- Fixed `/ask <agent>` and `/both` collapsing runs of whitespace in the message,
+  which reformatted pasted code. The command and its target are still located by
+  splitting on whitespace, but the message keeps the spacing that was typed.
+- Added `--color` as the explicit counterpart to `--no-color`, and gave both a
+  documented precedence chain: an explicit flag, then the presentation saved
+  with a resumed chat, then the wizard's stored preference, then automatic
+  detection. A saved `--no-color` is now a default rather than a permanent
+  state. Screen-reader mode and a redirected stream still override every layer,
+  and passing both flags is rejected.
+- Removed the redundant `--until-agreement` from chat-launched review
+  workflows, which `--require-agreement` already implies.
+- Removed Codex's per-call response-schema and last-message files after each
+  call instead of leaving them until the whole run ends, on success, failure,
+  and cancellation alike.
+
 - Fixed a message sent while a peer response was still outstanding, after a
   cancelled exchange, being folded into that interrupted exchange and drawing
   one agent's reply instead of two. A targeted message in the same state ended

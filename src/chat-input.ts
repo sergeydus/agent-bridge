@@ -50,6 +50,26 @@ function parseAgent(value: string | undefined): AgentName | undefined {
     : undefined;
 }
 
+/**
+ * Returns everything after the given leading tokens with its original spacing.
+ * Only the separators between the command tokens are consumed, so runs of
+ * spaces and indentation inside the message survive untouched.
+ */
+function messageAfter(input: string, leadingTokens: string[]): string {
+  let offset = 0;
+  for (const token of leadingTokens) {
+    if (!token) {
+      continue;
+    }
+    const index = input.indexOf(token, offset);
+    if (index < 0) {
+      return '';
+    }
+    offset = index + token.length;
+  }
+  return input.slice(offset).trim();
+}
+
 export function parseChatInput(input: string): ChatCommand {
   const trimmed = input.trim();
   if (!trimmed) {
@@ -88,7 +108,10 @@ export function parseChatInput(input: string): ChatCommand {
   }
   if (command === '/ask') {
     const target = parseAgent(rawArgument);
-    const text = extra.join(' ').trim();
+    // Splitting on whitespace is fine for locating the command and its target,
+    // but the message itself must keep the spacing the user typed: rejoining
+    // the split pieces would flatten indentation in pasted code.
+    const text = messageAfter(trimmed, [rawCommand, rawArgument ?? '']);
     if (!target || !text) {
       return {
         kind: 'invalid',
@@ -103,7 +126,7 @@ export function parseChatInput(input: string): ChatCommand {
         };
   }
   if (command === '/both') {
-    const text = arguments_.join(' ').trim();
+    const text = messageAfter(trimmed, [rawCommand]);
     if (!text) {
       return {
         kind: 'invalid',

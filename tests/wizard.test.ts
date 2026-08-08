@@ -51,7 +51,7 @@ test('wizard configures accessible presentation and optional models', async () =
   await configureModels(questioner, options);
 
   assert.equal(options.screenReader, true);
-  assert.equal(options.noColor, true);
+  assert.equal(options.color, false);
   assert.equal(options.codexModel, 'codex-test');
   assert.equal(options.claudeModel, 'claude-test');
   assert.equal(options.codexEffort, 'high');
@@ -226,6 +226,41 @@ test('an explicit wizard UI overrides a saved screen-reader preference', async (
     await configureAccessibility(new ScriptedQuestioner([]), options, store);
     assert.equal(options.screenReader, false);
     assert.equal(options.ui, 'auto');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('an explicit color flag outranks the stored global preference', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-color-'));
+  try {
+    const store = new UserConfigStore(join(directory, 'config.json'));
+    await store.rememberPresentation({
+      screenReader: false,
+      noColor: true,
+      ui: 'plain',
+    });
+    const merge = async (argv: string[]): Promise<boolean | undefined> => {
+      const options = parseArgs(argv, {
+        initialCwd: directory,
+        defaultOutput: join(directory, 'runs'),
+      });
+      await configureAccessibility(new ScriptedQuestioner([]), options, store);
+      return options.color;
+    };
+
+    // The stored preference applies when nothing was stated on this run.
+    assert.equal(await merge(['--wizard']), false);
+
+    // An explicit flag outranks it, so a saved `--no-color` is a preference
+    // rather than a permanent state, and the reversal is itself persisted.
+    assert.equal(await merge(['--wizard', '--color']), true);
+    assert.equal((await store.load()).presentation?.noColor, false);
+
+    // The stored preference now says color, and `--no-color` reverses it back.
+    assert.equal(await merge(['--wizard']), true);
+    assert.equal(await merge(['--wizard', '--no-color']), false);
+    assert.equal((await store.load()).presentation?.noColor, true);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

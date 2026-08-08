@@ -113,7 +113,22 @@ conflict rather than an unrelated provider error.
 `--screen-reader` selects semantic, append-only output without color or
 decorative separators. It uses descriptive prompt labels and forwards
 Claude's native accessibility flag. `--no-color` disables bridge color without
-changing the rest of the standard layout. `NO_COLOR` is also honored.
+changing the rest of the standard layout, and `--color` turns it back on; the
+two are mutually exclusive.
+
+Color is resolved by precedence, most specific source first: an explicit
+`--color` or `--no-color` on this command line, then the presentation saved
+with the resumed chat, then the wizard's stored preference, then automatic
+detection, which honors `NO_COLOR` and requires an interactive terminal.
+
+A resumed chat therefore reopens looking the way it was left, but the saved
+choice is a default rather than a lock: a chat saved with `--no-color` reopens
+in color when `--color` is passed, and the reversal is saved in turn. The same
+chain runs in the wizard against the stored global preference, so neither entry
+point can strand a choice. A chat-launched workflow inherits the parent's
+already-resolved choice as an explicit flag, so the child cannot decide
+differently. Screen-reader mode and a redirected stream still override
+everything above.
 
 New chats default to `--ui auto`, which uses the alternate-screen interface
 only when stdin and stdout are interactive, `TERM` is usable, and the terminal

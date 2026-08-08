@@ -26,7 +26,14 @@ export interface BridgeOptions {
   noTranscript: boolean;
   screenReader: boolean;
   screenReaderExplicit: boolean;
-  noColor: boolean;
+  /**
+   * Whether color is wanted, after the precedence chain in `resolveColorChoice`
+   * has been applied. `undefined` means no layer expressed a choice, leaving
+   * the decision to automatic terminal detection.
+   */
+  color?: boolean;
+  /** True when `--color` or `--no-color` was passed on this command line. */
+  colorExplicit: boolean;
   ui: UiMode;
   uiExplicit: boolean;
   trustProjectConfig: boolean;
@@ -91,6 +98,7 @@ Options:
   --output <directory>    Override transcript and workspace storage
   --no-transcript         Remove completed run or chat transcripts
   --screen-reader         Use append-only, screen-reader-friendly presentation
+  --color                 Force Agent Bridge color output on
   --no-color              Disable Agent Bridge color output
   --ui <mode>             Chat interface: plain, enhanced, or auto
   --project-config <path> Use a specific .agent-bridge.json configuration
@@ -137,7 +145,7 @@ export function parseArgs(
     noTranscript: false,
     screenReader: false,
     screenReaderExplicit: false,
-    noColor: false,
+    colorExplicit: false,
     ui: 'auto',
     uiExplicit: false,
     trustProjectConfig: false,
@@ -269,10 +277,24 @@ export function parseArgs(
       '--screen-reader': (): void => {
         options.screenReader = true;
         options.screenReaderExplicit = true;
-        options.noColor = true;
+        // Screen-reader mode always renders without color, but that is a
+        // consequence of the mode rather than an explicit color choice, so it
+        // must not outrank a saved preference the user may return to later.
+        options.color ??= false;
+      },
+      '--color': (): void => {
+        if (options.colorExplicit && options.color === false) {
+          throw new Error('Use either --color or --no-color, not both');
+        }
+        options.color = true;
+        options.colorExplicit = true;
       },
       '--no-color': (): void => {
-        options.noColor = true;
+        if (options.colorExplicit && options.color === true) {
+          throw new Error('Use either --color or --no-color, not both');
+        }
+        options.color = false;
+        options.colorExplicit = true;
       },
       '--trust-project-config': (): void => {
         options.trustProjectConfig = true;

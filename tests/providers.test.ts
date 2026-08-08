@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
+
+import { ProcessAbortError } from '../src/process.ts';
 
 import {
   assertProvidersAvailable,
@@ -382,6 +387,63 @@ test('reads advertised flags from a CLI help listing', async () => {
   ]);
   assert.ok(flags.has('--safe-mode'));
   assert.ok(!flags.has('--ax-screen-reader'));
+});
+
+test('Codex removes its per-call scratch files however the call ends', async () => {
+  const outcomes = ['success', 'failure', 'cancellation'] as const;
+  for (const outcome of outcomes) {
+    const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-codex-'));
+    try {
+      const provider = new CodexProvider(async (_command, args) => {
+        // Codex writes its last message to the path it was given.
+        const outputPath = args[args.indexOf('--output-last-message') + 1];
+        assert.ok(outputPath);
+        await writeFile(
+          outputPath,
+          JSON.stringify({ decision: 'done', text: 'finished' }),
+        );
+        if (outcome === 'failure') {
+          throw new Error('codex exited with 1');
+        }
+        if (outcome === 'cancellation') {
+          throw new ProcessAbortError();
+        }
+        return { stdout: '', stderr: '', exitCode: 0 };
+      });
+      const run = provider.run('task', {
+        ...dryRunOptions,
+        dryRun: false,
+        tempDirectory: directory,
+      });
+
+      if (outcome === 'success') {
+        // Cleanup must not run before the response has been read.
+        assert.deepEqual(await run, { text: 'finished', decision: 'done' });
+      } else {
+        await assert.rejects(run);
+      }
+      assert.deepEqual(
+        await readdir(directory),
+        [],
+        `${outcome} left scratch files behind`,
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a Codex dry run creates no scratch files at all', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-codex-dry-'));
+  try {
+    await new CodexProvider().run('task', {
+      ...dryRunOptions,
+      tempDirectory: directory,
+    });
+    assert.deepEqual(await readdir(directory), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test('retries transient read-only provider failures through the provider interface', async () => {

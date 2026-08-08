@@ -198,6 +198,54 @@ test('parses interactive commands without accepting arbitrary actions', () => {
     target: 'both',
     text: 'compare the approaches',
   });
+});
+
+test('slash commands keep the spacing the user typed in the message', () => {
+  // Splitting on whitespace to find the command must not reformat the message:
+  // pasted code carries meaning in its indentation and alignment.
+  const indented = 'if (x) {\n    return 1;\n}';
+  assert.deepEqual(parseChatInput(`/both ${indented}`), {
+    kind: 'message',
+    target: 'both',
+    text: indented,
+  });
+  assert.deepEqual(parseChatInput(`/ask codex ${indented}`), {
+    kind: 'message',
+    target: 'codex',
+    text: indented,
+  });
+  assert.deepEqual(parseChatInput('/both look   at    this'), {
+    kind: 'message',
+    target: 'both',
+    text: 'look   at    this',
+  });
+  assert.deepEqual(parseChatInput('/ask claude look   at    this'), {
+    kind: 'message',
+    target: 'claude',
+    text: 'look   at    this',
+  });
+  // Extra spacing between the command tokens themselves is still consumed.
+  assert.deepEqual(parseChatInput('/ask   codex   spaced  out'), {
+    kind: 'message',
+    target: 'codex',
+    text: 'spaced  out',
+  });
+  // The mention form already preserved spacing and must keep doing so.
+  assert.deepEqual(parseChatInput('@both look   at    this'), {
+    kind: 'message',
+    target: 'both',
+    text: 'look   at    this',
+  });
+});
+
+test('an unusable slash message is still rejected', () => {
+  assert.equal(parseChatInput('/ask codex').kind, 'invalid');
+  assert.equal(parseChatInput('/ask').kind, 'invalid');
+  assert.equal(parseChatInput('/both').kind, 'invalid');
+  assert.equal(parseChatInput('/ask nobody hello').kind, 'invalid');
+});
+
+test('parses the remaining chat commands', () => {
   assert.deepEqual(parseChatInput('/implement claude'), {
     kind: 'workflow',
     mode: 'fixed',
@@ -261,6 +309,65 @@ test('builds an isolated child workflow as argument arrays', () => {
   assert.ok(args.includes('--screen-reader'));
   assert.ok(!args.includes('chat'));
   assert.ok(!args.includes('--no-isolation'));
+});
+
+test('a chat-launched review names no redundant or role flags', () => {
+  const temporaryDirectory = tmpdir();
+  const options = parseArgs(['chat'], {
+    initialCwd: temporaryDirectory,
+    defaultOutput: join(temporaryDirectory, 'bridge-runs'),
+  });
+  const args = buildWorkflowArguments(
+    {
+      mode: 'review',
+      task: 'context',
+      projectRoot: temporaryDirectory,
+      options,
+    },
+    join(temporaryDirectory, 'task.md'),
+    'launcher',
+  );
+
+  assert.ok(args.includes('--require-agreement'));
+  // `--require-agreement` already implies it, and the child proves that below.
+  assert.ok(!args.includes('--until-agreement'));
+  assert.ok(!args.includes('--implementer'));
+  assert.ok(!args.includes('--collaborative'));
+
+  // The child parses these arguments, so assert the implication really holds
+  // rather than trusting the flag name.
+  const childOptions = parseArgs(args.slice(1), {
+    initialCwd: temporaryDirectory,
+    defaultOutput: join(temporaryDirectory, 'bridge-runs'),
+  });
+  assert.equal(childOptions.requireAgreement, true);
+  assert.equal(childOptions.untilAgreement, true);
+});
+
+test('a chat-launched workflow forwards the resolved color choice', () => {
+  const temporaryDirectory = tmpdir();
+  const build = (color?: boolean): string[] => {
+    const options = parseArgs(['chat'], {
+      initialCwd: temporaryDirectory,
+      defaultOutput: join(temporaryDirectory, 'bridge-runs'),
+    });
+    return buildWorkflowArguments(
+      {
+        mode: 'review',
+        task: 'context',
+        projectRoot: temporaryDirectory,
+        options: { ...options, color },
+      },
+      join(temporaryDirectory, 'task.md'),
+      'launcher',
+    );
+  };
+
+  assert.ok(build(false).includes('--no-color'));
+  assert.ok(build(true).includes('--color'));
+  // An unstated choice leaves the child free to detect its own terminal.
+  assert.ok(!build(undefined).includes('--color'));
+  assert.ok(!build(undefined).includes('--no-color'));
 });
 
 test('runs paired exchanges, autonomous agreement, and a linked workflow', async () => {
@@ -932,6 +1039,46 @@ test('resume restores the saved chat interface unless explicitly overridden', as
       terminalCapabilities: capabilities,
     });
     assert.equal(terminal.output.join('').includes('\u001B[?1049h'), true);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('an explicit --color reverses a chat saved with --no-color', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const open = async (argv: string[]): Promise<void> => {
+      await runInteractiveChat({
+        options: parseArgs(argv, {
+          initialCwd: project,
+          defaultOutput: paths.runsDirectory,
+        }),
+        appPaths: paths,
+        providers: fakeProviders([], []),
+        terminal: new ScriptedTerminal(['/pause']),
+      });
+    };
+
+    await open(['chat', '--cwd', project, '--no-color']);
+    const saved = await store.latest();
+    assert.ok(saved);
+    assert.equal(saved.noColor, true);
+
+    // Without a flag the saved choice still governs the reopened session.
+    await open(['chat', '--resume', saved.id]);
+    assert.equal((await store.load(saved.id)).noColor, true);
+
+    // An explicit flag outranks it, and the reversal is what gets saved.
+    await open(['chat', '--resume', saved.id, '--color']);
+    assert.equal((await store.load(saved.id)).noColor, false);
+
+    // ...and is itself reversible, so neither choice becomes permanent.
+    await open(['chat', '--resume', saved.id, '--no-color']);
+    assert.equal((await store.load(saved.id)).noColor, true);
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
