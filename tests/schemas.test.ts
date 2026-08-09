@@ -79,3 +79,33 @@ test('every local schema reference resolves to an existing definition', async ()
     }
   }
 });
+
+test('chat session schema exposes the version 4 exchange unions', async () => {
+  const schema = JSON.parse(
+    await readFile(
+      resolve(root, 'schemas', 'chat-session.schema.json'),
+      'utf8',
+    ),
+  ) as {
+    properties: Record<string, Record<string, unknown>>;
+    $defs: Record<string, Record<string, unknown>>;
+  };
+
+  assert.equal(schema.properties.version?.const, 4);
+  assert.equal(
+    schema.properties.pendingExchange?.$ref,
+    '#/$defs/pendingExchange',
+  );
+  assert.equal(
+    schema.properties.latestPairedExchange?.$ref,
+    '#/$defs/recordedExchange',
+  );
+  assert.deepEqual(schema.$defs.pendingExchange?.oneOf, [
+    { $ref: '#/$defs/awaitingPeerExchange' },
+    { $ref: '#/$defs/awaitingConfirmationExchange' },
+  ]);
+  assert.deepEqual(schema.$defs.recordedExchange?.oneOf, [
+    { $ref: '#/$defs/settledExchange' },
+    { $ref: '#/$defs/abandonedExchange' },
+  ]);
+});

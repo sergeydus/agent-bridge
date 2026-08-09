@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Advanced interactive chat checkpoints to version 4 with validated staged
+  pending exchanges and explicit open, confirmed, or abandoned exchange
+  provenance. Versions 1 through 3 migrate conservatively; ambiguous legacy
+  pending metadata is dropped without losing messages or session status and
+  emits a bounded recovery warning. Linked workflow commands now finish any
+  outstanding peer response before preflight, so they cannot append a system
+  message behind a stale pending reference.
 - Kept interactive-chat and workflow-handoff history as valid JSON under the
   prompt budget by omitting whole messages with an explicit count and marking
   unavoidable single-message text truncation. Agent prompts now explain both

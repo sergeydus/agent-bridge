@@ -8,12 +8,14 @@ import {
   ChatSessionStore,
   formatChatTranscript,
   isChatSession,
+  LEGACY_PENDING_EXCHANGE_WARNING,
   type ChatSession,
+  type ChatMessage,
 } from '../src/chat-state.ts';
 
 function makeSession(id = 'chat-test'): ChatSession {
   return {
-    version: 3,
+    version: 4,
     id,
     createdAt: '2026-07-29T00:00:00.000Z',
     updatedAt: '2026-07-29T00:00:00.000Z',
@@ -38,6 +40,35 @@ function makeSession(id = 'chat-test'): ChatSession {
   };
 }
 
+function message(
+  sequence: number,
+  role: ChatMessage['role'],
+  decision?: ChatMessage['decision'],
+): ChatMessage {
+  return {
+    sequence,
+    createdAt: '2026-07-29T00:00:00.000Z',
+    role,
+    text: `${role} message ${sequence}`,
+    ...(decision === undefined ? {} : { decision }),
+  };
+}
+
+function versionThreeSession(
+  id: string,
+  status: ChatSession['status'],
+  messages: ChatMessage[],
+  pendingExchange?: Record<string, unknown>,
+): Record<string, unknown> {
+  return {
+    ...makeSession(id),
+    version: 3,
+    status,
+    messages,
+    ...(pendingExchange === undefined ? {} : { pendingExchange }),
+  };
+}
+
 test('migrates a saved chat without inventing a color choice', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-v2-'));
   try {
@@ -57,7 +88,7 @@ test('migrates a saved chat without inventing a color choice', async () => {
         }),
       );
       const session = await store.load(id);
-      assert.equal(session.version, 3);
+      assert.equal(session.version, 4);
       return 'color' in session ? session.color : 'absent';
     };
 
@@ -68,6 +99,112 @@ test('migrates a saved chat without inventing a color choice', async () => {
     // explicit color-on would make legacy chats start overriding NO_COLOR.
     assert.equal(await load('chat-default', false), 'absent');
     assert.equal(await load('chat-absent', undefined), 'absent');
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('migrates final version 3 pending responses by session status', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-v3-'));
+  try {
+    const store = new ChatSessionStore(directory);
+    const pending = {
+      firstAgent: 'codex',
+      secondAgent: 'claude',
+      firstMessageSequence: 2,
+    };
+    for (const status of ['active', 'paused'] as const) {
+      const id = `chat-${status}`;
+      await writeFile(
+        store.pathFor(id),
+        JSON.stringify(
+          versionThreeSession(
+            id,
+            status,
+            [message(1, 'user'), message(2, 'codex', 'continue')],
+            pending,
+          ),
+        ),
+      );
+      const migrated = await store.load(id);
+      assert.deepEqual(migrated.pendingExchange, {
+        stage: 'awaiting-peer',
+        ...pending,
+      });
+      assert.equal(migrated.latestPairedExchange, undefined);
+    }
+
+    const completedId = 'chat-completed';
+    await writeFile(
+      store.pathFor(completedId),
+      JSON.stringify(
+        versionThreeSession(
+          completedId,
+          'completed',
+          [message(1, 'user'), message(2, 'codex', 'done')],
+          pending,
+        ),
+      ),
+    );
+    const completed = await store.load(completedId);
+    assert.equal(completed.pendingExchange, undefined);
+    assert.deepEqual(completed.latestPairedExchange, {
+      firstAgent: 'codex',
+      secondAgent: 'claude',
+      firstMessageSequence: 2,
+      outcome: 'abandoned',
+    });
+
+    completed.status = 'active';
+    await store.save(completed);
+    assert.deepEqual(
+      (await store.load(completedId)).latestPairedExchange,
+      completed.latestPairedExchange,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('drops only ambiguous legacy pending metadata and warns once per load', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-v3-gap-'));
+  const warnings: string[] = [];
+  try {
+    const store = new ChatSessionStore(directory, (warning) =>
+      warnings.push(warning),
+    );
+    const id = 'chat-ambiguous-pending';
+    const messages = [
+      message(1, 'user'),
+      message(2, 'codex', 'continue'),
+      message(3, 'system'),
+    ];
+    await writeFile(
+      store.pathFor(id),
+      JSON.stringify(
+        versionThreeSession(id, 'completed', messages, {
+          firstAgent: 'codex',
+          secondAgent: 'claude',
+          firstMessageSequence: 2,
+        }),
+      ),
+    );
+
+    const direct = await store.load(id);
+    assert.equal(direct.version, 4);
+    assert.equal(direct.status, 'completed');
+    assert.deepEqual(direct.messages, messages);
+    assert.equal(direct.pendingExchange, undefined);
+    assert.equal(direct.latestPairedExchange, undefined);
+    assert.deepEqual(warnings, [LEGACY_PENDING_EXCHANGE_WARNING]);
+
+    assert.equal((await store.list())[0]?.id, id);
+    assert.equal(warnings.length, 2);
+    assert.equal((await store.latest())?.id, id);
+    assert.equal(warnings.length, 3);
+    assert.ok(
+      warnings.every((warning) => warning === LEGACY_PENDING_EXCHANGE_WARNING),
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -155,6 +292,200 @@ test('validates chat sequences, limits, and unexpected properties', () => {
   assert.equal(isChatSession({ ...session, unexpected: true }), false);
 });
 
+test('validates version 4 pending and recorded exchange invariants', () => {
+  const confirmedMessages = [
+    message(1, 'user'),
+    message(2, 'codex', 'done'),
+    message(3, 'claude', 'done'),
+    message(4, 'codex', 'done'),
+  ];
+  const confirmed = {
+    ...makeSession('chat-confirmed'),
+    messages: confirmedMessages,
+    latestPairedExchange: {
+      firstAgent: 'codex' as const,
+      secondAgent: 'claude' as const,
+      firstMessageSequence: 2,
+      secondMessageSequence: 3,
+      confirmationMessageSequence: 4,
+      outcome: 'confirmed' as const,
+    },
+  };
+  assert.equal(isChatSession(confirmed), true);
+  assert.equal(
+    isChatSession({
+      ...confirmed,
+      latestPairedExchange: {
+        ...confirmed.latestPairedExchange,
+        outcome: 'open',
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    isChatSession({
+      ...confirmed,
+      messages: confirmedMessages.map((entry) =>
+        entry.sequence === 4 ? { ...entry, decision: 'continue' } : entry,
+      ),
+      latestPairedExchange: {
+        ...confirmed.latestPairedExchange,
+        outcome: 'open',
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    isChatSession({
+      ...confirmed,
+      latestPairedExchange: {
+        ...confirmed.latestPairedExchange,
+        confirmationMessageSequence: undefined,
+      },
+    }),
+    false,
+  );
+
+  const awaitingPeer = {
+    ...makeSession('chat-awaiting-peer'),
+    messages: [message(1, 'user'), message(2, 'codex', 'continue')],
+    pendingExchange: {
+      stage: 'awaiting-peer' as const,
+      firstAgent: 'codex' as const,
+      secondAgent: 'claude' as const,
+      firstMessageSequence: 2,
+    },
+  };
+  assert.equal(isChatSession(awaitingPeer), true);
+  assert.equal(isChatSession({ ...awaitingPeer, status: 'completed' }), false);
+  assert.equal(
+    isChatSession({
+      ...awaitingPeer,
+      messages: [...awaitingPeer.messages, message(3, 'system')],
+    }),
+    false,
+  );
+  assert.equal(
+    isChatSession({
+      ...awaitingPeer,
+      pendingExchange: { ...awaitingPeer.pendingExchange, stage: 'unknown' },
+    }),
+    false,
+  );
+
+  const awaitingConfirmation = {
+    ...makeSession('chat-awaiting-confirmation'),
+    messages: [
+      message(1, 'user'),
+      message(2, 'codex', 'done'),
+      message(3, 'claude', 'done'),
+    ],
+    pendingExchange: {
+      stage: 'awaiting-confirmation' as const,
+      firstAgent: 'codex' as const,
+      secondAgent: 'claude' as const,
+      firstMessageSequence: 2,
+      secondMessageSequence: 3,
+    },
+  };
+  assert.equal(isChatSession(awaitingConfirmation), true);
+  assert.equal(
+    isChatSession({
+      ...awaitingConfirmation,
+      messages: awaitingConfirmation.messages.map((entry) =>
+        entry.sequence === 3 ? { ...entry, decision: 'continue' } : entry,
+      ),
+    }),
+    false,
+  );
+
+  const abandoned = {
+    ...makeSession('chat-abandoned'),
+    status: 'completed' as const,
+    messages: [message(1, 'user'), message(2, 'codex', 'continue')],
+    latestPairedExchange: {
+      firstAgent: 'codex' as const,
+      secondAgent: 'claude' as const,
+      firstMessageSequence: 2,
+      outcome: 'abandoned' as const,
+    },
+  };
+  assert.equal(isChatSession(abandoned), true);
+  assert.equal(
+    isChatSession({
+      ...abandoned,
+      latestPairedExchange: {
+        ...abandoned.latestPairedExchange,
+        secondAgent: 'codex',
+      },
+    }),
+    false,
+  );
+  const abandonedConfirmation = {
+    ...makeSession('chat-abandoned-confirmation'),
+    status: 'completed' as const,
+    messages: [
+      message(1, 'user'),
+      message(2, 'codex', 'done'),
+      message(3, 'claude', 'done'),
+    ],
+    latestPairedExchange: {
+      firstAgent: 'codex' as const,
+      secondAgent: 'claude' as const,
+      firstMessageSequence: 2,
+      secondMessageSequence: 3,
+      outcome: 'abandoned' as const,
+    },
+  };
+  assert.equal(isChatSession(abandonedConfirmation), true);
+  assert.equal(
+    isChatSession({
+      ...abandonedConfirmation,
+      messages: abandonedConfirmation.messages.map((entry) =>
+        entry.sequence === 2 ? { ...entry, decision: 'continue' } : entry,
+      ),
+    }),
+    false,
+  );
+
+  const laterPending = {
+    ...makeSession('chat-later-pending'),
+    messages: [
+      message(1, 'user'),
+      message(2, 'codex', 'continue'),
+      message(3, 'claude', 'done'),
+      message(4, 'user'),
+      message(5, 'claude', 'continue'),
+    ],
+    latestPairedExchange: {
+      firstAgent: 'codex' as const,
+      secondAgent: 'claude' as const,
+      firstMessageSequence: 2,
+      secondMessageSequence: 3,
+      outcome: 'open' as const,
+    },
+    pendingExchange: {
+      stage: 'awaiting-peer' as const,
+      firstAgent: 'claude' as const,
+      secondAgent: 'codex' as const,
+      firstMessageSequence: 5,
+    },
+  };
+  assert.equal(isChatSession(laterPending), true);
+  assert.equal(
+    isChatSession({
+      ...laterPending,
+      pendingExchange: {
+        ...laterPending.pendingExchange,
+        firstMessageSequence: 2,
+        firstAgent: 'codex',
+        secondAgent: 'claude',
+      },
+    }),
+    false,
+  );
+});
+
 test('migrates version 1 chat limits and presentation safely', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-v1-'));
   try {
@@ -170,7 +501,7 @@ test('migrates version 1 chat limits and presentation safely', async () => {
       `${JSON.stringify(legacy)}\n`,
     );
     const migrated = await store.load('chat-legacy');
-    assert.equal(migrated.version, 3);
+    assert.equal(migrated.version, 4);
     assert.equal(migrated.maxWorkflowRounds, 6);
     assert.equal(migrated.ui, 'plain');
   } finally {

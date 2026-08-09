@@ -45,6 +45,13 @@ If interruption occurs after the first response, the checkpoint records the
 pending peer and exact saved message. Resume calls only that missing peer; it
 does not repeat the already completed provider call.
 
+A linked `/review`, `/edit`, `/implement`, or `/collaborate` command first runs
+the free project-type and initial-commit eligibility checks. If the command is
+eligible, it finishes that pending peer response before workflow preflight or
+launch confirmation. A rejected command spends no provider call; cancelling
+the pending response leaves the workflow unstarted and appends no
+workflow-completion message.
+
 `/auto N` first previews its maximum exchanges and provider calls, then repeats
 paired exchanges until both providers return `done` for the same exchange or
 the requested limit is reached. The UI calls that state “both marked done,” not
@@ -75,6 +82,13 @@ Every active session has:
 - saved screen-reader, color, and interface preferences;
 - independent automatic-chat and editing-workflow limits;
 - linked workflow results.
+
+Chat checkpoints use format version 4, whose exchange records distinguish
+pending peer work, pending confirmation work, settled results, and explicit
+abandonment. Versions 1 through 3 migrate on load. If a valid version 3 pending
+record points behind later saved messages, migration preserves every message
+and the session status, discards only that ambiguous pending pointer, and emits
+a warning inviting the user to start a new exchange.
 
 Completed sessions remain reopenable. `/pause`, Ctrl+D, and idle interruption
 leave the session resumable. Ctrl+C during active provider work cancels that

@@ -13,7 +13,7 @@ import {
   parseChatInput,
   type ChatTerminal,
 } from '../src/chat-input.ts';
-import { ChatSessionStore } from '../src/chat-state.ts';
+import { ChatSessionStore, type ChatSession } from '../src/chat-state.ts';
 import { UserConfigStore } from '../src/config.ts';
 import { runInteractiveChat } from '../src/chat.ts';
 import {
@@ -943,6 +943,84 @@ test('resume completes an interrupted peer response without repeating the first'
   }
 });
 
+test('does not misroute an unhandled confirmation as another peer reply', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  let providerCalls = 0;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const now = '2026-08-09T00:00:00.000Z';
+    const session: ChatSession = {
+      version: 4,
+      id: 'chat-awaiting-confirmation',
+      createdAt: now,
+      updatedAt: now,
+      status: 'paused',
+      projectRoot: project,
+      projectKind: 'directory',
+      maxAutoRounds: 6,
+      maxWorkflowRounds: 6,
+      retries: 1,
+      timeoutMinutes: 30,
+      noTranscript: false,
+      ui: 'plain',
+      pendingExchange: {
+        stage: 'awaiting-confirmation',
+        firstAgent: 'codex',
+        secondAgent: 'claude',
+        firstMessageSequence: 2,
+        secondMessageSequence: 3,
+      },
+      messages: [
+        { sequence: 1, createdAt: now, role: 'user', text: 'Inspect this' },
+        {
+          sequence: 2,
+          createdAt: now,
+          role: 'codex',
+          text: 'Codex answer',
+          decision: 'done',
+        },
+        {
+          sequence: 3,
+          createdAt: now,
+          role: 'claude',
+          text: 'Claude answer',
+          decision: 'done',
+        },
+      ],
+      workflows: [],
+    };
+    await store.save(session);
+    const providers = providersWithRun(async () => {
+      providerCalls += 1;
+      return { text: 'unexpected response', decision: 'continue' };
+    });
+
+    await assert.rejects(
+      runInteractiveChat({
+        options: parseArgs(['chat', '--resume', session.id], {
+          initialCwd: project,
+          defaultOutput: paths.runsDirectory,
+        }),
+        appPaths: paths,
+        providers,
+        terminal: new ScriptedTerminal([]),
+      }),
+      /Cannot resume an awaiting-confirmation exchange/,
+    );
+
+    assert.equal(providerCalls, 0);
+    assert.deepEqual(
+      (await store.load(session.id)).pendingExchange,
+      session.pendingExchange,
+    );
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('a new message finishes the outstanding peer reply before its own exchange', async () => {
   const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
   const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
@@ -985,6 +1063,163 @@ test('a new message finishes the outstanding peer reply before its own exchange'
     const output = terminal.output.join('');
     assert.match(output, /Finishing Claude's outstanding reply/);
     assert.match(output, /Chat saved/);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('a linked workflow settles the outstanding peer reply before preflight', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const launches: WorkflowLaunchRequest[] = [];
+  let calls = 0;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const providers = providersWithRun(async () => {
+      calls += 1;
+      if (calls === 2) {
+        throw new ProcessAbortError();
+      }
+      return { text: `answer ${calls}`, decision: 'continue' };
+    });
+    const terminal = new ScriptedTerminal([
+      'Inspect this',
+      '/review',
+      'yes',
+      '/done',
+    ]);
+    const options = parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+      initialCwd: project,
+      defaultOutput: paths.runsDirectory,
+    });
+
+    await runInteractiveChat({
+      options,
+      appPaths: paths,
+      providers,
+      terminal,
+      launchWorkflow: async (request) => {
+        launches.push(request);
+        return 0;
+      },
+    });
+
+    const saved = await new ChatSessionStore(paths.chatsDirectory).latest();
+    assert.equal(calls, 3);
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0]?.mode, 'review');
+    assert.equal(saved?.pendingExchange, undefined);
+    assert.deepEqual(
+      saved?.messages.map((entry) => entry.role),
+      ['user', 'codex', 'claude', 'system'],
+    );
+    assert.match(
+      launches[0]?.task ?? '',
+      /claude[\s\S]+answer 3/i,
+      'the workflow receives the settled peer response',
+    );
+    assert.match(terminal.output.join(''), /Finishing Claude's outstanding/);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('free workflow rejections do not settle an outstanding reply', async () => {
+  for (const scenario of [
+    { initializeGit: false, expected: /Safe editing requires Git/ },
+    { initializeGit: true, expected: /requires an initial commit/ },
+  ]) {
+    const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+    const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+    let calls = 0;
+    try {
+      if (scenario.initializeGit) {
+        await execFileAsync('git', ['init'], { cwd: project });
+      }
+      const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+      const providers = providersWithRun(async () => {
+        calls += 1;
+        if (calls === 2) {
+          throw new ProcessAbortError();
+        }
+        return { text: `answer ${calls}`, decision: 'continue' };
+      });
+      const terminal = new ScriptedTerminal([
+        'Inspect this',
+        '/edit',
+        '/pause',
+      ]);
+      const options = parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+        initialCwd: project,
+        defaultOutput: paths.runsDirectory,
+      });
+
+      await runInteractiveChat({
+        options,
+        appPaths: paths,
+        providers,
+        terminal,
+      });
+
+      const saved = await new ChatSessionStore(paths.chatsDirectory).latest();
+      assert.equal(calls, 2);
+      assert.ok(saved?.pendingExchange);
+      assert.match(terminal.output.join(''), scenario.expected);
+      assert.doesNotMatch(
+        terminal.output.join(''),
+        /Finishing Claude's outstanding reply/,
+      );
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a cancelled pending reply leaves a linked workflow unstarted', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const launches: WorkflowLaunchRequest[] = [];
+  let calls = 0;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const providers = providersWithRun(async () => {
+      calls += 1;
+      if (calls > 1) {
+        throw new ProcessAbortError();
+      }
+      return { text: 'first answer', decision: 'continue' };
+    });
+    const terminal = new ScriptedTerminal([
+      'Inspect this',
+      '/review',
+      'yes',
+      '/pause',
+    ]);
+    const options = parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+      initialCwd: project,
+      defaultOutput: paths.runsDirectory,
+    });
+
+    await runInteractiveChat({
+      options,
+      appPaths: paths,
+      providers,
+      terminal,
+      launchWorkflow: async (request) => {
+        launches.push(request);
+        return 0;
+      },
+    });
+
+    const saved = await new ChatSessionStore(paths.chatsDirectory).latest();
+    assert.equal(calls, 4);
+    assert.equal(launches.length, 0);
+    assert.ok(saved?.pendingExchange);
+    assert.equal(saved?.workflows.length, 0);
+    assert.ok(!saved?.messages.some((entry) => entry.role === 'system'));
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

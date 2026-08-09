@@ -131,7 +131,7 @@ test('chat prompt and workflow handoff contain parseable bounded history', () =>
 
   const workflowTask = buildChatWorkflowTask(
     {
-      version: 3,
+      version: 4,
       id: 'chat-history-test',
       projectRoot: '/tmp/project',
       createdAt: '2026-07-29T00:00:00.000Z',

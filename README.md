@@ -62,6 +62,10 @@ The default path is short:
 `/edit` opens a complete safety preview and confirmation before a separate
 editing workflow begins. If the repository has no initial commit yet, chat
 explains that requirement instead of starting a broken workflow.
+If an interrupted peer response is still pending, a linked workflow first runs
+its free project eligibility checks, then finishes that read-only response
+before preflight or launch. A rejected command spends no provider call, and
+cancelling the response leaves the workflow unstarted.
 
 ## Interactive chat
 

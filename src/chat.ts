@@ -320,6 +320,11 @@ async function runExchange({
   onPresentationError: (error: unknown) => void;
 }): Promise<boolean> {
   const pending = session.pendingExchange;
+  if (pending?.stage === 'awaiting-confirmation') {
+    throw new Error(
+      'Cannot resume an awaiting-confirmation exchange until confirmation coordination is available.',
+    );
+  }
   if (pending && participants) {
     // The chat loop rejects this before persisting a message, so reaching it
     // here is a coordinator bug rather than recoverable user input.
@@ -438,6 +443,7 @@ async function runExchange({
       if (pairedExchange && agent === first) {
         firstMessage = message;
         session.pendingExchange = {
+          stage: 'awaiting-peer',
           firstAgent: first,
           secondAgent: second,
           firstMessageSequence: message.sequence,
@@ -479,7 +485,7 @@ function createSession(
 ): ChatSession {
   const now = new Date().toISOString();
   return {
-    version: 3,
+    version: 4,
     id: `chat-${makeRunId(new Date(now))}`,
     createdAt: now,
     updatedAt: now,
@@ -500,6 +506,7 @@ function createSession(
     claudeEffort: options.claudeEffort,
     nextFirstAgent: 'codex',
     pendingExchange: undefined,
+    latestPairedExchange: undefined,
     messages: [],
     workflows: [],
   };
@@ -1031,6 +1038,9 @@ ${
             writeSupplemental(
               '\nSafe editing requires an initial commit. Review .gitignore, create the first commit yourself, then use /edit again. Agent Bridge will not stage or commit project files.\n',
             );
+            continue;
+          }
+          if (!(await settlePendingExchange())) {
             continue;
           }
           const workflowOptions: BridgeOptions = {
