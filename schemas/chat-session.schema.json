@@ -22,7 +22,7 @@
     "workflows"
   ],
   "properties": {
-    "version": { "const": 3 },
+    "version": { "const": 4 },
     "id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
@@ -49,6 +49,7 @@
     "claudeEffort": { "enum": ["low", "medium", "high", "xhigh", "max"] },
     "nextFirstAgent": { "enum": ["codex", "claude"] },
     "pendingExchange": { "$ref": "#/$defs/pendingExchange" },
+    "latestPairedExchange": { "$ref": "#/$defs/recordedExchange" },
     "messages": {
       "type": "array",
       "maxItems": 10000,
@@ -61,13 +62,97 @@
   },
   "$defs": {
     "pendingExchange": {
+      "oneOf": [
+        { "$ref": "#/$defs/awaitingPeerExchange" },
+        { "$ref": "#/$defs/awaitingConfirmationExchange" }
+      ]
+    },
+    "awaitingPeerExchange": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["firstAgent", "secondAgent", "firstMessageSequence"],
+      "required": [
+        "stage",
+        "firstAgent",
+        "secondAgent",
+        "firstMessageSequence"
+      ],
       "properties": {
+        "stage": { "const": "awaiting-peer" },
         "firstAgent": { "enum": ["codex", "claude"] },
         "secondAgent": { "enum": ["codex", "claude"] },
         "firstMessageSequence": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "awaitingConfirmationExchange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "firstAgent",
+        "secondAgent",
+        "firstMessageSequence",
+        "secondMessageSequence"
+      ],
+      "properties": {
+        "stage": { "const": "awaiting-confirmation" },
+        "firstAgent": { "enum": ["codex", "claude"] },
+        "secondAgent": { "enum": ["codex", "claude"] },
+        "firstMessageSequence": { "type": "integer", "minimum": 1 },
+        "secondMessageSequence": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "recordedExchange": {
+      "oneOf": [
+        { "$ref": "#/$defs/settledExchange" },
+        { "$ref": "#/$defs/abandonedExchange" }
+      ]
+    },
+    "settledExchange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "firstAgent",
+        "secondAgent",
+        "firstMessageSequence",
+        "secondMessageSequence",
+        "outcome"
+      ],
+      "properties": {
+        "firstAgent": { "enum": ["codex", "claude"] },
+        "secondAgent": { "enum": ["codex", "claude"] },
+        "firstMessageSequence": { "type": "integer", "minimum": 1 },
+        "secondMessageSequence": { "type": "integer", "minimum": 1 },
+        "confirmationMessageSequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "outcome": { "enum": ["open", "confirmed"] }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "outcome": { "const": "confirmed" } },
+            "required": ["outcome"]
+          },
+          "then": { "required": ["confirmationMessageSequence"] }
+        }
+      ]
+    },
+    "abandonedExchange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "firstAgent",
+        "secondAgent",
+        "firstMessageSequence",
+        "outcome"
+      ],
+      "properties": {
+        "firstAgent": { "enum": ["codex", "claude"] },
+        "secondAgent": { "enum": ["codex", "claude"] },
+        "firstMessageSequence": { "type": "integer", "minimum": 1 },
+        "secondMessageSequence": { "type": "integer", "minimum": 1 },
+        "outcome": { "const": "abandoned" }
       }
     },
     "message": {

@@ -14,7 +14,12 @@ For each human message:
 3. Its schema-valid response is checkpointed.
 4. The other provider receives the updated history and explicitly critiques
    that current response.
-5. Its response is checkpointed and control returns to the human.
+5. Its response is checkpointed. If either response says `continue`, control
+   returns to the human.
+6. If both responses say `done`, the original first provider receives the
+   exact saved pair in a dedicated reciprocal-confirmation prompt.
+7. The confirmation response and settled exchange record are checkpointed
+   together, then control returns to the human.
 
 The first speaker alternates between exchanges. This prevents either provider
 from permanently anchoring the discussion.
@@ -42,16 +47,36 @@ before Enter can still be echoed and repainted by live redraws; PTY-level input
 coordination remains separate hardening work.
 
 If interruption occurs after the first response, the checkpoint records the
-pending peer and exact saved message. Resume calls only that missing peer; it
-does not repeat the already completed provider call.
+pending peer and exact saved message. If it occurs after two provisional
+`done` responses, the checkpoint instead records the pending reciprocal
+confirmation and both exact messages. Resume calls only the saved stage's
+missing provider; it does not repeat completed calls.
+
+A linked `/review`, `/edit`, `/implement`, or `/collaborate` command first runs
+the free project-type and initial-commit eligibility checks. If the command is
+eligible, it finishes that pending peer response before workflow preflight or
+launch confirmation. A rejected command spends no provider call; cancelling
+the pending response leaves the workflow unstarted and appends no
+workflow-completion message.
 
 `/auto N` first previews its maximum exchanges and provider calls, then repeats
-paired exchanges until both providers return `done` for the same exchange or
-the requested limit is reached. The UI calls that state “both marked done,” not
-independently verified agreement. It applies only to the current answer, never
-authorizes edits, and never prevents a later human follow-up. If `/auto` starts
-when the latest pair is already marked done, the preview says that continuing
-will deliberately open another exchange.
+paired exchanges until one is reciprocally confirmed or the requested limit
+is reached. One round includes its conditional confirmation. The worst case is
+`3N` calls with no pending work, `3N - 1` while awaiting a peer, and `3N - 2`
+while awaiting confirmation; most open exchanges still use two calls.
+Confirmation applies only to the current answer, is not independent
+verification, never authorizes edits, and never prevents a later human
+follow-up. If `/auto` starts when the latest exchange is already confirmed,
+the preview says that continuing deliberately opens another exchange. A
+migrated legacy pair with two `done` decisions is identified as unconfirmed
+and starts a version 4 exchange that can reach reciprocal confirmation.
+
+Authentication errors, rate limits, invalid responses, timeouts, and exhausted
+retries leave the latest saved stage intact and return control to the prompt
+when storage and terminal state remain usable. `/done` then names the missing
+peer or confirmation stage and defaults to keeping the chat open. If the human
+confirms completion, the saved responses are recorded as an abandoned
+exchange, the lead rotates, and the session completes atomically.
 
 ## Conversation memory
 
@@ -76,11 +101,25 @@ Every active session has:
 - independent automatic-chat and editing-workflow limits;
 - linked workflow results.
 
+Chat checkpoints use format version 4, whose exchange records distinguish
+pending peer work, pending confirmation work, settled results, and explicit
+abandonment. Versions 1 through 3 migrate on load. If a valid version 3 pending
+record points behind later saved messages, migration preserves every message
+and the session status, discards only that ambiguous pending pointer, and emits
+a warning inviting the user to start a new exchange.
+
+Live presentation and `/status` describe the current conversational context.
+After a newer user, system, or targeted-agent message, they show no current
+paired result until another pair begins. The transcript's latest-pair field is
+historical and continues to report the stored completed or abandoned record.
+
 Completed sessions remain reopenable. `/pause`, Ctrl+D, and idle interruption
 leave the session resumable. Ctrl+C during active provider work cancels that
 operation and returns to the saved chat; a second idle Ctrl+C pauses it.
-`/done` marks it complete. With `--no-transcript`, the active checkpoint still
-exists for recovery but both files are deleted after successful completion.
+`/done` marks it complete. With unfinished provider work it first asks whether
+to record the exchange as abandoned, defaulting to no. With `--no-transcript`,
+the active checkpoint still exists for recovery but both files are deleted
+after successful completion.
 
 ## Editing and review commands
 
@@ -154,8 +193,8 @@ layout and leaves color unstated, and screen-reader mode suppresses color when
 the presentation is resolved rather than recording a preference that would
 outlive the mode.
 
-Chat sessions are version 3 and user configuration is version 3 for this
-reason. Both previously stored a `noColor` boolean. Migration reads a stored
+Chat sessions are version 4 and user configuration is version 3. Both
+previously stored a `noColor` boolean. Migration reads a stored
 `true` as an explicit "no color", because only `--no-color` or the
 screen-reader choice could produce it, and reads a stored `false` as no choice
 at all, because the CLI that wrote it had no positive `--color` and `NO_COLOR`

@@ -162,8 +162,15 @@ removes it after success.
 
 `ChatSessionStore` independently validates and atomically saves ordered chat
 messages, linked workflow events, and resumable status. It also writes a
-derived Markdown transcript and uses an exclusive lock. Completed chats remain
+derived Markdown transcript and uses an exclusive lock. The transcript is
+prepared before the authoritative JSON rename, so a reported transcript
+failure cannot silently commit a provider response. Completed chats remain
 reopenable unless `--no-transcript` requested deletion.
+
+Shared deterministic exchange interpretation lives in `core.ts`. The chat
+coordinator derives current state there, while transcript persistence derives
+historical state there, so storage does not depend on terminal presentation
+models and the two meanings cannot be accidentally conflated.
 
 Schemas in `schemas/` document persisted and provider-facing formats.
 

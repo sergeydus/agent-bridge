@@ -10,6 +10,8 @@ created or reopened
   → human message
   → first read-only agent response (checkpoint)
   → second read-only agent critique (checkpoint)
+      ├─ either decision is continue → exchange open
+      └─ both decisions are done → first agent confirmation (checkpoint)
   → human prompt
       ├─ another message
       ├─ /auto → bounded paired exchanges
@@ -18,15 +20,15 @@ created or reopened
       └─ /done → completed
 ```
 
-The first speaker alternates. If interruption occurs between speakers, the
-checkpoint records the pending peer and resume calls only that missing peer.
-Chat presents four derived paired-exchange states: none yet, waiting for the
-peer, open, and both marked `done`. The last state means exactly that both
-structured decisions in the latest adjacent paired exchange are `done`; the UI
-does not label it independently verified agreement. It does not imply
-implementation approval or authorize a write. `/auto` may use this state to
-stop, while a later human message or an explicitly confirmed `/auto` run can
-open another exchange.
+The first speaker alternates. If interruption occurs between stages, the
+checkpoint records either the pending peer or pending reciprocal confirmation;
+resume calls only the missing provider. Chat presents none, pending peer,
+pending confirmation, open, confirmed, abandoned, and a legacy-only
+unconfirmed two-`done` state. Confirmation means the original first agent
+accepted the exact saved peer response with no unresolved point. It is not
+independent verification, implementation approval, or write authorization.
+`/auto` stops only on confirmed and treats its conditional third call as part
+of the same bounded exchange.
 
 Complete input lines received during provider work wait in the readline queue
 until the next human prompt. They cannot enter between the first and second

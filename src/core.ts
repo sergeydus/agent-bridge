@@ -3,6 +3,15 @@ import { randomUUID } from 'node:crypto';
 export type AgentName = 'codex' | 'claude';
 export type WorkflowKind = 'review' | 'fixed' | 'collaborative';
 export type AgentDecision = 'done' | 'continue';
+export type PairedExchangeStatus =
+  | 'none'
+  | 'pending-peer'
+  | 'pending-confirmation'
+  | 'open'
+  | 'both-done'
+  | 'confirmed'
+  | 'abandoned';
+export type PendingExchangeStage = 'awaiting-peer' | 'awaiting-confirmation';
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type ProjectKind = 'git' | 'directory';
 export type RunOutcome =
@@ -38,6 +47,118 @@ export interface ChangeSummary {
   stagedFiles: number;
   modifiedFiles: number;
   untrackedFiles: number;
+}
+
+export interface PairedExchangeMessage {
+  readonly sequence: number;
+  readonly role: string;
+  readonly decision?: AgentDecision;
+}
+
+export interface PairedExchangeRecord {
+  readonly firstMessageSequence: number;
+  readonly secondMessageSequence?: number;
+  readonly confirmationMessageSequence?: number;
+  readonly outcome: 'open' | 'confirmed' | 'abandoned';
+}
+
+function deriveLegacyPairedExchangeStatus(
+  messages: readonly PairedExchangeMessage[],
+): PairedExchangeStatus {
+  const latest = messages.slice(-2);
+  if (
+    latest.length !== 2 ||
+    !latest.every(
+      (message) => message.role === 'codex' || message.role === 'claude',
+    ) ||
+    latest[0]?.role === latest[1]?.role
+  ) {
+    return 'none';
+  }
+  return latest.every((message) => message.decision === 'done')
+    ? 'both-done'
+    : 'open';
+}
+
+function pendingExchangeStatus(
+  stage: PendingExchangeStage | undefined,
+): PairedExchangeStatus | undefined {
+  if (stage === 'awaiting-peer') {
+    return 'pending-peer';
+  }
+  if (stage === 'awaiting-confirmation') {
+    return 'pending-confirmation';
+  }
+  return undefined;
+}
+
+export function recordedExchangeFinalSequence(
+  exchange: PairedExchangeRecord,
+): number {
+  return (
+    exchange.confirmationMessageSequence ??
+    exchange.secondMessageSequence ??
+    exchange.firstMessageSequence
+  );
+}
+
+export function deriveCurrentPairedExchangeStatus({
+  messages,
+  pendingStage,
+  latestExchange,
+}: {
+  messages: readonly PairedExchangeMessage[];
+  pendingStage?: PendingExchangeStage;
+  latestExchange?: PairedExchangeRecord;
+}): PairedExchangeStatus {
+  const pending = pendingExchangeStatus(pendingStage);
+  if (pending) {
+    return pending;
+  }
+  if (latestExchange) {
+    return messages.at(-1)?.sequence ===
+      recordedExchangeFinalSequence(latestExchange)
+      ? latestExchange.outcome
+      : 'none';
+  }
+  return deriveLegacyPairedExchangeStatus(messages);
+}
+
+export function deriveHistoricalPairedExchangeStatus({
+  messages,
+  pendingStage,
+  latestExchange,
+}: {
+  messages: readonly PairedExchangeMessage[];
+  pendingStage?: PendingExchangeStage;
+  latestExchange?: PairedExchangeRecord;
+}): PairedExchangeStatus {
+  return (
+    pendingExchangeStatus(pendingStage) ??
+    latestExchange?.outcome ??
+    deriveLegacyPairedExchangeStatus(messages)
+  );
+}
+
+export function describePairedExchangeStatus(
+  status: PairedExchangeStatus,
+): string {
+  switch (status) {
+    case 'none':
+      return 'none yet';
+    case 'pending-peer':
+      return 'waiting for peer response';
+    case 'pending-confirmation':
+      return 'waiting for reciprocal confirmation';
+    case 'open':
+      return 'open; another exchange may help';
+    case 'both-done':
+      return 'both agents marked the legacy pair done; not reciprocally confirmed';
+    case 'confirmed':
+      return 'both agents reciprocally marked this exchange done';
+    case 'abandoned':
+      return 'exchange left unfinished when the session was completed';
+  }
 }
 
 export function otherAgent(agent: AgentName): AgentName {

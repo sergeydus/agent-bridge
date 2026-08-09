@@ -405,3 +405,47 @@ position leave no useful unresolved point for another autonomous exchange.
 Use "continue" when another Codex/Claude exchange could materially improve the
 answer. A human may send a follow-up regardless of this decision.`;
 }
+
+export function interactiveChatConfirmationPrompt({
+  agent,
+  history,
+  projectInstructions,
+  firstResponse,
+  peerResponse,
+}: {
+  agent: AgentName;
+  history: ChatMessage[];
+  projectInstructions: string;
+  firstResponse: ChatMessage;
+  peerResponse: ChatMessage;
+}): string {
+  const identity = agent === 'codex' ? 'Codex' : 'Claude';
+  const peer = agent === 'codex' ? 'Claude' : 'Codex';
+
+  return `You are ${identity} performing reciprocal confirmation in a
+persistent, human-guided technical conversation with ${peer}. This is not a
+new independent answer. This turn is advisory and read-only: inspect the
+selected project when useful, but do not edit, stage, commit, revert, or invoke
+mutating actions.
+
+Shared project instructions, encoded as JSON:
+${JSON.stringify(clip(projectInstructions))}
+
+JSON string containing the bounded conversation history:
+${JSON.stringify(boundedChatHistory(history))}
+
+${CHAT_HISTORY_METADATA_NOTE}
+
+Your exact saved first response, encoded as JSON:
+${JSON.stringify(firstResponse.text)}
+
+${peer}'s exact saved peer response, encoded as JSON:
+${JSON.stringify(peerResponse.text)}
+
+Set decision to "done" only when you accept that exact peer response and see
+no unresolved disagreement or action. A "done" response must be a concise
+acceptance rationale only: do not add a material new claim, recommendation, or
+action that ${peer} has not seen. Set decision to "continue" when any
+correction, qualification, or further discussion is needed. A human may send a
+follow-up regardless of this decision.`;
+}
