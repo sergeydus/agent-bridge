@@ -308,6 +308,7 @@ export function createChatTerminal({
   let queueObserver: ((count: number) => void) | undefined;
   const reportQueue = (): void => queueObserver?.(queuedLines.length);
   let closed = false;
+  let promptInitialized = false;
   let pending:
     | {
         resolve: (value: string | null) => void;
@@ -343,6 +344,8 @@ export function createChatTerminal({
     prompt(label, signal) {
       const queued = queuedLines.shift();
       if (queued !== undefined) {
+        interface_.setPrompt(label);
+        promptInitialized = true;
         output.write(label);
         reportQueue();
         return Promise.resolve(queued);
@@ -351,9 +354,16 @@ export function createChatTerminal({
         return Promise.resolve(null);
       }
       interface_.setPrompt(label);
-      interface_.prompt();
+      promptInitialized = true;
+      if (interface_.line) {
+        interface_.prompt(true);
+      } else {
+        interface_.prompt();
+      }
       return new Promise<string | null>((resolvePromise) => {
         const onAbort = (): void => {
+          // Defensive only: this can differ when prompts overlap, while the
+          // coordinator awaits every prompt before starting another one.
           if (pending?.resolve !== resolvePromise) {
             return;
           }
@@ -372,7 +382,7 @@ export function createChatTerminal({
       output.write(text);
     },
     redrawPrompt() {
-      if (pending) {
+      if (promptInitialized && !closed) {
         interface_.prompt(true);
       }
     },

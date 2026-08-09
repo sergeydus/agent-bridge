@@ -139,11 +139,10 @@ test('chat terminal delegates active prompt lifecycle to readline', async () => 
   assert.equal(removeAbortListenerCalls, 1);
   controller.abort();
 
-  // This pins the current no-active-prompt behavior. The PTY slice may
-  // intentionally revise it if evidence favors keeping a prompt alive while
-  // providers work.
+  // Readline owns the partial buffer between coordinator prompts, so redraws
+  // keep it visible while providers work even though this promise settled.
   harness.terminal.redrawPrompt();
-  assert.deepEqual(harness.interface_.prompts, [undefined, true]);
+  assert.deepEqual(harness.interface_.prompts, [undefined, true, true]);
 
   harness.terminal.close();
   assert.equal(harness.interface_.closeCalls, 1);

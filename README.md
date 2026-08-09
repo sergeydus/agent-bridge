@@ -119,9 +119,10 @@ for the current process and removes duplicate entries; it is not written to a
 separate shell-history file. A complete line typed while an agent is working is
 queued for the next prompt. Both terminal modes show the queued count, never
 the queued text, and the line is never inserted between the two agents in the
-current paired exchange. This covers complete submitted lines. In an enhanced
-TTY, characters that have not reached Enter can still be echoed and repainted
-during live redraws; broader PTY input coordination remains hardening work.
+current paired exchange. In an enhanced TTY, characters that have not reached
+Enter remain editable and keep their cursor position across provider frames
+and terminal resizes. Real-PTY tests cover that partial-input behavior, Ctrl+C,
+Ctrl+D, and alternate-screen restoration.
 
 Ordinary messages and `/both` produce the normal paired exchange. Most open
 exchanges use two provider calls; two provisional `done` decisions trigger a

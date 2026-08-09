@@ -35,8 +35,11 @@
 - Made complete terminal lines typed during provider work visibly queue for the
   next prompt instead of appearing lost in enhanced redraws. Both renderers show
   only the queue count. The readline path is now injectable, and deterministic
-  stream coverage proves complete-line queue order and counts. Partial TTY input
-  echo and cancellation/restoration paths remain release-hardening work.
+  stream coverage proves complete-line queue order and counts. A development-
+  only cross-platform PTY harness now proves that enhanced frames and resizes
+  repaint readline's partial buffer without moving its cursor, Ctrl+C retains
+  its cancellation path, Ctrl+D closes a pending prompt, and alternate-screen
+  output is restored before exit.
 
 ## 0.6.0 - 2026-08-09
 

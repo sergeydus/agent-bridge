@@ -49,6 +49,7 @@
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.0",
     "eslint": "^10.8.0",
+    "node-pty": "1.2.0-beta.14",
     "prettier": "^3.9.6",
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.65.0"

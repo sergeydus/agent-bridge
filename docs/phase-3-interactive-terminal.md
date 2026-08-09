@@ -481,8 +481,10 @@ shared parser, readline editing/completion/history, paste, queued-input state,
 and workflow suspension; conversation history remains available through native
 terminal scrollback rather than custom mouse capture. Complete-line queueing and
 the readline callback lifecycle are covered deterministically through injected
-streams and a readline factory; real TTY echo, cross-platform PTY behavior, and
-manual screen-reader coverage remain Slice 5 release-hardening work.
+streams and a readline factory. A real-PTY harness now covers partial input and
+cursor preservation, resize, Ctrl+C, Ctrl+D, and alternate-screen restoration
+locally; full CI-matrix execution and manual screen-reader coverage remain
+Slice 5 release-hardening work.
 
 ### Slice 1: shared presentation model
 
@@ -549,18 +551,29 @@ keeps both input-ownership designs implementable until PTY evidence selects
 one; exposing those values does not make the fake-readline tests evidence of
 real terminal echo or cursor restoration.
 
-The PTY harness will launch a small terminal-boundary fixture with fake
-providers and no network or authentication. Before partial-input behavior is
-changed, failing PTY cases must distinguish these two designs:
+The PTY driver is the exact development-only release
+`node-pty@1.2.0-beta.14`. It supplies one API and packaged native binaries for
+the supported macOS, Linux, and Windows architectures; it is not shipped as a
+runtime Agent Bridge dependency. The harness launches only the local Node
+fixture at the same permission level as the test process. The full CI matrix
+must prove installation and execution before these tests are treated as the
+cross-platform release gate.
+
+The PTY harness launches a small terminal-boundary fixture with fake providers
+and no network or authentication. Its failing between-prompts case showed that
+readline retained the partial line but lost the effective cursor position after
+a redraw, turning text appended to `draft` into text inserted before it. The
+selected design therefore keeps readline active and repaints its owned line and
+cursor after enhanced frames. Pausing readline was rejected because it would
+hide characters while providers work. The alternatives evaluated were:
 
 - keep an active readline prompt while providers work and repaint its buffer;
 - pause readline while providers work and restore buffered input afterward.
 
-The selected design must preserve partially typed text across output and
-resize, queue each submitted line exactly once, retain existing Ctrl+C
-semantics, and restore cursor, echo, and terminal ownership on every exit path.
-Those tests, rather than renderer frame hooks alone, decide the input-ownership
-implementation.
+The selected design preserves partially typed text across output and resize,
+queues each submitted line exactly once, retains existing Ctrl+C semantics,
+and restores cursor, echo, and terminal ownership on every exit path. The PTY
+tests, rather than renderer frame hooks alone, own that input contract.
 
 - standard interactive conversation;
 - targeted Codex and Claude turns;

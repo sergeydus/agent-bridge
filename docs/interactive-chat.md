@@ -42,9 +42,11 @@ while provider work is active, readline queues it for the next prompt. It is
 never inserted between the two agents in the current paired exchange. The
 presentation model exposes only the queued count, not the queued text, and both
 plain and enhanced modes explain that behavior. This guarantee begins when
-readline receives a complete submitted line. In an enhanced TTY, partial input
-before Enter can still be echoed and repainted by live redraws; PTY-level input
-coordination remains separate hardening work.
+readline receives a complete submitted line. In an enhanced TTY, readline keeps
+partial input and its cursor authoritative between coordinator prompts. Every
+enhanced frame repaints that owned buffer, and reopening the next prompt
+preserves its cursor rather than moving insertion to the start of the line.
+Real-PTY tests cover resize, Ctrl+C, Ctrl+D, and alternate-screen restoration.
 
 If interruption occurs after the first response, the checkpoint records the
 pending peer and exact saved message. If it occurs after two provisional

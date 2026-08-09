@@ -193,7 +193,12 @@ function createChatPresentation(
           },
         }
       : {}),
-    write: (text) => terminal.write(text),
+    write: (text) => {
+      terminal.write(text);
+      if (uiMode === 'enhanced') {
+        terminal.redrawPrompt();
+      }
+    },
   });
 }
 
@@ -807,7 +812,6 @@ export async function runInteractiveChat({
       }
       try {
         presenter.redraw();
-        terminal.redrawPrompt();
       } catch (error) {
         terminalFailure =
           error instanceof Error
