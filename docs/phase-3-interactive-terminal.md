@@ -1,6 +1,6 @@
 # Phase 3 specification: enhanced interactive terminal
 
-Status: In progress — Slices 1 and 2 implemented
+Status: Core interface shipped in 0.6.0; Slice 5 release hardening remains ongoing
 
 Target release: 0.6.0
 
@@ -475,6 +475,14 @@ An inability to draw enhanced output is not itself a workflow failure. An
 inability to restore terminal ownership safely is a fatal error.
 
 ## Delivery plan
+
+Implementation status: Slices 1, 2, and 4 are complete. Slice 3 includes the
+shared parser, readline editing/completion/history, paste, queued-input state,
+and workflow suspension; conversation history remains available through native
+terminal scrollback rather than custom mouse capture. Complete-line queueing is
+covered through injected streams; TTY echo, abort-listener, SIGINT,
+close-while-pending, redraw, pause/resume, cross-platform PTY, and manual
+screen-reader coverage remain Slice 5 release-hardening work.
 
 ### Slice 1: shared presentation model
 

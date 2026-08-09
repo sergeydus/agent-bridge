@@ -5,6 +5,7 @@ import {
   MAX_PRESENTED_LIVE_TEXT_CHARS,
   MAX_PRESENTED_MESSAGES,
   createTerminalViewModel,
+  derivePairedExchangeStatus,
   reducePresentationModel,
   type PresentedMessage,
 } from '../src/presentation-model.ts';
@@ -54,6 +55,74 @@ test('creates a bounded renderer-neutral view of persisted chat state', () => {
     status: 'active',
   });
   assert.equal(model.activity, undefined);
+  assert.equal(model.exchangeStatus, 'none');
+  assert.equal(model.queuedInputCount, 0);
+});
+
+test('derives only adjacent two-agent responses as a paired exchange', () => {
+  const codex: PresentedMessage = {
+    sequence: 2,
+    createdAt: new Date(2_000).toISOString(),
+    role: 'codex',
+    text: 'Codex answer',
+    decision: 'done',
+  };
+  const claude: PresentedMessage = {
+    sequence: 3,
+    createdAt: new Date(3_000).toISOString(),
+    role: 'claude',
+    text: 'Claude answer',
+    decision: 'done',
+  };
+
+  assert.equal(derivePairedExchangeStatus([codex], true), 'pending-peer');
+  assert.equal(derivePairedExchangeStatus([codex, claude], false), 'both-done');
+  assert.equal(
+    derivePairedExchangeStatus(
+      [codex, { ...claude, decision: 'continue' }],
+      false,
+    ),
+    'open',
+  );
+  assert.equal(derivePairedExchangeStatus([message(1), codex], false), 'none');
+});
+
+test('reduces and announces paired exchange status without claiming agreement', () => {
+  const output: string[] = [];
+  const controller = new PresentationController({
+    initialModel: initialModel(),
+    renderer: createPlainTerminalRenderer({
+      screenReader: true,
+      color: false,
+    }),
+    write: (text) => output.push(text),
+  });
+
+  controller.dispatch({ type: 'exchange-status', status: 'pending-peer' });
+  controller.dispatch({ type: 'exchange-status', status: 'both-done' });
+
+  assert.equal(controller.model.exchangeStatus, 'both-done');
+  assert.match(output.join(''), /waiting for the peer response/);
+  assert.match(output.join(''), /both agents marked this paired exchange done/);
+  assert.doesNotMatch(output.join(''), /agree/i);
+});
+
+test('reduces and announces only queued input counts', () => {
+  const output: string[] = [];
+  const controller = new PresentationController({
+    initialModel: initialModel(),
+    renderer: createPlainTerminalRenderer({
+      screenReader: true,
+      color: false,
+    }),
+    write: (text) => output.push(text),
+  });
+
+  controller.dispatch({ type: 'queued-input', count: 2 });
+  controller.dispatch({ type: 'queued-input', count: 0 });
+
+  assert.equal(controller.model.queuedInputCount, 0);
+  assert.match(output.join(''), /2 lines will be handled at the next prompt/);
 });
 
 test('reduces safe provider activity without making it authoritative', () => {

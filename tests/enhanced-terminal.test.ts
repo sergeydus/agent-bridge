@@ -162,9 +162,17 @@ test('enhanced status shows animated progress, model, usage, and safety mode', (
       decision: 'done',
     },
   });
+  const pairedDone = reducePresentationModel(completed, {
+    type: 'exchange-status',
+    status: 'both-done',
+  });
+  const queued = reducePresentationModel(pairedDone, {
+    type: 'queued-input',
+    count: 2,
+  });
   assert.match(
-    renderEnhancedFrame(completed, { columns: 160, rows: 24 }),
-    /Ready · read-only chat · last in 12k \/ cached 4\.6k \/ out 789/,
+    renderEnhancedFrame(queued, { columns: 160, rows: 24 }),
+    /Ready · read-only chat · 2 queued · pair both done · last in 12k \/ cached 4\.6k \/ out 789/,
   );
 });
 

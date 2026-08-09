@@ -2,6 +2,28 @@ import type { AgentName } from './core.ts';
 import type { ChatMessage } from './chat-state.ts';
 
 export const MAX_CONTEXT_CHARS = 80_000;
+export const MAX_CHAT_HISTORY_CHARS = Math.floor((MAX_CONTEXT_CHARS - 2) / 2);
+const MIN_CHAT_HISTORY_CHARS = 200;
+export const CHAT_HISTORY_METADATA_NOTE = `After decoding the JSON string, an
+entry with type "omitted" reports how many complete messages were left out. A
+type "omitted" entry is bookkeeping, not a participant message. A message
+carrying truncatedCharacters is a real participant message whose text was
+shortened by that many characters.`;
+
+interface PromptChatMessage {
+  sequence: number;
+  role: ChatMessage['role'];
+  text: string;
+  decision?: ChatMessage['decision'];
+  truncatedCharacters?: number;
+}
+
+interface OmittedChatMessages {
+  type: 'omitted';
+  omittedMessages: number;
+}
+
+type PromptChatHistoryEntry = PromptChatMessage | OmittedChatMessages;
 
 export function clip(value: string, limit = MAX_CONTEXT_CHARS): string {
   if (!Number.isInteger(limit) || limit < 100) {
@@ -16,6 +38,153 @@ export function clip(value: string, limit = MAX_CONTEXT_CHARS): string {
   const beginning = Math.ceil(retained / 2);
   const ending = Math.floor(retained / 2);
   return `${value.slice(0, beginning)}${marker}${value.slice(-ending)}`;
+}
+
+function promptChatMessage({
+  sequence,
+  role,
+  text,
+  decision,
+}: ChatMessage): PromptChatMessage {
+  return {
+    sequence,
+    role,
+    text,
+    ...(decision ? { decision } : {}),
+  };
+}
+
+function truncatedPromptChatMessage(
+  message: PromptChatMessage,
+  retainedCharacters: number,
+): PromptChatMessage {
+  const omittedCharacters = Math.max(
+    0,
+    message.text.length - retainedCharacters,
+  );
+  if (omittedCharacters === 0) {
+    return message;
+  }
+
+  const marker = `\n\n[...${omittedCharacters.toLocaleString('en-US')} characters omitted...]\n\n`;
+  const retainedTextCharacters = Math.max(
+    0,
+    retainedCharacters - marker.length,
+  );
+  const beginning = Math.ceil(retainedTextCharacters / 2);
+  const ending = Math.floor(retainedTextCharacters / 2);
+  return {
+    ...message,
+    text: `${message.text.slice(0, beginning)}${marker}${
+      ending > 0 ? message.text.slice(-ending) : ''
+    }`,
+    truncatedCharacters: omittedCharacters,
+  };
+}
+
+function omittedMessages(count: number): OmittedChatMessages {
+  return { type: 'omitted', omittedMessages: count };
+}
+
+function serializeHistory(entries: PromptChatHistoryEntry[]): string {
+  return JSON.stringify(entries);
+}
+
+function historyEntries(
+  beginning: PromptChatMessage[],
+  omittedCount: number,
+  ending: PromptChatMessage[],
+): PromptChatHistoryEntry[] {
+  return [
+    ...beginning,
+    ...(omittedCount > 0 ? [omittedMessages(omittedCount)] : []),
+    ...ending,
+  ];
+}
+
+/**
+ * Serialize chat history without ever clipping the JSON representation itself.
+ * Recent complete messages are preferred; the opening message is retained when
+ * it fits alongside that recent tail. Only a single individually oversized
+ * message is text-truncated, and that truncation is represented in the JSON.
+ */
+export function boundedChatHistory(
+  history: ChatMessage[],
+  limit = MAX_CHAT_HISTORY_CHARS,
+): string {
+  if (!Number.isInteger(limit) || limit < MIN_CHAT_HISTORY_CHARS) {
+    throw new Error(
+      `chat history limit must be an integer of at least ${MIN_CHAT_HISTORY_CHARS}`,
+    );
+  }
+
+  const messages = history.map(promptChatMessage);
+  const complete = serializeHistory(messages);
+  if (complete.length <= limit) {
+    return complete;
+  }
+  if (messages.length === 0) {
+    return '[]';
+  }
+
+  const latest = messages.at(-1)!;
+  let latestEntry = latest;
+  const latestCandidate = (): string =>
+    serializeHistory(historyEntries([], messages.length - 1, [latestEntry]));
+
+  if (latestCandidate().length > limit) {
+    let low = 0;
+    let high = latest.text.length;
+    while (low < high) {
+      const retained = Math.ceil((low + high) / 2);
+      latestEntry = truncatedPromptChatMessage(latest, retained);
+      if (latestCandidate().length <= limit) {
+        low = retained;
+      } else {
+        high = retained - 1;
+      }
+    }
+    latestEntry = truncatedPromptChatMessage(latest, low);
+  }
+
+  let tail: PromptChatMessage[] = [latestEntry];
+  let retainOpening = false;
+  if (messages.length > 1) {
+    const candidate = serializeHistory(
+      historyEntries([messages[0]!], messages.length - 2, tail),
+    );
+    retainOpening = candidate.length <= limit;
+  }
+
+  const oldestTailIndex = retainOpening ? 1 : 0;
+  for (let index = messages.length - 2; index > oldestTailIndex; index -= 1) {
+    const nextTail = [messages[index]!, ...tail];
+    const retainedCount = nextTail.length + (retainOpening ? 1 : 0);
+    const candidate = serializeHistory(
+      historyEntries(
+        retainOpening ? [messages[0]!] : [],
+        messages.length - retainedCount,
+        nextTail,
+      ),
+    );
+    if (candidate.length > limit) {
+      break;
+    }
+    tail = nextTail;
+  }
+
+  const retainedCount = tail.length + (retainOpening ? 1 : 0);
+  const result = serializeHistory(
+    historyEntries(
+      retainOpening ? [messages[0]!] : [],
+      messages.length - retainedCount,
+      tail,
+    ),
+  );
+  if (result.length > limit) {
+    throw new Error('chat history limit is too small for truncation metadata');
+  }
+  return result;
 }
 
 export function participantPrompt({
@@ -204,19 +373,7 @@ export function interactiveChatPrompt({
 }): string {
   const identity = agent === 'codex' ? 'Codex' : 'Claude';
   const peer = agent === 'codex' ? 'Claude' : 'Codex';
-  const historyPayload = JSON.stringify(
-    clip(
-      JSON.stringify(
-        history.map(({ sequence, role, text, decision }) => ({
-          sequence,
-          role,
-          text,
-          ...(decision ? { decision } : {}),
-        })),
-      ),
-      Math.floor((MAX_CONTEXT_CHARS - 2) / 2),
-    ),
-  );
+  const historyPayload = JSON.stringify(boundedChatHistory(history));
   const peerContext = currentPeerResponse
     ? `
 ${peer}'s response in the current exchange, encoded as JSON:
@@ -239,6 +396,8 @@ ${JSON.stringify(clip(projectInstructions))}
 
 JSON string containing the bounded conversation history:
 ${historyPayload}
+
+${CHAT_HISTORY_METADATA_NOTE}
 ${peerContext}
 
 Set decision to "done" only when your answer and the peer's latest stated

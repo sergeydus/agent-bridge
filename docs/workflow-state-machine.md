@@ -20,8 +20,17 @@ created or reopened
 
 The first speaker alternates. If interruption occurs between speakers, the
 checkpoint records the pending peer and resume calls only that missing peer.
-Chat agreement means both structured decisions in the latest paired exchange
-are `done`; it does not imply implementation approval or authorize a write.
+Chat presents four derived paired-exchange states: none yet, waiting for the
+peer, open, and both marked `done`. The last state means exactly that both
+structured decisions in the latest adjacent paired exchange are `done`; the UI
+does not label it independently verified agreement. It does not imply
+implementation approval or authorize a write. `/auto` may use this state to
+stop, while a later human message or an explicitly confirmed `/auto` run can
+open another exchange.
+
+Complete input lines received during provider work wait in the readline queue
+until the next human prompt. They cannot enter between the first and second
+provider responses of an in-progress pair.
 
 ## Review-only
 

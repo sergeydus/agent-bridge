@@ -32,7 +32,14 @@ when a line containing only `.` is entered.
 
 The terminal completes slash commands and agent mentions with Tab. Its
 in-process input history is capped and deduplicated; Agent Bridge does not
-create a second persistent command-history file.
+create a second persistent command-history file. If a complete line arrives
+while provider work is active, readline queues it for the next prompt. It is
+never inserted between the two agents in the current paired exchange. The
+presentation model exposes only the queued count, not the queued text, and both
+plain and enhanced modes explain that behavior. This guarantee begins when
+readline receives a complete submitted line. In an enhanced TTY, partial input
+before Enter can still be echoed and repainted by live redraws; PTY-level input
+coordination remains separate hardening work.
 
 If interruption occurs after the first response, the checkpoint records the
 pending peer and exact saved message. Resume calls only that missing peer; it
@@ -40,15 +47,24 @@ does not repeat the already completed provider call.
 
 `/auto N` first previews its maximum exchanges and provider calls, then repeats
 paired exchanges until both providers return `done` for the same exchange or
-the requested limit is reached. This agreement applies only to the current
-answer; it never authorizes edits and never prevents a later human follow-up.
+the requested limit is reached. The UI calls that state “both marked done,” not
+independently verified agreement. It applies only to the current answer, never
+authorizes edits, and never prevents a later human follow-up. If `/auto` starts
+when the latest pair is already marked done, the preview says that continuing
+will deliberately open another exchange.
 
 ## Conversation memory
 
 Provider-native persistence is disabled. Agent Bridge stores ordered messages
-locally and embeds a bounded JSON representation in each new prompt. The
-beginning and end are retained when a long conversation exceeds the prompt
-budget. Providers may always inspect the selected project directly.
+locally and embeds a bounded JSON representation in each new prompt and linked
+workflow task. The serialized value always remains valid JSON. Recent complete
+messages are preferred; the opening message is also retained when it fits, and
+an explicit record gives the number of omitted messages. If one saved message
+is itself too large, its text carries a visible omission marker and a
+`truncatedCharacters` count instead of clipping the JSON syntax. New user
+messages are capped at 32,000 characters so one normal turn fits coherently
+within the history budget. Providers may always inspect the selected project
+directly.
 
 Every active session has:
 
@@ -167,9 +183,10 @@ interactive lock and checkpoint rules.
 
 The enhanced renderer has compact, stacked, and wide layouts. It redraws on
 resize, coalesces text-delta redraws, uses low-frequency activity animation,
-shows current model, phase, elapsed time, available token usage, and safety
-mode, neutralizes control sequences from conversation text, leaves one terminal
-row for the existing readline prompt, and never captures the mouse.
+shows current model, phase, elapsed time, available token usage, paired-exchange
+state, queued-input count, and safety mode, neutralizes control sequences from
+conversation text, leaves one terminal row for the existing readline prompt,
+and never captures the mouse.
 After an exchange, it prints the complete responses on the normal screen so
 native terminal scrollback remains available, then reconstructs its live frame
 before the next agent starts. It also suspends and restores the normal screen

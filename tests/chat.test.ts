@@ -9,6 +9,7 @@ import { promisify } from 'node:util';
 import {
   CHAT_HELP,
   completeChatInput,
+  MAX_USER_MESSAGE_CHARS,
   parseChatInput,
   type ChatTerminal,
 } from '../src/chat-input.ts';
@@ -36,6 +37,7 @@ class ScriptedTerminal implements ChatTerminal {
   pauses = 0;
   resumes = 0;
   closes = 0;
+  queuedInputObserver: ((count: number) => void) | undefined;
 
   constructor(inputs: string[]) {
     this.#inputs = [...inputs];
@@ -50,6 +52,11 @@ class ScriptedTerminal implements ChatTerminal {
   }
 
   redrawPrompt(): void {}
+
+  setQueuedInputObserver(observer?: (count: number) => void): void {
+    this.queuedInputObserver = observer;
+    observer?.(0);
+  }
 
   pause(): void {
     this.pauses += 1;
@@ -246,6 +253,17 @@ test('an unusable slash message is still rejected', () => {
   assert.equal(parseChatInput('/ask nobody hello').kind, 'invalid');
 });
 
+test('new messages cannot exceed the bounded prompt-history budget', () => {
+  assert.equal(
+    parseChatInput('x'.repeat(MAX_USER_MESSAGE_CHARS + 1)).kind,
+    'invalid',
+  );
+  assert.equal(
+    parseChatInput('x'.repeat(MAX_USER_MESSAGE_CHARS)).kind,
+    'message',
+  );
+});
+
 test('parses the remaining chat commands', () => {
   assert.deepEqual(parseChatInput('/implement claude'), {
     kind: 'workflow',
@@ -371,7 +389,7 @@ test('a chat-launched workflow forwards the resolved color choice', () => {
   assert.ok(!build(undefined).includes('--no-color'));
 });
 
-test('runs paired exchanges, autonomous agreement, and a linked workflow', async () => {
+test('runs paired exchanges, autonomous done decisions, and a linked workflow', async () => {
   const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
   const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
   const prompts: string[] = [];
@@ -435,8 +453,10 @@ test('runs paired exchanges, autonomous agreement, and a linked workflow', async
     assert.match(prompts[1] ?? '', /current exchange/);
     assert.equal(terminal.pauses, 1);
     assert.equal(terminal.resumes, 1);
+    assert.equal(terminal.queuedInputObserver, undefined);
     const output = terminal.output.join('');
-    assert.match(output, /agree on the current answer/);
+    assert.match(output, /same paired exchange done/);
+    assert.doesNotMatch(output, /agree on the current answer/);
     assert.match(output, /Maximum provider calls: 4/);
     assert.match(output, /Workflow preview/);
     assert.match(output, /Estimated provider calls:/);
@@ -447,6 +467,77 @@ test('runs paired exchanges, autonomous agreement, and a linked workflow', async
     assert.ok(output.includes('\u001B[?1049l\nPaste or type multiple lines'));
     assert.match(output, /Workflow preview[\s\S]+\nWorkflow finished/);
     assert.match(output, /\nChat chat-.* completed\./);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('chat startup task files use the interactive message limit', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const taskFile = join(project, 'oversized-task.txt');
+  const terminal = new ScriptedTerminal([]);
+  try {
+    await writeFile(taskFile, 'x'.repeat(MAX_USER_MESSAGE_CHARS + 1));
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const options = parseArgs(
+      ['chat', '--cwd', project, '--task-file', taskFile],
+      {
+        initialCwd: '/',
+        defaultOutput: paths.runsDirectory,
+      },
+    );
+
+    await assert.rejects(
+      () =>
+        runInteractiveChat({
+          options,
+          appPaths: paths,
+          providers: fakeProviders([], []),
+          terminal,
+        }),
+      /Chat startup message exceeds 32,000 characters/,
+    );
+    assert.equal(
+      await new ChatSessionStore(paths.chatsDirectory).latest(),
+      null,
+    );
+    assert.equal(terminal.queuedInputObserver, undefined);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('/auto warns before reopening a pair already marked done', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  let calls = 0;
+  const providers = providersWithRun(async () => {
+    calls += 1;
+    return { text: `done response ${calls}`, decision: 'done' };
+  });
+  const terminal = new ScriptedTerminal([
+    'Review this',
+    '/auto 1',
+    'n',
+    '/done',
+  ]);
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const options = parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+
+    await runInteractiveChat({ options, appPaths: paths, providers, terminal });
+
+    assert.equal(calls, 2);
+    assert.match(
+      terminal.output.join(''),
+      /latest pair is already marked done; starting will deliberately open another exchange/i,
+    );
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

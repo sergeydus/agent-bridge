@@ -95,7 +95,7 @@ Inside the chat:
 /ask codex|claude <text> Ask one agent directly
 /both <text>              Explicitly ask both agents
 @codex|@claude|@both ... Short form for a targeted message
-/auto [1-20]              Continue autonomously until agreement or the limit
+/auto [1-20]              Continue until both mark one paired exchange done
 /edit [codex|claude]      Preview and start safe alternating edits
 /implement codex|claude   Start safe fixed-role implementation and review
 /collaborate codex|claude Start safe alternating edits; named agent goes first
@@ -110,13 +110,24 @@ Inside the chat:
 
 Press Tab to complete commands and agent names. Readline history is available
 for the current process and removes duplicate entries; it is not written to a
-separate shell-history file.
+separate shell-history file. A complete line typed while an agent is working is
+queued for the next prompt. Both terminal modes show the queued count, never
+the queued text, and the line is never inserted between the two agents in the
+current paired exchange. This covers complete submitted lines. In an enhanced
+TTY, characters that have not reached Enter can still be echoed and repainted
+during live redraws; broader PTY input coordination remains hardening work.
 
 Ordinary messages and `/both` produce the normal two-agent exchange. `/ask`
 and the `@codex` or `@claude` forms call only the selected agent, which is
 useful for a focused follow-up without paying for an unnecessary peer call.
 The targeted message and response remain part of the shared bounded history.
 These conversational turns are read-only: they cannot edit project files.
+
+The terminal reports whether the latest paired exchange is waiting for its
+peer, remains open, or has two `done` decisions. “Both marked done” is the exact
+structured state; it is not presented as independently verified agreement.
+Starting `/auto` from that state explicitly previews that it will open another
+exchange.
 
 `/edit` is the recommended editing command. It chooses alternating
 implementation and review with Claude first; `/edit codex` changes the first
