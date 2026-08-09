@@ -118,6 +118,17 @@ test('screen-reader presentation is semantic and append-only', () => {
   assert.match(output, /Decision: done/);
   assert.equal(output.includes('\u001B['), false);
   assert.doesNotMatch(output, /[─●✓]/);
+
+  const confirmation = formatAgentStarted({
+    agent: 'codex',
+    model: 'test-model',
+    phase: 'confirmation',
+    preferences,
+  });
+  assert.match(
+    confirmation,
+    /Codex started a reciprocal confirmation using the model test-model/,
+  );
 });
 
 test('enhanced presentation colors speakers without relying on color', () => {

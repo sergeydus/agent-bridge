@@ -1,4 +1,4 @@
-import type { AgentDecision, AgentName } from './core.ts';
+import type { AgentDecision, AgentName, PairedExchangeStatus } from './core.ts';
 import type { ProviderEvent } from './provider-events.ts';
 
 export const MAX_PRESENTED_MESSAGES = 500;
@@ -6,8 +6,9 @@ export const MAX_PRESENTED_LIVE_TEXT_CHARS = 50_000;
 
 export type PresentedRole = 'user' | 'codex' | 'claude' | 'system';
 export type PresentedSessionStatus = 'active' | 'paused' | 'completed';
-export type PresentedExchangeStatus =
-  'none' | 'pending-peer' | 'open' | 'both-done';
+export type PresentedExchangeStatus = PairedExchangeStatus;
+
+export type PresentedActivityPhase = 'response' | 'confirmation';
 
 export interface PresentedMessage {
   readonly sequence: number;
@@ -31,6 +32,7 @@ export interface PresentedUsage {
 
 export interface PresentedActivity {
   readonly agent: AgentName;
+  readonly phase: PresentedActivityPhase;
   readonly model?: string;
   readonly startedAt: number;
   readonly observedAt: number;
@@ -74,6 +76,7 @@ export type PresentationModelEvent =
       type: 'agent-started';
       agent: AgentName;
       model?: string;
+      phase?: PresentedActivityPhase;
       startedAt: number;
     }
   | {
@@ -170,28 +173,6 @@ export function createTerminalViewModel({
   };
 }
 
-export function derivePairedExchangeStatus(
-  messages: readonly PresentedMessage[],
-  peerResponsePending: boolean,
-): PresentedExchangeStatus {
-  if (peerResponsePending) {
-    return 'pending-peer';
-  }
-  const latest = messages.slice(-2);
-  if (
-    latest.length !== 2 ||
-    !latest.every(
-      (message) => message.role === 'codex' || message.role === 'claude',
-    ) ||
-    latest[0]?.role === latest[1]?.role
-  ) {
-    return 'none';
-  }
-  return latest.every((message) => message.decision === 'done')
-    ? 'both-done'
-    : 'open';
-}
-
 export function reducePresentationModel(
   model: TerminalViewModel,
   event: PresentationModelEvent,
@@ -219,6 +200,7 @@ export function reducePresentationModel(
       ...model,
       activity: {
         agent: event.agent,
+        phase: event.phase ?? 'response',
         model: event.model,
         startedAt: event.startedAt,
         observedAt: event.startedAt,

@@ -2,7 +2,10 @@ import { readdir, rm } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 
 import {
+  deriveHistoricalPairedExchangeStatus,
+  describePairedExchangeStatus,
   isSafeRunId,
+  recordedExchangeFinalSequence,
   type AgentDecision,
   type AgentName,
   type ProjectKind,
@@ -16,6 +19,9 @@ import { sanitizeTerminalText } from './terminal-text.ts';
 const MAX_CHAT_FILE_BYTES = 50_000_000;
 const MAX_CHAT_MESSAGES = 10_000;
 const MAX_CHAT_MESSAGE_CHARS = 2_000_000;
+
+export const LEGACY_PENDING_EXCHANGE_WARNING =
+  'An unfinished exchange from an older version was discarded; send a message to start a new one.';
 
 export type ChatStatus = 'active' | 'paused' | 'completed';
 export type ChatRole = 'user' | 'codex' | 'claude' | 'system';
@@ -38,14 +44,42 @@ export interface ChatWorkflowEvent {
   exitCode: number;
 }
 
-export interface PendingChatExchange {
+export type PendingChatExchange =
+  | {
+      stage: 'awaiting-peer';
+      firstAgent: AgentName;
+      secondAgent: AgentName;
+      firstMessageSequence: number;
+    }
+  | {
+      stage: 'awaiting-confirmation';
+      firstAgent: AgentName;
+      secondAgent: AgentName;
+      firstMessageSequence: number;
+      secondMessageSequence: number;
+    };
+
+export interface SettledChatExchange {
   firstAgent: AgentName;
   secondAgent: AgentName;
   firstMessageSequence: number;
+  secondMessageSequence: number;
+  confirmationMessageSequence?: number;
+  outcome: 'open' | 'confirmed';
 }
 
+export interface AbandonedChatExchange {
+  firstAgent: AgentName;
+  secondAgent: AgentName;
+  firstMessageSequence: number;
+  secondMessageSequence?: number;
+  outcome: 'abandoned';
+}
+
+export type RecordedChatExchange = SettledChatExchange | AbandonedChatExchange;
+
 export interface ChatSession {
-  version: 3;
+  version: 4;
   id: string;
   createdAt: string;
   updatedAt: string;
@@ -70,6 +104,7 @@ export interface ChatSession {
   claudeEffort?: ReasoningEffort;
   nextFirstAgent?: AgentName;
   pendingExchange?: PendingChatExchange;
+  latestPairedExchange?: RecordedChatExchange;
   messages: ChatMessage[];
   workflows: ChatWorkflowEvent[];
 }
@@ -163,69 +198,203 @@ function isWorkflowEvent(value: unknown): value is ChatWorkflowEvent {
   );
 }
 
+const CHAT_SESSION_KEYS = [
+  'version',
+  'id',
+  'createdAt',
+  'updatedAt',
+  'status',
+  'projectRoot',
+  'projectKind',
+  'maxAutoRounds',
+  'maxWorkflowRounds',
+  'retries',
+  'timeoutMinutes',
+  'noTranscript',
+  'screenReader',
+  'color',
+  'ui',
+  'codexModel',
+  'claudeModel',
+  'codexEffort',
+  'claudeEffort',
+  'nextFirstAgent',
+  'pendingExchange',
+  'latestPairedExchange',
+  'messages',
+  'workflows',
+] as const;
+
+const VERSION_THREE_CHAT_SESSION_KEYS = CHAT_SESSION_KEYS.filter(
+  (key) => key !== 'latestPairedExchange',
+);
+
+function referencedMessage(
+  messages: ChatMessage[],
+  sequence: unknown,
+): ChatMessage | undefined {
+  if (!Number.isInteger(sequence) || Number(sequence) < 1) {
+    return undefined;
+  }
+  const message = messages[Number(sequence) - 1];
+  return message?.sequence === sequence ? message : undefined;
+}
+
+function hasValidExchangeAgents(value: Record<string, unknown>): boolean {
+  return (
+    isAgent(value.firstAgent) &&
+    isAgent(value.secondAgent) &&
+    value.firstAgent !== value.secondAgent
+  );
+}
+
 function isPendingExchange(
   value: unknown,
   messages: ChatMessage[],
 ): value is PendingChatExchange {
+  if (!isRecord(value) || !hasValidExchangeAgents(value)) {
+    return false;
+  }
+  const firstMessage = referencedMessage(messages, value.firstMessageSequence);
+  if (!firstMessage || firstMessage.role !== value.firstAgent) {
+    return false;
+  }
+  if (value.stage === 'awaiting-peer') {
+    return (
+      hasOnlyKeys(value, [
+        'stage',
+        'firstAgent',
+        'secondAgent',
+        'firstMessageSequence',
+      ]) && firstMessage.sequence === messages.length
+    );
+  }
   if (
-    !isRecord(value) ||
+    value.stage !== 'awaiting-confirmation' ||
     !hasOnlyKeys(value, [
+      'stage',
       'firstAgent',
       'secondAgent',
       'firstMessageSequence',
-    ]) ||
-    !isAgent(value.firstAgent) ||
-    !isAgent(value.secondAgent) ||
-    value.firstAgent === value.secondAgent ||
-    !Number.isInteger(value.firstMessageSequence)
-  ) {
-    return false;
-  }
-  const firstMessage = messages[Number(value.firstMessageSequence) - 1];
-  return (
-    Number(value.firstMessageSequence) >= 1 &&
-    firstMessage !== undefined &&
-    firstMessage.sequence === value.firstMessageSequence &&
-    firstMessage.role === value.firstAgent
-  );
-}
-
-export function isChatSession(value: unknown): value is ChatSession {
-  if (!isRecord(value)) {
-    return false;
-  }
-  if (
-    !hasOnlyKeys(value, [
-      'version',
-      'id',
-      'createdAt',
-      'updatedAt',
-      'status',
-      'projectRoot',
-      'projectKind',
-      'maxAutoRounds',
-      'maxWorkflowRounds',
-      'retries',
-      'timeoutMinutes',
-      'noTranscript',
-      'screenReader',
-      'color',
-      'ui',
-      'codexModel',
-      'claudeModel',
-      'codexEffort',
-      'claudeEffort',
-      'nextFirstAgent',
-      'pendingExchange',
-      'messages',
-      'workflows',
+      'secondMessageSequence',
     ])
   ) {
     return false;
   }
+  const secondMessage = referencedMessage(
+    messages,
+    value.secondMessageSequence,
+  );
+  return (
+    secondMessage !== undefined &&
+    secondMessage.role === value.secondAgent &&
+    secondMessage.sequence === firstMessage.sequence + 1 &&
+    secondMessage.sequence === messages.length &&
+    firstMessage.decision === 'done' &&
+    secondMessage.decision === 'done'
+  );
+}
+
+function isRecordedExchange(
+  value: unknown,
+  messages: ChatMessage[],
+): value is RecordedChatExchange {
+  if (!isRecord(value) || !hasValidExchangeAgents(value)) {
+    return false;
+  }
+  const firstMessage = referencedMessage(messages, value.firstMessageSequence);
+  if (!firstMessage || firstMessage.role !== value.firstAgent) {
+    return false;
+  }
+  if (value.outcome === 'abandoned') {
+    if (
+      !hasOnlyKeys(value, [
+        'firstAgent',
+        'secondAgent',
+        'firstMessageSequence',
+        'secondMessageSequence',
+        'outcome',
+      ])
+    ) {
+      return false;
+    }
+    if (value.secondMessageSequence === undefined) {
+      return true;
+    }
+    const secondMessage = referencedMessage(
+      messages,
+      value.secondMessageSequence,
+    );
+    return (
+      secondMessage !== undefined &&
+      secondMessage.role === value.secondAgent &&
+      secondMessage.sequence === firstMessage.sequence + 1 &&
+      firstMessage.decision === 'done' &&
+      secondMessage.decision === 'done'
+    );
+  }
+  if (
+    (value.outcome !== 'open' && value.outcome !== 'confirmed') ||
+    !hasOnlyKeys(value, [
+      'firstAgent',
+      'secondAgent',
+      'firstMessageSequence',
+      'secondMessageSequence',
+      'confirmationMessageSequence',
+      'outcome',
+    ])
+  ) {
+    return false;
+  }
+  const secondMessage = referencedMessage(
+    messages,
+    value.secondMessageSequence,
+  );
+  if (
+    !secondMessage ||
+    secondMessage.role !== value.secondAgent ||
+    secondMessage.sequence !== firstMessage.sequence + 1
+  ) {
+    return false;
+  }
+  const confirmationMessage =
+    value.confirmationMessageSequence === undefined
+      ? undefined
+      : referencedMessage(messages, value.confirmationMessageSequence);
+  if (value.confirmationMessageSequence !== undefined && !confirmationMessage) {
+    return false;
+  }
+  if (
+    confirmationMessage &&
+    (confirmationMessage.role !== value.firstAgent ||
+      confirmationMessage.sequence !== secondMessage.sequence + 1)
+  ) {
+    return false;
+  }
+  if (value.outcome === 'confirmed') {
+    return (
+      confirmationMessage !== undefined &&
+      firstMessage.decision === 'done' &&
+      secondMessage.decision === 'done' &&
+      confirmationMessage.decision === 'done'
+    );
+  }
+  if (confirmationMessage) {
+    return (
+      firstMessage.decision === 'done' &&
+      secondMessage.decision === 'done' &&
+      confirmationMessage.decision === 'continue'
+    );
+  }
+  return (
+    firstMessage.decision === 'continue' ||
+    secondMessage.decision === 'continue'
+  );
+}
+
+function hasValidCommonSessionFields(value: Record<string, unknown>): boolean {
   const session = value as Partial<ChatSession>;
   return (
-    session.version === 3 &&
     typeof session.id === 'string' &&
     isSafeRunId(session.id) &&
     isIsoDateTime(session.createdAt) &&
@@ -265,11 +434,91 @@ export function isChatSession(value: unknown): value is ChatSession {
     session.messages.every(
       (message, index) => message.sequence === index + 1,
     ) &&
-    (session.pendingExchange === undefined ||
-      isPendingExchange(session.pendingExchange, session.messages)) &&
     Array.isArray(session.workflows) &&
     session.workflows.every(isWorkflowEvent) &&
     session.workflows.every((event, index) => event.sequence === index + 1)
+  );
+}
+
+function isLegacyPendingExchange(
+  value: unknown,
+  messages: ChatMessage[],
+): value is Omit<
+  Extract<PendingChatExchange, { stage: 'awaiting-peer' }>,
+  'stage'
+> {
+  if (
+    !isRecord(value) ||
+    !hasOnlyKeys(value, [
+      'firstAgent',
+      'secondAgent',
+      'firstMessageSequence',
+    ]) ||
+    !hasValidExchangeAgents(value)
+  ) {
+    return false;
+  }
+  const firstMessage = referencedMessage(messages, value.firstMessageSequence);
+  return firstMessage !== undefined && firstMessage.role === value.firstAgent;
+}
+
+function isVersionThreeChatSession(value: unknown): value is Record<
+  string,
+  unknown
+> & {
+  version: 3;
+  status: ChatStatus;
+  pendingExchange?: Omit<
+    Extract<PendingChatExchange, { stage: 'awaiting-peer' }>,
+    'stage'
+  >;
+  messages: ChatMessage[];
+} {
+  if (
+    !isRecord(value) ||
+    value.version !== 3 ||
+    !hasOnlyKeys(value, VERSION_THREE_CHAT_SESSION_KEYS) ||
+    !hasValidCommonSessionFields(value)
+  ) {
+    return false;
+  }
+  const messages = value.messages as ChatMessage[];
+  return (
+    value.pendingExchange === undefined ||
+    isLegacyPendingExchange(value.pendingExchange, messages)
+  );
+}
+
+export function isChatSession(value: unknown): value is ChatSession {
+  if (
+    !isRecord(value) ||
+    value.version !== 4 ||
+    !hasOnlyKeys(value, CHAT_SESSION_KEYS) ||
+    !hasValidCommonSessionFields(value)
+  ) {
+    return false;
+  }
+  const session = value as unknown as ChatSession;
+  if (
+    session.pendingExchange !== undefined &&
+    !isPendingExchange(session.pendingExchange, session.messages)
+  ) {
+    return false;
+  }
+  if (
+    session.latestPairedExchange !== undefined &&
+    !isRecordedExchange(session.latestPairedExchange, session.messages)
+  ) {
+    return false;
+  }
+  if (session.status === 'completed' && session.pendingExchange) {
+    return false;
+  }
+  return !(
+    session.pendingExchange &&
+    session.latestPairedExchange &&
+    session.pendingExchange.firstMessageSequence <=
+      recordedExchangeFinalSequence(session.latestPairedExchange)
   );
 }
 
@@ -302,7 +551,10 @@ function hasValidLegacyFields(value: Record<string, unknown>): boolean {
   );
 }
 
-function migrateChatSession(value: unknown): unknown {
+function migrateChatSession(
+  value: unknown,
+  onWarning: (message: string) => void,
+): unknown {
   if (!isRecord(value)) {
     return value;
   }
@@ -332,10 +584,50 @@ function migrateChatSession(value: unknown): unknown {
       ...(color === undefined ? {} : { color }),
     };
   }
+  if (migrated.version === 3) {
+    if (!isVersionThreeChatSession(migrated)) {
+      return migrated;
+    }
+    const pending = migrated.pendingExchange;
+    if (!pending) {
+      return { ...migrated, version: 4 };
+    }
+    const rest: Record<string, unknown> = { ...migrated };
+    delete rest.pendingExchange;
+    if (pending.firstMessageSequence !== migrated.messages.length) {
+      onWarning(LEGACY_PENDING_EXCHANGE_WARNING);
+      return { ...rest, version: 4 };
+    }
+    if (migrated.status === 'completed') {
+      return {
+        ...rest,
+        version: 4,
+        latestPairedExchange: {
+          firstAgent: pending.firstAgent,
+          secondAgent: pending.secondAgent,
+          firstMessageSequence: pending.firstMessageSequence,
+          outcome: 'abandoned',
+        },
+      };
+    }
+    return {
+      ...rest,
+      version: 4,
+      pendingExchange: {
+        stage: 'awaiting-peer',
+        ...pending,
+      },
+    };
+  }
   return migrated;
 }
 
 export function formatChatTranscript(session: ChatSession): string {
+  const exchangeStatus = deriveHistoricalPairedExchangeStatus({
+    messages: session.messages,
+    pendingStage: session.pendingExchange?.stage,
+    latestExchange: session.latestPairedExchange,
+  });
   const lines = [
     '# Agent Bridge Interactive Chat',
     '',
@@ -345,6 +637,7 @@ export function formatChatTranscript(session: ChatSession): string {
     `- Status: ${session.status}`,
     `- Project: ${session.projectRoot}`,
     `- Project type: ${session.projectKind}`,
+    `- Latest paired exchange: ${describePairedExchangeStatus(exchangeStatus)}`,
     '',
   ];
   for (const message of session.messages) {
@@ -446,7 +739,11 @@ export class ChatSessionStore {
       );
     }
     const destination = this.pathFor(session.id);
-    await writePrivateFileAtomic(destination, serialized);
+    // The JSON checkpoint is authoritative. Prepare its derived transcript
+    // first so a transcript failure cannot make a response durable after
+    // save() reports that the checkpoint failed. A JSON write failure may
+    // leave a newer transcript temporarily, but load/resume continues from the
+    // last valid JSON and the next successful save repairs the transcript.
     if (session.noTranscript) {
       await rm(this.transcriptPathFor(session.id), { force: true });
     } else {
@@ -455,6 +752,7 @@ export class ChatSessionStore {
         formatChatTranscript(persisted),
       );
     }
+    await writePrivateFileAtomic(destination, serialized);
     Object.assign(session, persisted);
   }
 
@@ -477,6 +775,7 @@ export class ChatSessionStore {
     }
     const parsed: unknown = migrateChatSession(
       JSON.parse(contents.toString('utf8')),
+      this.#onWarning,
     );
     if (!isChatSession(parsed)) {
       throw new Error(`Invalid saved chat: ${id}`);

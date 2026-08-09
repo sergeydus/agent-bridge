@@ -17,7 +17,7 @@ export const CHAT_HELP = `Interactive chat commands
   /ask codex|claude <message>    Ask only one agent
   /both <message>                Explicitly ask both agents
   @codex|@claude|@both <message> Short form for a targeted message
-  /auto [1-20]                   Continue until both mark a pair done or the limit
+  /auto [1-20]                   Continue until reciprocal confirmation or the limit
   /edit [codex|claude]           Safely alternate editing and review
   /implement codex|claude        Named agent edits; the other agent reviews
   /collaborate codex|claude      Plan, then alternate editing and reviewing
@@ -27,7 +27,7 @@ export const CHAT_HELP = `Interactive chat commands
   /history [1-50]               Show recent messages
   /help                         Show these commands
   /pause                        Save and leave; resume with chat --resume <id>
-  /done                         Complete and leave the session
+  /done                         Complete; confirms before abandoning pending work
 
   Ctrl+C cancels active agent work; press it at the prompt to save and leave.
   Lines typed while agents work are queued for the next prompt, never inserted

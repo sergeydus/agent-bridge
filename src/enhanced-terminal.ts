@@ -1,4 +1,8 @@
-import { formatDuration, type AgentName } from './core.ts';
+import {
+  describePairedExchangeStatus,
+  formatDuration,
+  type AgentName,
+} from './core.ts';
 import type { TerminalRenderer } from './presentation.ts';
 import type {
   PresentedActivity,
@@ -332,13 +336,9 @@ function usageSummary(usage: PresentedUsage | undefined): string | undefined {
 function statusLine(model: TerminalViewModel, width: number): string {
   const activity = model.activity;
   const exchange =
-    model.exchangeStatus === 'pending-peer'
-      ? 'pair waiting for peer'
-      : model.exchangeStatus === 'both-done'
-        ? 'pair both done'
-        : model.exchangeStatus === 'open'
-          ? 'pair open'
-          : undefined;
+    model.exchangeStatus === 'none'
+      ? undefined
+      : `pair ${describePairedExchangeStatus(model.exchangeStatus)}`;
   const queued =
     model.queuedInputCount > 0 ? `${model.queuedInputCount} queued` : undefined;
   if (!activity) {
@@ -354,7 +354,9 @@ function statusLine(model: TerminalViewModel, width: number): string {
   const phase =
     activity.state === 'retrying'
       ? `retrying ${activity.retryAttempt ?? '?'}/${activity.retryLimit ?? '?'}`
-      : (activity.message ?? 'responding');
+      : activity.phase === 'confirmation'
+        ? `reciprocal confirmation${activity.message ? ` · ${activity.message}` : ''}`
+        : (activity.message ?? 'responding');
   const usage = usageSummary(activity.usage);
   return clipLine(
     `${activityIndicator(activity)} ${agentLabel(activity.agent)} · ${phase} · ${elapsed}` +
@@ -369,7 +371,9 @@ function sessionHeading(model: TerminalViewModel): string {
       ? `…${model.session.id.slice(-8)}`
       : model.session.id;
   const state = model.activity
-    ? `${agentLabel(model.activity.agent)} responding`
+    ? `${agentLabel(model.activity.agent)} ${
+        model.activity.phase === 'confirmation' ? 'confirming' : 'responding'
+      }`
     : model.session.status === 'active'
       ? 'Ready'
       : model.session.status;

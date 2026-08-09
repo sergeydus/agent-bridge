@@ -80,7 +80,7 @@ Options:
   --until-agreement       Continue until both agents return done
   --require-agreement     Return a non-zero exit code if agreement is not reached
   --max-rounds <number>   Workflow agreement/cycle cap, default: 6
-  --max-auto-rounds <n>   Automatic chat exchange cap, default: 6
+  --max-auto-rounds <n>   Automatic reciprocal-exchange cap, default: 6
   --implementer <agent>   Let codex or claude edit; the other reviews
   --collaborative <agent> Discuss, then alternate edits; agent edits first
   --allow-dirty           Permit direct editing with existing local changes

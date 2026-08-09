@@ -164,16 +164,32 @@ test('enhanced status shows animated progress, model, usage, and safety mode', (
   });
   const pairedDone = reducePresentationModel(completed, {
     type: 'exchange-status',
-    status: 'both-done',
+    status: 'confirmed',
   });
   const queued = reducePresentationModel(pairedDone, {
     type: 'queued-input',
     count: 2,
   });
   assert.match(
-    renderEnhancedFrame(queued, { columns: 160, rows: 24 }),
-    /Ready · read-only chat · 2 queued · pair both done · last in 12k \/ cached 4\.6k \/ out 789/,
+    renderEnhancedFrame(queued, { columns: 240, rows: 24 }),
+    /Ready · read-only chat · 2 queued · pair both agents reciprocally marked this exchange done · last in 12k \/ cached 4\.6k \/ out 789/,
   );
+});
+
+test('enhanced activity identifies reciprocal confirmation', () => {
+  const confirmation = reducePresentationModel(viewModel(), {
+    type: 'agent-started',
+    agent: 'codex',
+    phase: 'confirmation',
+    startedAt: 1_000,
+  });
+
+  const frame = renderEnhancedFrame(confirmation, {
+    columns: 120,
+    rows: 24,
+  });
+  assert.match(frame, /Codex confirming/);
+  assert.match(frame, /Codex · reciprocal confirmation/);
 });
 
 test('enhanced live conversation follows the newest response text', () => {

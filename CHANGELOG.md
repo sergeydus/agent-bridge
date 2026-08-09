@@ -2,16 +2,36 @@
 
 ## Unreleased
 
+- Advanced interactive chat checkpoints to version 4 with validated staged
+  pending exchanges and explicit open, confirmed, or abandoned exchange
+  provenance. Versions 1 through 3 migrate conservatively; ambiguous legacy
+  pending metadata is dropped without losing messages or session status and
+  emits a bounded recovery warning. Linked workflow commands now finish any
+  outstanding peer response before preflight, so they cannot append a system
+  message behind a stale pending peer or confirmation reference.
 - Kept interactive-chat and workflow-handoff history as valid JSON under the
   prompt budget by omitting whole messages with an explicit count and marking
   unavoidable single-message text truncation. Agent prompts now explain both
   metadata forms, and typed, `--task`, and `--task-file` chat messages share a
   coherent 32,000-character limit with that budget.
-- Added renderer-neutral paired-exchange state for waiting, open, and both-done
-  outcomes. Plain, screen-reader, enhanced, `/status`, and `/auto` output now
-  reports the exact structured state without overstating two `done` decisions
-  as independently verified agreement; `/auto` warns before reopening an
-  already-done pair.
+- Added reciprocal confirmation when both initial chat responses return
+  `done`. The original first agent evaluates the exact saved peer response in a
+  third read-only call; only its checkpointed `done` marks the exchange
+  confirmed. Plain, screen-reader, enhanced, `/status`, transcript, and `/auto`
+  output share explicit pending-peer, pending-confirmation, open, legacy
+  both-done, confirmed, and abandoned states without claiming independent
+  verification or editing approval. A newer message now clears that result
+  from live current state while the transcript preserves the recorded pair as
+  historical evidence.
+- Made one `/auto` round include conditional confirmation, with honest `3N`,
+  `3N - 1`, and `3N - 2` worst-case call previews. Cancellation and exhausted
+  provider failures stop automation at every stage without dropping saved
+  work. Provider failures return to the usable chat prompt, and `/done` can
+  explicitly abandon either unfinished stage after a default-no confirmation.
+- Made the JSON chat checkpoint the final save commit after transcript
+  preparation. A reported transcript or response-save failure therefore leaves
+  the authoritative checkpoint intact and clearly warns that resume may repeat
+  only an uncheckpointed read-only provider call.
 - Made complete terminal lines typed during provider work visibly queue for the
   next prompt instead of appearing lost in enhanced redraws. Both renderers show
   only the queue count. The readline path is now injectable, and deterministic

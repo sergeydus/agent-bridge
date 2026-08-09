@@ -5,7 +5,6 @@ import {
   MAX_PRESENTED_LIVE_TEXT_CHARS,
   MAX_PRESENTED_MESSAGES,
   createTerminalViewModel,
-  derivePairedExchangeStatus,
   reducePresentationModel,
   type PresentedMessage,
 } from '../src/presentation-model.ts';
@@ -59,34 +58,6 @@ test('creates a bounded renderer-neutral view of persisted chat state', () => {
   assert.equal(model.queuedInputCount, 0);
 });
 
-test('derives only adjacent two-agent responses as a paired exchange', () => {
-  const codex: PresentedMessage = {
-    sequence: 2,
-    createdAt: new Date(2_000).toISOString(),
-    role: 'codex',
-    text: 'Codex answer',
-    decision: 'done',
-  };
-  const claude: PresentedMessage = {
-    sequence: 3,
-    createdAt: new Date(3_000).toISOString(),
-    role: 'claude',
-    text: 'Claude answer',
-    decision: 'done',
-  };
-
-  assert.equal(derivePairedExchangeStatus([codex], true), 'pending-peer');
-  assert.equal(derivePairedExchangeStatus([codex, claude], false), 'both-done');
-  assert.equal(
-    derivePairedExchangeStatus(
-      [codex, { ...claude, decision: 'continue' }],
-      false,
-    ),
-    'open',
-  );
-  assert.equal(derivePairedExchangeStatus([message(1), codex], false), 'none');
-});
-
 test('reduces and announces paired exchange status without claiming agreement', () => {
   const output: string[] = [];
   const controller = new PresentationController({
@@ -99,12 +70,30 @@ test('reduces and announces paired exchange status without claiming agreement', 
   });
 
   controller.dispatch({ type: 'exchange-status', status: 'pending-peer' });
+  controller.dispatch({
+    type: 'exchange-status',
+    status: 'pending-confirmation',
+  });
   controller.dispatch({ type: 'exchange-status', status: 'both-done' });
+  controller.dispatch({ type: 'exchange-status', status: 'confirmed' });
+  controller.dispatch({ type: 'exchange-status', status: 'abandoned' });
 
-  assert.equal(controller.model.exchangeStatus, 'both-done');
-  assert.match(output.join(''), /waiting for the peer response/);
-  assert.match(output.join(''), /both agents marked this paired exchange done/);
-  assert.doesNotMatch(output.join(''), /agree/i);
+  assert.equal(controller.model.exchangeStatus, 'abandoned');
+  assert.match(output.join(''), /waiting for peer response/);
+  assert.match(output.join(''), /waiting for reciprocal confirmation/);
+  assert.match(
+    output.join(''),
+    /both agents marked the legacy pair done; not reciprocally confirmed/,
+  );
+  assert.match(
+    output.join(''),
+    /both agents reciprocally marked this exchange done/,
+  );
+  assert.match(
+    output.join(''),
+    /exchange left unfinished when the session was completed/,
+  );
+  assert.doesNotMatch(output.join(''), /verified/i);
 });
 
 test('reduces and announces only queued input counts', () => {
