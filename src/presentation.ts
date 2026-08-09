@@ -1,6 +1,10 @@
-import { formatDuration, type AgentDecision, type AgentName } from './core.ts';
 import {
-  describePresentedExchangeStatus,
+  describePairedExchangeStatus,
+  formatDuration,
+  type AgentDecision,
+  type AgentName,
+} from './core.ts';
+import {
   MAX_PRESENTED_LIVE_TEXT_CHARS,
   reducePresentationModel,
   type PresentedActivityPhase,
@@ -540,7 +544,7 @@ export function createPlainTerminalRenderer(
         if (event.status === 'none') {
           return '';
         }
-        const status = describePresentedExchangeStatus(event.status);
+        const status = describePairedExchangeStatus(event.status);
         return preferences.screenReader
           ? `Paired exchange status: ${status}.\n`
           : `  Paired exchange · ${status}\n`;

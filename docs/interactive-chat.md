@@ -108,6 +108,11 @@ record points behind later saved messages, migration preserves every message
 and the session status, discards only that ambiguous pending pointer, and emits
 a warning inviting the user to start a new exchange.
 
+Live presentation and `/status` describe the current conversational context.
+After a newer user, system, or targeted-agent message, they show no current
+paired result until another pair begins. The transcript's latest-pair field is
+historical and continues to report the stored completed or abandoned record.
+
 Completed sessions remain reopenable. `/pause`, Ctrl+D, and idle interruption
 leave the session resumable. Ctrl+C during active provider work cancels that
 operation and returns to the saved chat; a second idle Ctrl+C pauses it.

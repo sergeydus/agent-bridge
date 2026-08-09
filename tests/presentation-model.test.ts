@@ -5,7 +5,6 @@ import {
   MAX_PRESENTED_LIVE_TEXT_CHARS,
   MAX_PRESENTED_MESSAGES,
   createTerminalViewModel,
-  derivePairedExchangeStatus,
   reducePresentationModel,
   type PresentedMessage,
 } from '../src/presentation-model.ts';
@@ -57,59 +56,6 @@ test('creates a bounded renderer-neutral view of persisted chat state', () => {
   assert.equal(model.activity, undefined);
   assert.equal(model.exchangeStatus, 'none');
   assert.equal(model.queuedInputCount, 0);
-});
-
-test('derives only adjacent two-agent responses as a paired exchange', () => {
-  const codex: PresentedMessage = {
-    sequence: 2,
-    createdAt: new Date(2_000).toISOString(),
-    role: 'codex',
-    text: 'Codex answer',
-    decision: 'done',
-  };
-  const claude: PresentedMessage = {
-    sequence: 3,
-    createdAt: new Date(3_000).toISOString(),
-    role: 'claude',
-    text: 'Claude answer',
-    decision: 'done',
-  };
-
-  assert.equal(
-    derivePairedExchangeStatus({
-      messages: [codex],
-      pendingStage: 'awaiting-peer',
-    }),
-    'pending-peer',
-  );
-  assert.equal(
-    derivePairedExchangeStatus({
-      messages: [codex, claude],
-      pendingStage: 'awaiting-confirmation',
-    }),
-    'pending-confirmation',
-  );
-  assert.equal(
-    derivePairedExchangeStatus({ messages: [codex, claude] }),
-    'both-done',
-  );
-  assert.equal(
-    derivePairedExchangeStatus({
-      messages: [codex, { ...claude, decision: 'continue' }],
-    }),
-    'open',
-  );
-  assert.equal(
-    derivePairedExchangeStatus({
-      messages: [message(1), codex],
-      latestOutcome: 'confirmed',
-    }),
-    'confirmed',
-  );
-  assert.equal(
-    derivePairedExchangeStatus({ messages: [message(1), codex] }),
-    'none',
-  );
 });
 
 test('reduces and announces paired exchange status without claiming agreement', () => {

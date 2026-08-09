@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  deriveCurrentPairedExchangeStatus,
+  deriveHistoricalPairedExchangeStatus,
   editorForRound,
   estimateCalls,
   formatDuration,
@@ -10,7 +12,20 @@ import {
   otherAgent,
   legacyDecision,
   summarizePorcelainStatus,
+  type PairedExchangeMessage,
 } from '../src/core.ts';
+
+function exchangeMessage(
+  sequence: number,
+  role: PairedExchangeMessage['role'],
+  decision?: PairedExchangeMessage['decision'],
+): PairedExchangeMessage {
+  return {
+    sequence,
+    role,
+    ...(decision === undefined ? {} : { decision }),
+  };
+}
 
 test('alternates collaborative editors deterministically', () => {
   assert.equal(editorForRound('claude', 1), 'claude');
@@ -18,6 +33,84 @@ test('alternates collaborative editors deterministically', () => {
   assert.equal(editorForRound('claude', 3), 'claude');
   assert.equal(otherAgent('codex'), 'claude');
   assert.throws(() => editorForRound('codex', 0));
+});
+
+test('derives pending and legacy paired exchange state deterministically', () => {
+  const codex = exchangeMessage(2, 'codex', 'done');
+  const claude = exchangeMessage(3, 'claude', 'done');
+
+  assert.equal(
+    deriveCurrentPairedExchangeStatus({
+      messages: [codex],
+      pendingStage: 'awaiting-peer',
+    }),
+    'pending-peer',
+  );
+  assert.equal(
+    deriveCurrentPairedExchangeStatus({
+      messages: [codex, claude],
+      pendingStage: 'awaiting-confirmation',
+    }),
+    'pending-confirmation',
+  );
+  assert.equal(
+    deriveCurrentPairedExchangeStatus({ messages: [codex, claude] }),
+    'both-done',
+  );
+  assert.equal(
+    deriveCurrentPairedExchangeStatus({
+      messages: [codex, { ...claude, decision: 'continue' }],
+    }),
+    'open',
+  );
+  assert.equal(
+    deriveCurrentPairedExchangeStatus({
+      messages: [exchangeMessage(1, 'user'), codex],
+    }),
+    'none',
+  );
+});
+
+test('separates current exchange state from historical paired evidence', () => {
+  const recorded = {
+    firstMessageSequence: 2,
+    secondMessageSequence: 3,
+    confirmationMessageSequence: 4,
+    outcome: 'confirmed' as const,
+  };
+  const confirmedMessages = [
+    exchangeMessage(1, 'user'),
+    exchangeMessage(2, 'codex', 'done'),
+    exchangeMessage(3, 'claude', 'done'),
+    exchangeMessage(4, 'codex', 'done'),
+  ];
+
+  assert.equal(
+    deriveCurrentPairedExchangeStatus({
+      messages: confirmedMessages,
+      latestExchange: recorded,
+    }),
+    'confirmed',
+  );
+  for (const role of ['user', 'system', 'claude'] as const) {
+    const messages = [...confirmedMessages, exchangeMessage(5, role)];
+    assert.equal(
+      deriveCurrentPairedExchangeStatus({
+        messages,
+        latestExchange: recorded,
+      }),
+      'none',
+      `${role} opens a new current conversational context`,
+    );
+    assert.equal(
+      deriveHistoricalPairedExchangeStatus({
+        messages,
+        latestExchange: recorded,
+      }),
+      'confirmed',
+      `${role} does not erase historical paired evidence`,
+    );
+  }
 });
 
 test('migrates only one unambiguous legacy status tag', () => {

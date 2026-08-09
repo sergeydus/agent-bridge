@@ -20,7 +20,9 @@
   confirmed. Plain, screen-reader, enhanced, `/status`, transcript, and `/auto`
   output share explicit pending-peer, pending-confirmation, open, legacy
   both-done, confirmed, and abandoned states without claiming independent
-  verification or editing approval.
+  verification or editing approval. A newer message now clears that result
+  from live current state while the transcript preserves the recorded pair as
+  historical evidence.
 - Made one `/auto` round include conditional confirmation, with honest `3N`,
   `3N - 1`, and `3N - 2` worst-case call previews. Cancellation and exhausted
   provider failures stop automation at every stage without dropping saved

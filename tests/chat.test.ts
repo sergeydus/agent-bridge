@@ -570,6 +570,57 @@ test('/auto warns before reopening an already confirmed exchange', async () => {
   }
 });
 
+test('a newer unanswered message clears live confirmation but keeps transcript history', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  let calls = 0;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const providers = providersWithRun(async () => {
+      calls += 1;
+      if (calls === 4) {
+        throw new ProcessAbortError();
+      }
+      return { text: `done response ${calls}`, decision: 'done' };
+    });
+    const terminal = new ScriptedTerminal([
+      'Review this',
+      'Now answer a different question',
+      '/status',
+      '/pause',
+    ]);
+
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+        initialCwd: project,
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers,
+      terminal,
+    });
+
+    assert.equal(calls, 4);
+    const saved = await store.latest();
+    assert.ok(saved);
+    assert.equal(saved.status, 'paused');
+    assert.equal(saved.latestPairedExchange?.outcome, 'confirmed');
+    assert.deepEqual(
+      saved.messages.map((message) => message.role),
+      ['user', 'codex', 'claude', 'codex', 'user'],
+    );
+    assert.match(terminal.output.join(''), /Latest paired exchange: none yet/);
+    assert.match(
+      await readFile(store.transcriptPathFor(saved.id), 'utf8'),
+      /Latest paired exchange: both agents reciprocally marked this exchange done/,
+    );
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('/auto previews three-stage call bounds from either pending stage', async () => {
   for (const pendingStage of ['peer', 'confirmation'] as const) {
     const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));

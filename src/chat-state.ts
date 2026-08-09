@@ -2,7 +2,10 @@ import { readdir, rm } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 
 import {
+  deriveHistoricalPairedExchangeStatus,
+  describePairedExchangeStatus,
   isSafeRunId,
+  recordedExchangeFinalSequence,
   type AgentDecision,
   type AgentName,
   type ProjectKind,
@@ -10,10 +13,6 @@ import {
 } from './core.ts';
 import { acquireFileLock, FileLock } from './file-lock.ts';
 import { readFilePrefixBytes, writePrivateFileAtomic } from './filesystem.ts';
-import {
-  describePresentedExchangeStatus,
-  derivePairedExchangeStatus,
-} from './presentation-model.ts';
 import type { UiMode } from './terminal-capabilities.ts';
 import { sanitizeTerminalText } from './terminal-text.ts';
 
@@ -294,13 +293,6 @@ function isPendingExchange(
     firstMessage.decision === 'done' &&
     secondMessage.decision === 'done'
   );
-}
-
-function recordedExchangeFinalSequence(value: RecordedChatExchange): number {
-  if ('confirmationMessageSequence' in value) {
-    return value.confirmationMessageSequence ?? value.secondMessageSequence;
-  }
-  return value.secondMessageSequence ?? value.firstMessageSequence;
 }
 
 function isRecordedExchange(
@@ -631,10 +623,10 @@ function migrateChatSession(
 }
 
 export function formatChatTranscript(session: ChatSession): string {
-  const exchangeStatus = derivePairedExchangeStatus({
+  const exchangeStatus = deriveHistoricalPairedExchangeStatus({
     messages: session.messages,
     pendingStage: session.pendingExchange?.stage,
-    latestOutcome: session.latestPairedExchange?.outcome,
+    latestExchange: session.latestPairedExchange,
   });
   const lines = [
     '# Agent Bridge Interactive Chat',
@@ -645,7 +637,7 @@ export function formatChatTranscript(session: ChatSession): string {
     `- Status: ${session.status}`,
     `- Project: ${session.projectRoot}`,
     `- Project type: ${session.projectKind}`,
-    `- Latest paired exchange: ${describePresentedExchangeStatus(exchangeStatus)}`,
+    `- Latest paired exchange: ${describePairedExchangeStatus(exchangeStatus)}`,
     '',
   ];
   for (const message of session.messages) {

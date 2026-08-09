@@ -161,6 +161,11 @@ During an active provider response, Ctrl+C cancels that work, saves the
 checkpoint, and returns to the chat. Press Ctrl+C again while idle to pause and
 leave safely.
 
+`/status` describes the current conversational context: a newer user, system,
+or targeted-agent message clears an older paired result until a new pair
+begins. The Markdown transcript keeps the latest completed pair as historical
+evidence instead of rewriting that history.
+
 Use `--task` or `--task-file` with `chat` to supply the first message
 immediately. `--no-transcript` keeps only the active recovery checkpoint and
 deletes the chat history after `/done`.

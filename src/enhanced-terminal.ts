@@ -1,6 +1,9 @@
-import { formatDuration, type AgentName } from './core.ts';
+import {
+  describePairedExchangeStatus,
+  formatDuration,
+  type AgentName,
+} from './core.ts';
 import type { TerminalRenderer } from './presentation.ts';
-import { describePresentedExchangeStatus } from './presentation-model.ts';
 import type {
   PresentedActivity,
   PresentedMessage,
@@ -335,7 +338,7 @@ function statusLine(model: TerminalViewModel, width: number): string {
   const exchange =
     model.exchangeStatus === 'none'
       ? undefined
-      : `pair ${describePresentedExchangeStatus(model.exchangeStatus)}`;
+      : `pair ${describePairedExchangeStatus(model.exchangeStatus)}`;
   const queued =
     model.queuedInputCount > 0 ? `${model.queuedInputCount} queued` : undefined;
   if (!activity) {

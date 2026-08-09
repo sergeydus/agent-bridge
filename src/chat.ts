@@ -22,7 +22,13 @@ import {
   type WorkflowLauncher,
 } from './chat-workflow.ts';
 import { UserConfigStore } from './config.ts';
-import { makeRunId, otherAgent, type AgentName } from './core.ts';
+import {
+  deriveCurrentPairedExchangeStatus,
+  describePairedExchangeStatus,
+  makeRunId,
+  otherAgent,
+  type AgentName,
+} from './core.ts';
 import { loadInstructionContext } from './instructions.ts';
 import type { BridgeOptions } from './options.ts';
 import type { AppPaths } from './paths.ts';
@@ -38,8 +44,6 @@ import {
 import {
   MAX_PRESENTED_MESSAGES,
   createTerminalViewModel,
-  describePresentedExchangeStatus,
-  derivePairedExchangeStatus,
   type PresentationModelEvent,
   type PresentedMessage,
 } from './presentation-model.ts';
@@ -119,10 +123,10 @@ function presentedMessage(message: ChatMessage): PresentedMessage {
 }
 
 function presentedExchangeStatus(session: ChatSession) {
-  return derivePairedExchangeStatus({
+  return deriveCurrentPairedExchangeStatus({
     messages: session.messages,
     pendingStage: session.pendingExchange?.stage,
-    latestOutcome: session.latestPairedExchange?.outcome,
+    latestExchange: session.latestPairedExchange,
   });
 }
 
@@ -263,7 +267,7 @@ function chatStatus(
   presentation: PresentationPreferences,
   uiMode: ResolvedUiMode,
 ): string {
-  const exchange = describePresentedExchangeStatus(
+  const exchange = describePairedExchangeStatus(
     presentedExchangeStatus(session),
   );
   return `Session: ${session.id}

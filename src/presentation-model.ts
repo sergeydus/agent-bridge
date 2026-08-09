@@ -1,4 +1,4 @@
-import type { AgentDecision, AgentName } from './core.ts';
+import type { AgentDecision, AgentName, PairedExchangeStatus } from './core.ts';
 import type { ProviderEvent } from './provider-events.ts';
 
 export const MAX_PRESENTED_MESSAGES = 500;
@@ -6,14 +6,7 @@ export const MAX_PRESENTED_LIVE_TEXT_CHARS = 50_000;
 
 export type PresentedRole = 'user' | 'codex' | 'claude' | 'system';
 export type PresentedSessionStatus = 'active' | 'paused' | 'completed';
-export type PresentedExchangeStatus =
-  | 'none'
-  | 'pending-peer'
-  | 'pending-confirmation'
-  | 'open'
-  | 'both-done'
-  | 'confirmed'
-  | 'abandoned';
+export type PresentedExchangeStatus = PairedExchangeStatus;
 
 export type PresentedActivityPhase = 'response' | 'confirmation';
 
@@ -178,60 +171,6 @@ export function createTerminalViewModel({
     exchangeStatus,
     queuedInputCount: 0,
   };
-}
-
-export function derivePairedExchangeStatus({
-  messages,
-  pendingStage,
-  latestOutcome,
-}: {
-  messages: readonly PresentedMessage[];
-  pendingStage?: 'awaiting-peer' | 'awaiting-confirmation';
-  latestOutcome?: 'open' | 'confirmed' | 'abandoned';
-}): PresentedExchangeStatus {
-  if (pendingStage === 'awaiting-peer') {
-    return 'pending-peer';
-  }
-  if (pendingStage === 'awaiting-confirmation') {
-    return 'pending-confirmation';
-  }
-  if (latestOutcome) {
-    return latestOutcome;
-  }
-  const latest = messages.slice(-2);
-  if (
-    latest.length !== 2 ||
-    !latest.every(
-      (message) => message.role === 'codex' || message.role === 'claude',
-    ) ||
-    latest[0]?.role === latest[1]?.role
-  ) {
-    return 'none';
-  }
-  return latest.every((message) => message.decision === 'done')
-    ? 'both-done'
-    : 'open';
-}
-
-export function describePresentedExchangeStatus(
-  status: PresentedExchangeStatus,
-): string {
-  switch (status) {
-    case 'none':
-      return 'none yet';
-    case 'pending-peer':
-      return 'waiting for peer response';
-    case 'pending-confirmation':
-      return 'waiting for reciprocal confirmation';
-    case 'open':
-      return 'open; another exchange may help';
-    case 'both-done':
-      return 'both agents marked the legacy pair done; not reciprocally confirmed';
-    case 'confirmed':
-      return 'both agents reciprocally marked this exchange done';
-    case 'abandoned':
-      return 'exchange left unfinished when the session was completed';
-  }
 }
 
 export function reducePresentationModel(
