@@ -44,10 +44,33 @@ export interface ChatTerminal {
   close(): void;
 }
 
+export interface ChatReadlineOptions {
+  input: Readable;
+  output: Writable;
+  completer: (line: string) => [string[], string];
+  historySize: number;
+  removeHistoryDuplicates: boolean;
+}
+
+export interface ChatReadline {
+  on(event: 'line', listener: (line: string) => void): this;
+  on(event: 'close' | 'SIGINT', listener: () => void): this;
+  setPrompt(prompt: string): void;
+  prompt(preserveCursor?: boolean): void;
+  pause(): void;
+  resume(): void;
+  close(): void;
+}
+
+export type ChatReadlineFactory = (
+  options: ChatReadlineOptions,
+) => ChatReadline;
+
 export interface ChatTerminalDependencies {
   input?: Readable;
   output?: Writable;
   signalEmitter?: Pick<EventEmitter, 'emit'>;
+  createReadline?: ChatReadlineFactory;
 }
 
 export type ChatCommand =
@@ -270,8 +293,9 @@ export function createChatTerminal({
   input = process.stdin,
   output = process.stdout,
   signalEmitter = process,
+  createReadline = (options) => createInterface(options),
 }: ChatTerminalDependencies = {}): ChatTerminal {
-  const interface_ = createInterface({
+  const interface_ = createReadline({
     input,
     output,
     completer: completeChatInput,

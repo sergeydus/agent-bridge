@@ -228,8 +228,8 @@ Required controls:
 | Enter multiline input     | `/paste`; Alt+Enter may be added where reliable | `/paste`            |
 | Complete command or agent | Tab                                             | Tab                 |
 | Previous/next local input | Up/Down                                         | Up/Down             |
-| Scroll conversation       | Page Up/Page Down                               | Terminal scrollback |
-| Jump to newest message    | End                                             | Terminal scrollback |
+| Scroll conversation       | Terminal scrollback                             | Terminal scrollback |
+| Jump to newest message    | Terminal scrollback                             | Terminal scrollback |
 | Open/close help           | F1 or `?` at empty input / Escape               | `/help`             |
 | Cancel active operation   | Ctrl+C, with existing recovery semantics        | Ctrl+C              |
 | Save and leave when idle  | Ctrl+D or `/pause`                              | Ctrl+D or `/pause`  |
@@ -479,10 +479,10 @@ inability to restore terminal ownership safely is a fatal error.
 Implementation status: Slices 1, 2, and 4 are complete. Slice 3 includes the
 shared parser, readline editing/completion/history, paste, queued-input state,
 and workflow suspension; conversation history remains available through native
-terminal scrollback rather than custom mouse capture. Complete-line queueing is
-covered through injected streams; TTY echo, abort-listener, SIGINT,
-close-while-pending, redraw, pause/resume, cross-platform PTY, and manual
-screen-reader coverage remain Slice 5 release-hardening work.
+terminal scrollback rather than custom mouse capture. Complete-line queueing and
+the readline callback lifecycle are covered deterministically through injected
+streams and a readline factory; real TTY echo, cross-platform PTY behavior, and
+manual screen-reader coverage remain Slice 5 release-hardening work.
 
 ### Slice 1: shared presentation model
 
@@ -534,6 +534,27 @@ Each slice must leave plain mode working and may be merged independently.
 - idempotent terminal cleanup.
 
 ### Integration and PTY tests
+
+Terminal hardening uses two layers. Deterministic tests inject streams and a
+readline factory on every supported CI platform; they own queueing, abort,
+SIGINT forwarding, close-while-pending, redraw, pause/resume, and close
+delegation. A separate PTY harness must exercise the real terminal driver and
+the bytes a user sees. The PTY driver must remain a development-only dependency
+and prove installation and execution on the full macOS, Linux, and Windows CI
+matrix before it becomes required.
+
+The PTY harness will launch a small terminal-boundary fixture with fake
+providers and no network or authentication. Before partial-input behavior is
+changed, failing PTY cases must distinguish these two designs:
+
+- keep an active readline prompt while providers work and repaint its buffer;
+- pause readline while providers work and restore buffered input afterward.
+
+The selected design must preserve partially typed text across output and
+resize, queue each submitted line exactly once, retain existing Ctrl+C
+semantics, and restore cursor, echo, and terminal ownership on every exit path.
+Those tests, rather than renderer frame hooks alone, decide the input-ownership
+implementation.
 
 - standard interactive conversation;
 - targeted Codex and Claude turns;
