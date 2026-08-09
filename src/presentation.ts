@@ -57,6 +57,7 @@ export class PresentationController {
   #renderer: TerminalRenderer;
   #fallback: RendererFallback | undefined;
   #usingFallback = false;
+  #started = false;
   #write: (text: string) => void;
 
   constructor({
@@ -84,7 +85,12 @@ export class PresentationController {
     return this.#usingFallback;
   }
 
+  get started(): boolean {
+    return this.#started;
+  }
+
   start(): void {
+    this.#started = true;
     this.#renderWithFallback(
       (renderer) => renderer.start(this.#model),
       () => '',
@@ -121,6 +127,7 @@ export class PresentationController {
   }
 
   stop(): void {
+    this.#started = false;
     this.#emit(this.#renderer.stop());
   }
 

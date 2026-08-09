@@ -20,6 +20,8 @@
     "Start Agent Bridge.command",
     "src/*.ts",
     "tests",
+    "!tests/chat-terminal-pty.test.ts",
+    "!tests/fixtures/chat-terminal-pty-fixture.ts",
     ".editorconfig",
     "eslint.config.mjs",
     "tsconfig.json",

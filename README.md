@@ -225,7 +225,9 @@ the next agent starts. The renderer also suspends before a linked workflow
 inherits the terminal and restores normal terminal state on exit. Supplemental
 command output such as help and history stays on the normal screen until the
 next agent starts. If enhanced drawing fails after normal terminal state is
-restored, the chat continues with plain output. Use
+restored, the chat continues with plain output. Readline repaint stops before
+that fallback output and before terminal teardown, so an old prompt is not
+inserted into append-only output. Use
 `--ui plain` to retain append-only output or `--ui enhanced` to request the
 full-screen view explicitly. Screen-reader mode, redirected streams,
 `TERM=dumb`, and terminals that are too small use the complete plain interface.

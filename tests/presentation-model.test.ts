@@ -341,7 +341,9 @@ test('controller restores the terminal and continues with the plain renderer aft
     write: (text) => output.push(text),
   });
 
+  assert.equal(controller.started, false);
   controller.start();
+  assert.equal(controller.started, true);
   controller.dispatch({
     type: 'agent-started',
     agent: 'codex',
@@ -369,6 +371,8 @@ test('controller restores the terminal and continues with the plain renderer aft
   );
   assert.match(output.join(''), /Codex · model test-model · thinking/);
   assert.match(output.join(''), /Recovered response\./);
+  controller.stop();
+  assert.equal(controller.started, false);
 });
 
 test('controller treats failed terminal restoration as fatal', () => {

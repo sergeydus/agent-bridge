@@ -39,7 +39,11 @@
   only cross-platform PTY harness now proves that enhanced frames and resizes
   repaint readline's partial buffer without moving its cursor, Ctrl+C retains
   its cancellation path, Ctrl+D closes a pending prompt, and alternate-screen
-  output is restored before exit.
+  output is restored before exit. A missing native PTY driver skips those PTY
+  cases with a reason instead of failing the entire suite, and its test-only
+  files are excluded from the package. Prompt repaint now stops before
+  enhanced-to-plain fallback output or terminal teardown, preventing a stray
+  prompt label in append-only output.
 
 ## 0.6.0 - 2026-08-09
 

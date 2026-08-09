@@ -40,6 +40,7 @@ import {
   resolveColorChoice,
   resolvePresentation,
   type PresentationPreferences,
+  type TerminalRenderer,
 } from './presentation.ts';
 import {
   MAX_PRESENTED_MESSAGES,
@@ -165,8 +166,10 @@ function createChatPresentation(
   preferences: PresentationPreferences,
   terminal: ChatTerminal,
   uiMode: ResolvedUiMode,
+  enhancedRenderer?: TerminalRenderer,
 ): PresentationController {
-  return new PresentationController({
+  let shouldRedrawPrompt = (): boolean => false;
+  const presenter = new PresentationController({
     initialModel: createTerminalViewModel({
       session: {
         id: session.id,
@@ -180,7 +183,7 @@ function createChatPresentation(
     }),
     renderer:
       uiMode === 'enhanced'
-        ? createEnhancedTerminalRenderer()
+        ? (enhancedRenderer ?? createEnhancedTerminalRenderer())
         : createPlainTerminalRenderer(preferences),
     ...(uiMode === 'enhanced'
       ? {
@@ -195,11 +198,13 @@ function createChatPresentation(
       : {}),
     write: (text) => {
       terminal.write(text);
-      if (uiMode === 'enhanced') {
+      if (uiMode === 'enhanced' && shouldRedrawPrompt()) {
         terminal.redrawPrompt();
       }
     },
   });
+  shouldRedrawPrompt = () => presenter.started && !presenter.usingFallback;
+  return presenter;
 }
 
 function addPresentedMessage(
@@ -693,6 +698,7 @@ export async function runInteractiveChat({
   providers = createDefaultProviders(),
   terminal: providedTerminal,
   terminalCapabilities,
+  enhancedRenderer,
   launchWorkflow = launchBridgeWorkflow,
   activityTickIntervalMs = ACTIVITY_TICK_INTERVAL_MS,
 }: {
@@ -701,6 +707,7 @@ export async function runInteractiveChat({
   providers?: ProviderMap;
   terminal?: ChatTerminal;
   terminalCapabilities?: TerminalCapabilities;
+  enhancedRenderer?: TerminalRenderer;
   launchWorkflow?: WorkflowLauncher;
   activityTickIntervalMs?: number;
 }): Promise<void> {
@@ -782,6 +789,7 @@ export async function runInteractiveChat({
       presentation,
       terminal,
       uiResolution.mode,
+      enhancedRenderer,
     );
     const activeUiMode = (): ResolvedUiMode =>
       uiResolution.mode === 'enhanced' && !presenter.usingFallback

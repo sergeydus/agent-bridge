@@ -5,7 +5,28 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
 
-import { spawn, type IPty } from 'node-pty';
+import type { IPty } from 'node-pty';
+
+interface PtyAvailability {
+  module?: typeof import('node-pty');
+  skipReason?: string;
+}
+
+async function loadNodePty(
+  load: () => Promise<typeof import('node-pty')> = () => import('node-pty'),
+): Promise<PtyAvailability> {
+  try {
+    return { module: await load() };
+  } catch (error) {
+    return {
+      skipReason: `node-pty is unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+}
+
+const { module: nodePty, skipReason: ptySkipReason } = await loadNodePty();
 
 interface PtySession {
   child: IPty;
@@ -22,12 +43,27 @@ const FIXTURE_PATH = join(
   'chat-terminal-pty-fixture.ts',
 );
 
+test('PTY driver load failure becomes an explicit skip reason', async () => {
+  const availability = await loadNodePty(() =>
+    Promise.reject(new Error('native module could not load')),
+  );
+
+  assert.equal(availability.module, undefined);
+  assert.equal(
+    availability.skipReason,
+    'node-pty is unavailable: native module could not load',
+  );
+});
+
 function startFixture(
   mode: 'between-prompts' | 'prompt' | 'signal',
 ): PtySession {
+  if (!nodePty) {
+    throw new Error(ptySkipReason ?? 'node-pty is unavailable');
+  }
   let output = '';
   let exitResult: { exitCode: number; signal?: number } | undefined;
-  const child = spawn(
+  const child = nodePty.spawn(
     process.execPath,
     ['--experimental-strip-types', FIXTURE_PATH, mode],
     {
@@ -53,6 +89,10 @@ function startFixture(
     exitResult: () => exitResult,
     output: () => output,
   };
+}
+
+function ptyTest(name: string, run: () => Promise<void>): void {
+  test(name, { timeout: 10_000, skip: ptySkipReason }, run);
 }
 
 async function waitForOutput(
@@ -88,9 +128,8 @@ function occurrences(text: string, expected: string): number {
   return text.split(expected).length - 1;
 }
 
-test(
+ptyTest(
   'real PTY preserves a partial readline buffer across resize',
-  { timeout: 10_000 },
   async () => {
     const session = startFixture('prompt');
     try {
@@ -121,9 +160,8 @@ test(
   },
 );
 
-test(
+ptyTest(
   'real PTY forwards Ctrl+C and restores the alternate screen',
-  { timeout: 10_000 },
   async () => {
     const session = startFixture('signal');
     try {
@@ -146,26 +184,21 @@ test(
   },
 );
 
-test(
-  'real PTY resolves a pending prompt on Ctrl+D',
-  { timeout: 10_000 },
-  async () => {
-    const session = startFixture('prompt');
-    try {
-      await waitForOutput(session, 'You > ');
-      session.child.write('\u0004');
-      await waitForOutput(session, '__AB_RESULT__null');
-      const exited = await session.exit;
-      assert.equal(exited.exitCode, 0);
-    } finally {
-      await stopSession(session);
-    }
-  },
-);
+ptyTest('real PTY resolves a pending prompt on Ctrl+D', async () => {
+  const session = startFixture('prompt');
+  try {
+    await waitForOutput(session, 'You > ');
+    session.child.write('\u0004');
+    await waitForOutput(session, '__AB_RESULT__null');
+    const exited = await session.exit;
+    assert.equal(exited.exitCode, 0);
+  } finally {
+    await stopSession(session);
+  }
+});
 
-test(
+ptyTest(
   'real PTY preserves partial input and its cursor between prompts',
-  { timeout: 10_000 },
   async () => {
     const session = startFixture('between-prompts');
     try {

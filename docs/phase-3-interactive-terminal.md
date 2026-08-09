@@ -554,10 +554,16 @@ real terminal echo or cursor restoration.
 The PTY driver is the exact development-only release
 `node-pty@1.2.0-beta.14`. It supplies one API and packaged native binaries for
 the supported macOS, Linux, and Windows architectures; it is not shipped as a
-runtime Agent Bridge dependency. The harness launches only the local Node
-fixture at the same permission level as the test process. The full CI matrix
-must prove installation and execution before these tests are treated as the
-cross-platform release gate.
+runtime Agent Bridge dependency. This prerelease is pinned deliberately while
+the CI matrix evaluates its packaged native binaries; it must be reconsidered
+when a suitable stable release exists and cannot become a required release
+gate on local or CI platforms until that matrix is green. Until then, the
+harness loads it dynamically and reports an explicit skip when the native
+module is unavailable. The harness launches only the local Node fixture at the
+same permission level as the test process, and the PTY test and fixture are
+excluded from the published package. The full CI matrix must prove installation
+and execution before these tests are treated as the cross-platform release
+gate.
 
 The PTY harness launches a small terminal-boundary fixture with fake providers
 and no network or authentication. Its failing between-prompts case showed that
