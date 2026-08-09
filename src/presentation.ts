@@ -529,6 +529,32 @@ export function createPlainTerminalRenderer(
           preferences,
         });
       }
+      if (event.type === 'exchange-status') {
+        if (event.status === 'none') {
+          return '';
+        }
+        const status =
+          event.status === 'pending-peer'
+            ? 'waiting for the peer response'
+            : event.status === 'both-done'
+              ? 'both agents marked this paired exchange done'
+              : 'open; at least one agent requested another exchange';
+        return preferences.screenReader
+          ? `Paired exchange status: ${status}.\n`
+          : `  Paired exchange · ${status}\n`;
+      }
+      if (event.type === 'queued-input') {
+        if (event.count <= 0) {
+          return '';
+        }
+        const prefix = active?.presenter.beforeStatus() ?? '';
+        const lines = event.count === 1 ? 'line' : 'lines';
+        return `${prefix}${
+          preferences.screenReader
+            ? `Input queued. ${event.count} ${lines} will be handled at the next prompt, after current agent work.\n`
+            : `  Input queued · ${event.count} ${lines} · handled at the next prompt after current agent work\n`
+        }`;
+      }
       return '';
     },
     redraw(): string {

@@ -38,6 +38,7 @@ import {
 import {
   MAX_PRESENTED_MESSAGES,
   createTerminalViewModel,
+  derivePairedExchangeStatus,
   type PresentationModelEvent,
   type PresentedMessage,
 } from './presentation-model.ts';
@@ -144,6 +145,10 @@ function createChatPresentation(
       messages: session.messages
         .slice(-MAX_PRESENTED_MESSAGES)
         .map(presentedMessage),
+      exchangeStatus: derivePairedExchangeStatus(
+        session.messages,
+        Boolean(session.pendingExchange),
+      ),
     }),
     renderer:
       uiMode === 'enhanced'
@@ -175,6 +180,7 @@ function addPresentedMessage(
     type: 'message-added',
     message: presentedMessage(message),
   });
+  presenter.dispatch({ type: 'exchange-status', status: 'none' });
 }
 
 function setPresentedStatus(
@@ -230,10 +236,23 @@ function chatStatus(
   presentation: PresentationPreferences,
   uiMode: ResolvedUiMode,
 ): string {
+  const exchangeStatus = derivePairedExchangeStatus(
+    session.messages,
+    Boolean(session.pendingExchange),
+  );
+  const exchange =
+    exchangeStatus === 'pending-peer'
+      ? 'waiting for peer response'
+      : exchangeStatus === 'both-done'
+        ? 'both agents marked the latest pair done'
+        : exchangeStatus === 'open'
+          ? 'open; another exchange may help'
+          : 'none yet';
   return `Session: ${session.id}
 Status: ${session.status}
 Project: ${sanitizeTerminalText(session.projectRoot)} (${session.projectKind})
 Messages: ${session.messages.length}
+Latest paired exchange: ${exchange}
 Linked workflows: ${session.workflows.length}
 Automatic exchange limit: ${session.maxAutoRounds}
 Editing workflow cycle limit: ${session.maxWorkflowRounds}
@@ -433,6 +452,13 @@ async function runExchange({
         agent,
         message: presentedMessage(message),
       });
+      presenter.dispatch({
+        type: 'exchange-status',
+        status: derivePairedExchangeStatus(
+          session.messages,
+          Boolean(session.pendingExchange),
+        ),
+      });
     } finally {
       clearInterval(heartbeat);
       if (activityTick) {
@@ -444,11 +470,7 @@ async function runExchange({
   if (!pairedExchange) {
     return false;
   }
-  const latest = session.messages.slice(-2);
-  return (
-    latest.length === 2 &&
-    latest.every((message) => message.decision === 'done')
-  );
+  return derivePairedExchangeStatus(session.messages, false) === 'both-done';
 }
 
 function createSession(
@@ -659,9 +681,31 @@ export async function runInteractiveChat({
     };
 
     try {
+      terminal.setQueuedInputObserver((count) => {
+        try {
+          presenter.dispatch({ type: 'queued-input', count });
+        } catch (error) {
+          terminalFailure =
+            error instanceof Error
+              ? error
+              : new Error('Queued input rendering failed', { cause: error });
+          activeOperation?.abort(terminalFailure);
+          abortController.abort(terminalFailure);
+        }
+      });
       lock = await store.acquireLock(session.id);
       if (!options.dryRun) {
         await assertProvidersAvailable(providers);
+      }
+      const initialMessage =
+        options.task || options.taskFile
+          ? await resolveTask(options)
+          : undefined;
+      if (initialMessage && initialMessage.length > MAX_USER_MESSAGE_CHARS) {
+        throw new Error(
+          `Chat startup message exceeds ${MAX_USER_MESSAGE_CHARS.toLocaleString()} characters. ` +
+            'Put large supporting material in the selected project instead.',
+        );
       }
       cleanupMayPersist = true;
       await store.save(session);
@@ -669,7 +713,7 @@ export async function runInteractiveChat({
         (await loadInstructionContext(session.projectRoot)).prompt;
       const runCancellableExchange = async (
         participants?: readonly AgentName[],
-      ): Promise<{ agreed: boolean; cancelled: boolean }> => {
+      ): Promise<{ bothDone: boolean; cancelled: boolean }> => {
         resumeAfterSupplementalOutput();
         const previousMessageCount = session.messages.length;
         let responsesRevealed = false;
@@ -689,7 +733,7 @@ export async function runInteractiveChat({
         const operation = new AbortController();
         activeOperation = operation;
         try {
-          const agreed = await runExchange({
+          const bothDone = await runExchange({
             session,
             store,
             providers,
@@ -713,7 +757,7 @@ export async function runInteractiveChat({
             ...(participants ? { participants } : {}),
           });
           revealCompletedResponses();
-          return { agreed, cancelled: false };
+          return { bothDone, cancelled: false };
         } catch (error) {
           revealCompletedResponses();
           if (terminalFailure) {
@@ -724,7 +768,7 @@ export async function runInteractiveChat({
             writeSupplemental(
               '\nActive agent work cancelled. The chat is saved and still open.\n',
             );
-            return { agreed: false, cancelled: true };
+            return { bothDone: false, cancelled: true };
           }
           throw error;
         } finally {
@@ -770,10 +814,6 @@ export async function runInteractiveChat({
         const { cancelled } = await runCancellableExchange();
         pendingSettled = !cancelled && !session.pendingExchange;
       }
-      const initialMessage =
-        options.task || options.taskFile
-          ? await resolveTask(options)
-          : undefined;
       if (initialMessage && !pendingSettled) {
         // Sending it now would fold the task into the still-interrupted
         // exchange, where it would draw one agent's reply instead of two.
@@ -924,31 +964,42 @@ export async function runInteractiveChat({
             await store.save(session);
           }
           const rounds = command.rounds ?? session.maxAutoRounds;
+          const currentExchangeStatus = derivePairedExchangeStatus(
+            session.messages,
+            Boolean(session.pendingExchange),
+          );
+          const maximumProviderCalls =
+            rounds * 2 - (session.pendingExchange ? 1 : 0);
           writeSupplemental(`
 Automatic conversation preview
 Maximum exchanges: ${rounds}
-Maximum provider calls: ${rounds * 2}
-It stops early if both agents agree.
+Maximum provider calls: ${maximumProviderCalls}
+It stops early if both agents mark the same paired exchange done.
+${
+  currentExchangeStatus === 'both-done'
+    ? 'The latest pair is already marked done; starting will deliberately open another exchange.\n'
+    : ''
+}
 `);
           if (!(await confirm('Start automatic conversation? [Y/n]: ', true))) {
             writeSupplemental('Automatic conversation cancelled.\n');
             continue;
           }
-          let agreed = false;
+          let bothDone = false;
           let cancelled = false;
           for (let round = 1; round <= rounds; round += 1) {
             terminal.write(`\nAutomatic exchange ${round}/${rounds}\n`);
             const result = await runCancellableExchange();
-            agreed = result.agreed;
+            bothDone = result.bothDone;
             cancelled = result.cancelled;
-            if (agreed || cancelled) {
+            if (bothDone || cancelled) {
               break;
             }
           }
           if (!cancelled) {
             writeSupplemental(
-              agreed
-                ? '\nCodex and Claude agree on the current answer.\n'
+              bothDone
+                ? '\nBoth agents marked the same paired exchange done.\n'
                 : '\nAutomatic exchange limit reached; you remain in control.\n',
             );
           }
@@ -1127,6 +1178,7 @@ them; it starts from committed HEAD and leaves those changes untouched.
       }
       throw error;
     } finally {
+      terminal.setQueuedInputObserver();
       process.removeListener('SIGINT', abort);
       process.removeListener('SIGTERM', abortSession);
       process.removeListener('SIGHUP', abortSession);

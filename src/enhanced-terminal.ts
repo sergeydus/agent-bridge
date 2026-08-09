@@ -331,10 +331,20 @@ function usageSummary(usage: PresentedUsage | undefined): string | undefined {
 
 function statusLine(model: TerminalViewModel, width: number): string {
   const activity = model.activity;
+  const exchange =
+    model.exchangeStatus === 'pending-peer'
+      ? 'pair waiting for peer'
+      : model.exchangeStatus === 'both-done'
+        ? 'pair both done'
+        : model.exchangeStatus === 'open'
+          ? 'pair open'
+          : undefined;
+  const queued =
+    model.queuedInputCount > 0 ? `${model.queuedInputCount} queued` : undefined;
   if (!activity) {
     const usage = usageSummary(model.lastUsage);
     return clipLine(
-      `Ready · read-only chat${usage ? ` · last ${usage}` : ''} · /edit changes · /help commands`,
+      `Ready · read-only chat${queued ? ` · ${queued}` : ''}${exchange ? ` · ${exchange}` : ''}${usage ? ` · last ${usage}` : ''} · /edit changes · /help commands`,
       width,
     );
   }
@@ -348,7 +358,7 @@ function statusLine(model: TerminalViewModel, width: number): string {
   const usage = usageSummary(activity.usage);
   return clipLine(
     `${activityIndicator(activity)} ${agentLabel(activity.agent)} · ${phase} · ${elapsed}` +
-      `${usage ? ` · ${usage}` : ''} · ${activity.model ?? 'provider default'} · read-only`,
+      `${usage ? ` · ${usage}` : ''}${queued ? ` · ${queued}` : ''}${exchange ? ` · ${exchange}` : ''} · ${activity.model ?? 'provider default'} · read-only`,
     width,
   );
 }

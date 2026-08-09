@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Kept interactive-chat and workflow-handoff history as valid JSON under the
+  prompt budget by omitting whole messages with an explicit count and marking
+  unavoidable single-message text truncation. Agent prompts now explain both
+  metadata forms, and typed, `--task`, and `--task-file` chat messages share a
+  coherent 32,000-character limit with that budget.
+- Added renderer-neutral paired-exchange state for waiting, open, and both-done
+  outcomes. Plain, screen-reader, enhanced, `/status`, and `/auto` output now
+  reports the exact structured state without overstating two `done` decisions
+  as independently verified agreement; `/auto` warns before reopening an
+  already-done pair.
+- Made complete terminal lines typed during provider work visibly queue for the
+  next prompt instead of appearing lost in enhanced redraws. Both renderers show
+  only the queue count. The readline path is now injectable, and deterministic
+  stream coverage proves complete-line queue order and counts. Partial TTY input
+  echo and cancellation/restoration paths remain release-hardening work.
+
 ## 0.6.0 - 2026-08-09
 
 - Fixed `/ask <agent>` and `/both` collapsing runs of whitespace in the message,

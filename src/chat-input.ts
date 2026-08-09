@@ -1,9 +1,15 @@
+import type { EventEmitter } from 'node:events';
 import { createInterface } from 'node:readline';
+import type { Readable, Writable } from 'node:stream';
 
 import type { ChatWorkflowMode } from './chat-state.ts';
 import type { AgentName } from './core.ts';
+import { MAX_CHAT_HISTORY_CHARS } from './prompts.ts';
 
-export const MAX_USER_MESSAGE_CHARS = 200_000;
+export const MAX_USER_MESSAGE_CHARS = Math.min(
+  32_000,
+  MAX_CHAT_HISTORY_CHARS - 1_000,
+);
 
 export const CHAT_HELP = `Interactive chat commands
 
@@ -11,28 +17,37 @@ export const CHAT_HELP = `Interactive chat commands
   /ask codex|claude <message>    Ask only one agent
   /both <message>                Explicitly ask both agents
   @codex|@claude|@both <message> Short form for a targeted message
-  /auto [1-20]                   Let them continue until agreement or the limit
+  /auto [1-20]                   Continue until both mark a pair done or the limit
   /edit [codex|claude]           Safely alternate editing and review
   /implement codex|claude        Named agent edits; the other agent reviews
   /collaborate codex|claude      Plan, then alternate editing and reviewing
   /review                        Review to agreement without changing files
   /paste                        Enter a multiline message; finish with "." alone
-  /status                       Show session and project information
+  /status                       Show session, project, and paired-exchange state
   /history [1-50]               Show recent messages
   /help                         Show these commands
   /pause                        Save and leave; resume with chat --resume <id>
   /done                         Complete and leave the session
 
   Ctrl+C cancels active agent work; press it at the prompt to save and leave.
+  Lines typed while agents work are queued for the next prompt, never inserted
+  between the two agents in the current exchange.
 `;
 
 export interface ChatTerminal {
   prompt(label: string, signal?: AbortSignal): Promise<string | null>;
   write(text: string): void;
   redrawPrompt(): void;
+  setQueuedInputObserver(observer?: (count: number) => void): void;
   pause(): void;
   resume(): void;
   close(): void;
+}
+
+export interface ChatTerminalDependencies {
+  input?: Readable;
+  output?: Writable;
+  signalEmitter?: Pick<EventEmitter, 'emit'>;
 }
 
 export type ChatCommand =
@@ -251,15 +266,21 @@ export function completeChatInput(line: string): [string[], string] {
   return [line.length === 0 ? CHAT_COMPLETIONS : matches, line];
 }
 
-export function createChatTerminal(): ChatTerminal {
+export function createChatTerminal({
+  input = process.stdin,
+  output = process.stdout,
+  signalEmitter = process,
+}: ChatTerminalDependencies = {}): ChatTerminal {
   const interface_ = createInterface({
-    input: process.stdin,
-    output: process.stdout,
+    input,
+    output,
     completer: completeChatInput,
     historySize: 100,
     removeHistoryDuplicates: true,
   });
   const queuedLines: string[] = [];
+  let queueObserver: ((count: number) => void) | undefined;
+  const reportQueue = (): void => queueObserver?.(queuedLines.length);
   let closed = false;
   let pending:
     | {
@@ -271,6 +292,7 @@ export function createChatTerminal(): ChatTerminal {
   interface_.on('line', (line) => {
     if (!pending) {
       queuedLines.push(line);
+      reportQueue();
       return;
     }
     const current = pending;
@@ -288,14 +310,15 @@ export function createChatTerminal(): ChatTerminal {
     }
   });
   interface_.on('SIGINT', () => {
-    process.emit('SIGINT');
+    signalEmitter.emit('SIGINT');
   });
 
   return {
     prompt(label, signal) {
       const queued = queuedLines.shift();
       if (queued !== undefined) {
-        process.stdout.write(label);
+        output.write(label);
+        reportQueue();
         return Promise.resolve(queued);
       }
       if (closed || signal?.aborted) {
@@ -320,12 +343,16 @@ export function createChatTerminal(): ChatTerminal {
       });
     },
     write(text) {
-      process.stdout.write(text);
+      output.write(text);
     },
     redrawPrompt() {
       if (pending) {
         interface_.prompt(true);
       }
+    },
+    setQueuedInputObserver(observer) {
+      queueObserver = observer;
+      reportQueue();
     },
     pause() {
       interface_.pause();

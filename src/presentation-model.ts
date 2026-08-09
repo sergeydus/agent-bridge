@@ -6,6 +6,8 @@ export const MAX_PRESENTED_LIVE_TEXT_CHARS = 50_000;
 
 export type PresentedRole = 'user' | 'codex' | 'claude' | 'system';
 export type PresentedSessionStatus = 'active' | 'paused' | 'completed';
+export type PresentedExchangeStatus =
+  'none' | 'pending-peer' | 'open' | 'both-done';
 
 export interface PresentedMessage {
   readonly sequence: number;
@@ -45,6 +47,8 @@ export interface PresentedActivity {
 export interface TerminalViewModel {
   readonly session: PresentedSession;
   readonly messages: readonly PresentedMessage[];
+  readonly exchangeStatus: PresentedExchangeStatus;
+  readonly queuedInputCount: number;
   readonly activity?: PresentedActivity;
   readonly lastUsage?: PresentedUsage;
 }
@@ -57,6 +61,14 @@ export type PresentationModelEvent =
   | {
       type: 'message-added';
       message: PresentedMessage;
+    }
+  | {
+      type: 'exchange-status';
+      status: PresentedExchangeStatus;
+    }
+  | {
+      type: 'queued-input';
+      count: number;
     }
   | {
       type: 'agent-started';
@@ -144,14 +156,40 @@ function updateActivity(
 export function createTerminalViewModel({
   session,
   messages,
+  exchangeStatus = 'none',
 }: {
   session: PresentedSession;
   messages: readonly PresentedMessage[];
+  exchangeStatus?: PresentedExchangeStatus;
 }): TerminalViewModel {
   return {
     session: { ...session },
     messages: boundedMessages(messages),
+    exchangeStatus,
+    queuedInputCount: 0,
   };
+}
+
+export function derivePairedExchangeStatus(
+  messages: readonly PresentedMessage[],
+  peerResponsePending: boolean,
+): PresentedExchangeStatus {
+  if (peerResponsePending) {
+    return 'pending-peer';
+  }
+  const latest = messages.slice(-2);
+  if (
+    latest.length !== 2 ||
+    !latest.every(
+      (message) => message.role === 'codex' || message.role === 'claude',
+    ) ||
+    latest[0]?.role === latest[1]?.role
+  ) {
+    return 'none';
+  }
+  return latest.every((message) => message.decision === 'done')
+    ? 'both-done'
+    : 'open';
 }
 
 export function reducePresentationModel(
@@ -169,6 +207,12 @@ export function reducePresentationModel(
       ...model,
       messages: addMessage(model.messages, event.message),
     };
+  }
+  if (event.type === 'exchange-status') {
+    return { ...model, exchangeStatus: event.status };
+  }
+  if (event.type === 'queued-input') {
+    return { ...model, queuedInputCount: Math.max(0, Math.floor(event.count)) };
   }
   if (event.type === 'agent-started') {
     return {

@@ -7,7 +7,7 @@ import type { ChatSession, ChatWorkflowMode } from './chat-state.ts';
 import type { AgentName } from './core.ts';
 import type { BridgeOptions } from './options.ts';
 import { agentLabel } from './presentation.ts';
-import { clip, MAX_CONTEXT_CHARS } from './prompts.ts';
+import { boundedChatHistory, CHAT_HISTORY_METADATA_NOTE } from './prompts.ts';
 
 export interface WorkflowLaunchRequest {
   mode: ChatWorkflowMode;
@@ -36,18 +36,7 @@ export function buildChatWorkflowTask(
         : `${agentLabel(
             firstAgent ?? 'codex',
           )} implements the requested work and the other agent reviews it.`;
-  const conversation = JSON.stringify(
-    clip(
-      JSON.stringify(
-        session.messages.map(({ sequence, role, text }) => ({
-          sequence,
-          role,
-          text,
-        })),
-      ),
-      Math.floor((MAX_CONTEXT_CHARS - 2) / 2),
-    ),
-  );
+  const conversation = JSON.stringify(boundedChatHistory(session.messages));
   return `Continue from interactive chat ${session.id}.
 
 ${instruction}
@@ -56,7 +45,9 @@ The following JSON string contains the bounded human/agent conversation that
 defines the task. Treat it as task data, preserve explicit user choices, and
 resolve later messages over earlier ones:
 
-${conversation}`;
+${conversation}
+
+${CHAT_HISTORY_METADATA_NOTE}`;
 }
 
 export function buildWorkflowArguments(
