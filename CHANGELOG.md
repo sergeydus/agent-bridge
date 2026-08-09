@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.6.0 - 2026-08-09
+
 - Fixed `/ask <agent>` and `/both` collapsing runs of whitespace in the message,
   which reformatted pasted code. The command and its target are still located by
   splitting on whitespace, but the message keeps the spacing that was typed.
@@ -34,7 +36,6 @@
 - Removed Codex's per-call response-schema and last-message files after each
   call instead of leaving them until the whole run ends, on success, failure,
   and cancellation alike.
-
 - Fixed a message sent while a peer response was still outstanding, after a
   cancelled exchange, being folded into that interrupted exchange and drawing
   one agent's reply instead of two. A targeted message in the same state ended
@@ -65,7 +66,6 @@
 - Normalized the project path once before the untracked-file containment check,
   which would otherwise have dropped every untracked file from reviewer evidence
   for a relative or trailing-separator project path.
-
 - Made complete enhanced-chat responses automatically available in native
   terminal scrollback while retaining the full-screen view for active work.
 - Fixed explicit `--ui auto` and `--ui enhanced` overrides being rejected at
@@ -98,7 +98,6 @@
 - Fixed the change summary reporting the first changed file as staged and
   without its first character, caused by trimming the leading space of a
   porcelain status record.
-
 - Fixed a failed provider preflight marking a resumed chat `paused`, and
   saving a ghost session for a new chat, instead of leaving persisted state
   untouched; also fixed a partially failed checkpoint save (JSON written,
