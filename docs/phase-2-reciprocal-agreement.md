@@ -1,7 +1,7 @@
 # Phase 2: reciprocal chat agreement
 
-Status: reviewed and approved for slice 1. Implementation begins only when the
-user authorizes it.
+Status: implemented across all four slices and verified with the project check,
+coverage thresholds, package dry run, and whitespace check.
 
 ## Objective
 

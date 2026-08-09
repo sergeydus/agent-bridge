@@ -747,7 +747,11 @@ export class ChatSessionStore {
       );
     }
     const destination = this.pathFor(session.id);
-    await writePrivateFileAtomic(destination, serialized);
+    // The JSON checkpoint is authoritative. Prepare its derived transcript
+    // first so a transcript failure cannot make a response durable after
+    // save() reports that the checkpoint failed. A JSON write failure may
+    // leave a newer transcript temporarily, but load/resume continues from the
+    // last valid JSON and the next successful save repairs the transcript.
     if (session.noTranscript) {
       await rm(this.transcriptPathFor(session.id), { force: true });
     } else {
@@ -756,6 +760,7 @@ export class ChatSessionStore {
         formatChatTranscript(persisted),
       );
     }
+    await writePrivateFileAtomic(destination, serialized);
     Object.assign(session, persisted);
   }
 

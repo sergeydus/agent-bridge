@@ -85,6 +85,47 @@ test('reciprocal confirmation prompt isolates the exact saved pair', () => {
   assert.match(prompt, /decision to "continue" when any\s+correction/);
 });
 
+test('confirmation keeps bounded history valid under repeated long responses', () => {
+  const history = Array.from({ length: 500 }, (_, index) => ({
+    sequence: index + 1,
+    createdAt: '2026-08-09T00:00:00.000Z',
+    role: (index === 0 ? 'user' : index % 2 === 0 ? 'claude' : 'codex') as
+      'user' | 'codex' | 'claude',
+    text: `message-${index}-${'x'.repeat(index % 5 === 0 ? 60_000 : 120)}`,
+    ...(index === 0 ? {} : { decision: 'done' as const }),
+  }));
+  const firstResponse = history[498]!;
+  const peerResponse = history[499]!;
+
+  for (const firstText of [
+    'short acceptance',
+    `START${'q'.repeat(90_000)}END`,
+  ]) {
+    const prompt = interactiveChatConfirmationPrompt({
+      agent: 'claude',
+      history,
+      projectInstructions: '',
+      firstResponse: { ...firstResponse, text: firstText },
+      peerResponse,
+    });
+    const payload = /bounded conversation history:\n([^\n]+)/.exec(prompt)?.[1];
+    assert.ok(payload);
+    const serialized = JSON.parse(payload) as string;
+    assert.ok(serialized.length <= MAX_CHAT_HISTORY_CHARS);
+    assert.doesNotThrow(() => JSON.parse(serialized));
+    assert.match(prompt, /Your exact saved first response/);
+    assert.match(
+      prompt,
+      /Claude's exact saved peer response|Codex's exact saved peer response/,
+    );
+    assert.match(prompt, /message-499/);
+    if (firstText.startsWith('START')) {
+      assert.match(prompt, /STARTq+/);
+      assert.match(prompt, /END/);
+    }
+  }
+});
+
 test('bounded chat history omits whole messages while preserving valid JSON', () => {
   const history = Array.from({ length: 6 }, (_, index) => ({
     sequence: index + 1,
