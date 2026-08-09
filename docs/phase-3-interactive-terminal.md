@@ -543,6 +543,12 @@ the bytes a user sees. The PTY driver must remain a development-only dependency
 and prove installation and execution on the full macOS, Linux, and Windows CI
 matrix before it becomes required.
 
+The injected readline boundary exposes the current input line and cursor as
+well as prompt, redraw, pause, resume, and close operations. This deliberately
+keeps both input-ownership designs implementable until PTY evidence selects
+one; exposing those values does not make the fake-readline tests evidence of
+real terminal echo or cursor restoration.
+
 The PTY harness will launch a small terminal-boundary fixture with fake
 providers and no network or authentication. Before partial-input behavior is
 changed, failing PTY cases must distinguish these two designs:

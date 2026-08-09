@@ -11,6 +11,8 @@ import {
 
 class FakeReadline extends EventEmitter {
   readonly prompts: Array<boolean | undefined> = [];
+  line = '';
+  cursor = 0;
   promptLabel = '';
   pauseCalls = 0;
   resumeCalls = 0;
@@ -103,7 +105,19 @@ test('real chat terminal queues complete lines until the next prompt', async () 
 
 test('chat terminal delegates active prompt lifecycle to readline', async () => {
   const harness = createFakeTerminal();
-  const pending = harness.terminal.prompt('You > ');
+  const controller = new AbortController();
+  const removeAbortListener = controller.signal.removeEventListener.bind(
+    controller.signal,
+  );
+  let removeAbortListenerCalls = 0;
+  Object.defineProperty(controller.signal, 'removeEventListener', {
+    configurable: true,
+    value: (...parameters: Parameters<typeof removeAbortListener>) => {
+      removeAbortListenerCalls += 1;
+      removeAbortListener(...parameters);
+    },
+  });
+  const pending = harness.terminal.prompt('You > ', controller.signal);
 
   assert.equal(harness.interface_.promptLabel, 'You > ');
   assert.deepEqual(harness.interface_.prompts, [undefined]);
@@ -122,6 +136,12 @@ test('chat terminal delegates active prompt lifecycle to readline', async () => 
 
   harness.interface_.emit('line', 'answer');
   assert.equal(await pending, 'answer');
+  assert.equal(removeAbortListenerCalls, 1);
+  controller.abort();
+
+  // This pins the current no-active-prompt behavior. The PTY slice may
+  // intentionally revise it if evidence favors keeping a prompt alive while
+  // providers work.
   harness.terminal.redrawPrompt();
   assert.deepEqual(harness.interface_.prompts, [undefined, true]);
 

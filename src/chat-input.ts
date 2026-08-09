@@ -53,6 +53,8 @@ export interface ChatReadlineOptions {
 }
 
 export interface ChatReadline {
+  readonly line: string;
+  readonly cursor: number;
   on(event: 'line', listener: (line: string) => void): this;
   on(event: 'close' | 'SIGINT', listener: () => void): this;
   setPrompt(prompt: string): void;
