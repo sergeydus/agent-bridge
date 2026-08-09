@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   boundedChatHistory,
   clip,
+  interactiveChatConfirmationPrompt,
   interactiveChatPrompt,
   MAX_CHAT_HISTORY_CHARS,
   MAX_CONTEXT_CHARS,
@@ -46,6 +47,42 @@ test('interactive chat prompt preserves role, history, and read-only scope', () 
   assert.match(prompt, /read-only/);
   assert.match(prompt, /Explain this module/);
   assert.match(prompt, /Initial analysis/);
+});
+
+test('reciprocal confirmation prompt isolates the exact saved pair', () => {
+  const firstResponse = {
+    sequence: 2,
+    createdAt: '2026-08-09T00:00:01.000Z',
+    role: 'codex' as const,
+    text: 'First answer with "quoted" evidence',
+    decision: 'done' as const,
+  };
+  const peerResponse = {
+    sequence: 3,
+    createdAt: '2026-08-09T00:00:02.000Z',
+    role: 'claude' as const,
+    text: 'Peer answer with\na correction',
+    decision: 'done' as const,
+  };
+  const prompt = interactiveChatConfirmationPrompt({
+    agent: 'codex',
+    history: [firstResponse, peerResponse],
+    projectInstructions: 'Inspect only',
+    firstResponse,
+    peerResponse,
+  });
+
+  assert.match(prompt, /reciprocal confirmation/);
+  assert.match(prompt, /not a\s+new independent answer/);
+  assert.match(prompt, /read-only/);
+  assert.match(prompt, /Your exact saved first response/);
+  assert.match(prompt, /First answer with \\"quoted\\" evidence/);
+  assert.match(prompt, /Claude's exact saved peer response/);
+  assert.match(prompt, /Peer answer with\\na correction/);
+  assert.match(prompt, /accept that exact peer response/);
+  assert.match(prompt, /concise\s+acceptance rationale only/);
+  assert.match(prompt, /material new claim, recommendation, or\s+action/);
+  assert.match(prompt, /decision to "continue" when any\s+correction/);
 });
 
 test('bounded chat history omits whole messages while preserving valid JSON', () => {

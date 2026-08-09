@@ -33,6 +33,7 @@ const execFileAsync = promisify(execFile);
 
 class ScriptedTerminal implements ChatTerminal {
   readonly output: string[] = [];
+  readonly prompts: string[] = [];
   #inputs: string[];
   pauses = 0;
   resumes = 0;
@@ -43,7 +44,8 @@ class ScriptedTerminal implements ChatTerminal {
     this.#inputs = [...inputs];
   }
 
-  prompt(): Promise<string | null> {
+  prompt(prompt: string): Promise<string | null> {
+    this.prompts.push(prompt);
     return Promise.resolve(this.#inputs.shift() ?? null);
   }
 
@@ -438,8 +440,9 @@ test('runs paired exchanges, autonomous done decisions, and a linked workflow', 
     assert.equal(session.status, 'completed');
     assert.deepEqual(
       session.messages.map((message) => message.role),
-      ['user', 'codex', 'claude', 'claude', 'codex', 'system'],
+      ['user', 'codex', 'claude', 'claude', 'codex', 'claude', 'system'],
     );
+    assert.equal(session.latestPairedExchange?.outcome, 'confirmed');
     assert.equal(session.workflows[0]?.mode, 'review');
     assert.equal(launches.length, 1);
     assert.equal(session.maxAutoRounds, 6);
@@ -533,7 +536,12 @@ test('/auto warns before reopening a pair already marked done', async () => {
 
     await runInteractiveChat({ options, appPaths: paths, providers, terminal });
 
-    assert.equal(calls, 2);
+    assert.equal(calls, 3);
+    assert.equal(
+      (await new ChatSessionStore(paths.chatsDirectory).latest())
+        ?.latestPairedExchange?.outcome,
+      'confirmed',
+    );
     assert.match(
       terminal.output.join(''),
       /latest pair is already marked done; starting will deliberately open another exchange/i,
@@ -875,7 +883,7 @@ test('chat editing preflight carries explicit dirty and verification approvals',
   }
 });
 
-test('resume completes an interrupted peer response without repeating the first', async () => {
+test('provider failure returns to the prompt and resume completes without repeating saved responses', async () => {
   const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
   const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
   const called: string[] = [];
@@ -901,21 +909,20 @@ test('resume completes an interrupted peer response without repeating the first'
       initialCwd: '/',
       defaultOutput: paths.runsDirectory,
     });
-    await assert.rejects(
-      runInteractiveChat({
-        options,
-        appPaths: paths,
-        providers: {
-          codex: provider('codex', false),
-          claude: provider('claude', true),
-        },
-        terminal: new ScriptedTerminal(['Inspect this']),
-      }),
-      /interrupted peer/,
-    );
+    const failedTerminal = new ScriptedTerminal(['Inspect this']);
+    await runInteractiveChat({
+      options,
+      appPaths: paths,
+      providers: {
+        codex: provider('codex', false),
+        claude: provider('claude', true),
+      },
+      terminal: failedTerminal,
+    });
     const paused = await new ChatSessionStore(paths.chatsDirectory).latest();
     assert.ok(paused?.pendingExchange);
     assert.deepEqual(called, ['codex', 'claude']);
+    assert.match(failedTerminal.output.join(''), /checkpoint is unchanged/);
 
     const resumeOptions = parseArgs(['chat', '--resume', paused.id], {
       initialCwd: project,
@@ -934,8 +941,9 @@ test('resume completes an interrupted peer response without repeating the first'
     const completed = await new ChatSessionStore(paths.chatsDirectory).load(
       paused.id,
     );
-    assert.deepEqual(called, ['codex', 'claude', 'claude']);
+    assert.deepEqual(called, ['codex', 'claude', 'claude', 'codex']);
     assert.equal(completed.pendingExchange, undefined);
+    assert.equal(completed.latestPairedExchange?.outcome, 'confirmed');
     assert.equal(completed.status, 'completed');
   } finally {
     await rm(project, { recursive: true, force: true });
@@ -943,7 +951,7 @@ test('resume completes an interrupted peer response without repeating the first'
   }
 });
 
-test('does not misroute an unhandled confirmation as another peer reply', async () => {
+test('resume routes awaiting confirmation only to the original first agent', async () => {
   const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
   const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
   let providerCalls = 0;
@@ -992,29 +1000,250 @@ test('does not misroute an unhandled confirmation as another peer reply', async 
       workflows: [],
     };
     await store.save(session);
-    const providers = providersWithRun(async () => {
+    const prompts: string[] = [];
+    const providers = providersWithRun(async (prompt) => {
       providerCalls += 1;
-      return { text: 'unexpected response', decision: 'continue' };
+      prompts.push(prompt);
+      return { text: 'confirmation response', decision: 'continue' };
     });
 
-    await assert.rejects(
-      runInteractiveChat({
-        options: parseArgs(['chat', '--resume', session.id], {
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--resume', session.id], {
+        initialCwd: project,
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers,
+      terminal: new ScriptedTerminal(['/pause']),
+    });
+
+    assert.equal(providerCalls, 1);
+    assert.match(prompts[0] ?? '', /You are Codex/);
+    assert.match(prompts[0] ?? '', /reciprocal confirmation/);
+    assert.match(prompts[0] ?? '', /Codex answer/);
+    assert.match(prompts[0] ?? '', /Claude answer/);
+    const resumed = await store.load(session.id);
+    assert.equal(resumed.pendingExchange, undefined);
+    assert.equal(resumed.latestPairedExchange?.outcome, 'open');
+    assert.equal(resumed.latestPairedExchange?.confirmationMessageSequence, 4);
+    assert.equal(resumed.nextFirstAgent, 'claude');
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('checkpoints both provisional done responses before reciprocal confirmation', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const prompts: string[] = [];
+  let calls = 0;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const providers = providersWithRun(async (prompt) => {
+      calls += 1;
+      prompts.push(prompt);
+      if (calls === 2) {
+        const checkpoint = await store.latest();
+        assert.equal(checkpoint?.pendingExchange?.stage, 'awaiting-peer');
+        assert.deepEqual(
+          checkpoint?.messages.map((message) => message.role),
+          ['user', 'codex'],
+        );
+      }
+      if (calls === 3) {
+        const checkpoint = await store.latest();
+        assert.equal(
+          checkpoint?.pendingExchange?.stage,
+          'awaiting-confirmation',
+        );
+        assert.deepEqual(
+          checkpoint?.messages.map((message) => message.role),
+          ['user', 'codex', 'claude'],
+        );
+      }
+      return { text: `done response ${calls}`, decision: 'done' };
+    });
+
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+        initialCwd: project,
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers,
+      terminal: new ScriptedTerminal(['Review this', '/done']),
+    });
+
+    assert.equal(calls, 3);
+    assert.match(prompts[1] ?? '', /current exchange/);
+    assert.match(prompts[2] ?? '', /reciprocal confirmation/);
+    assert.match(prompts[2] ?? '', /done response 1/);
+    assert.match(prompts[2] ?? '', /done response 2/);
+    const completed = await store.latest();
+    assert.equal(completed?.pendingExchange, undefined);
+    assert.deepEqual(completed?.latestPairedExchange, {
+      firstAgent: 'codex',
+      secondAgent: 'claude',
+      firstMessageSequence: 2,
+      secondMessageSequence: 3,
+      confirmationMessageSequence: 4,
+      outcome: 'confirmed',
+    });
+    assert.equal(completed?.nextFirstAgent, 'claude');
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('a continue confirmation stays open and rotates the next lead to the peer', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  let calls = 0;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const providers = providersWithRun(async (prompt) => {
+      calls += 1;
+      if (calls === 4) {
+        const checkpoint = await store.latest();
+        assert.deepEqual(checkpoint?.latestPairedExchange, {
+          firstAgent: 'codex',
+          secondAgent: 'claude',
+          firstMessageSequence: 2,
+          secondMessageSequence: 3,
+          confirmationMessageSequence: 4,
+          outcome: 'open',
+        });
+        assert.equal(checkpoint?.nextFirstAgent, 'claude');
+        assert.match(prompt, /You are Claude/);
+      }
+      return {
+        text: `response ${calls}`,
+        decision: calls <= 2 ? 'done' : 'continue',
+      };
+    });
+
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+        initialCwd: project,
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers,
+      terminal: new ScriptedTerminal(['Review this', 'Follow up', '/done']),
+    });
+
+    assert.equal(calls, 5);
+    assert.deepEqual(
+      (await store.latest())?.messages.map((message) => message.role),
+      ['user', 'codex', 'claude', 'codex', 'user', 'claude', 'codex'],
+    );
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('/done can atomically abandon either unfinished exchange stage', async () => {
+  for (const failureStage of ['peer', 'confirmation'] as const) {
+    const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+    const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+    let calls = 0;
+    try {
+      const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+      const providers = providersWithRun(async () => {
+        calls += 1;
+        if (
+          (failureStage === 'peer' && calls === 2) ||
+          (failureStage === 'confirmation' && calls === 3)
+        ) {
+          throw new Error(`${failureStage} unavailable`);
+        }
+        return { text: `done ${calls}`, decision: 'done' };
+      });
+      const terminal = new ScriptedTerminal(['Review this', '/done', 'yes']);
+
+      await runInteractiveChat({
+        options: parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
           initialCwd: project,
           defaultOutput: paths.runsDirectory,
         }),
         appPaths: paths,
         providers,
-        terminal: new ScriptedTerminal([]),
-      }),
-      /Cannot resume an awaiting-confirmation exchange/,
-    );
+        terminal,
+      });
 
-    assert.equal(providerCalls, 0);
-    assert.deepEqual(
-      (await store.load(session.id)).pendingExchange,
-      session.pendingExchange,
-    );
+      const completed = await new ChatSessionStore(
+        paths.chatsDirectory,
+      ).latest();
+      assert.equal(completed?.status, 'completed');
+      assert.equal(completed?.pendingExchange, undefined);
+      assert.deepEqual(completed?.latestPairedExchange, {
+        firstAgent: 'codex',
+        secondAgent: 'claude',
+        firstMessageSequence: 2,
+        ...(failureStage === 'confirmation'
+          ? { secondMessageSequence: 3 }
+          : {}),
+        outcome: 'abandoned',
+      });
+      assert.equal(completed?.nextFirstAgent, 'claude');
+      assert.match(
+        terminal.prompts.join(''),
+        failureStage === 'peer'
+          ? /without Claude's peer response/
+          : /without Codex's reciprocal confirmation/,
+      );
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test('declining pending /done leaves the unfinished checkpoint unchanged', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  let calls = 0;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const providers = providersWithRun(async () => {
+      calls += 1;
+      if (calls === 2) {
+        throw new Error('peer unavailable');
+      }
+      return { text: 'first response', decision: 'continue' };
+    });
+    const terminal = new ScriptedTerminal([
+      'Review this',
+      '/done',
+      'no',
+      '/pause',
+    ]);
+
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+        initialCwd: project,
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers,
+      terminal,
+    });
+
+    const paused = await new ChatSessionStore(paths.chatsDirectory).latest();
+    assert.equal(paused?.status, 'paused');
+    assert.deepEqual(paused?.pendingExchange, {
+      stage: 'awaiting-peer',
+      firstAgent: 'codex',
+      secondAgent: 'claude',
+      firstMessageSequence: 2,
+    });
+    assert.equal(paused?.latestPairedExchange, undefined);
+    assert.match(terminal.output.join(''), /Completion cancelled/);
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
@@ -1061,7 +1290,7 @@ test('a new message finishes the outstanding peer reply before its own exchange'
     // Four provider calls: the pair, the cancelled half retried, then Codex.
     assert.equal(called.length, 4);
     const output = terminal.output.join('');
-    assert.match(output, /Finishing Claude's outstanding reply/);
+    assert.match(output, /Finishing Claude's outstanding peer response/);
     assert.match(output, /Chat saved/);
   } finally {
     await rm(project, { recursive: true, force: true });
@@ -1239,18 +1468,15 @@ test('a cancelled resume does not send the startup task into the old exchange', 
       return { text: 'first answer', decision: 'continue' };
     });
     const called: string[] = [];
-    await assert.rejects(
-      runInteractiveChat({
-        options: parseArgs(['chat', '--cwd', project], {
-          initialCwd: project,
-          defaultOutput: paths.runsDirectory,
-        }),
-        appPaths: paths,
-        providers: failing,
-        terminal: new ScriptedTerminal(['Inspect this']),
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--cwd', project], {
+        initialCwd: project,
+        defaultOutput: paths.runsDirectory,
       }),
-      /interrupted peer/,
-    );
+      appPaths: paths,
+      providers: failing,
+      terminal: new ScriptedTerminal(['Inspect this']),
+    });
     const paused = await new ChatSessionStore(paths.chatsDirectory).latest();
     assert.ok(paused?.pendingExchange);
 

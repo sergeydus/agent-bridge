@@ -45,7 +45,10 @@ import {
 import { ProcessAbortError } from './process.ts';
 import { repositoryHasHead } from './git.ts';
 import { resolveProject } from './project.ts';
-import { interactiveChatPrompt } from './prompts.ts';
+import {
+  interactiveChatConfirmationPrompt,
+  interactiveChatPrompt,
+} from './prompts.ts';
 import {
   assertProvidersAvailable,
   createDefaultProviders,
@@ -71,6 +74,21 @@ function errorMessage(error: unknown): string {
 }
 
 const ACTIVITY_TICK_INTERVAL_MS = 250;
+
+class ChatProviderFailure extends Error {
+  readonly agent: AgentName;
+
+  constructor(agent: AgentName, cause: unknown) {
+    super(
+      `${agentLabel(agent)} could not complete the response: ${errorMessage(cause)}`,
+      {
+        cause,
+      },
+    );
+    this.name = 'ChatProviderFailure';
+    this.agent = agent;
+  }
+}
 
 function addMessage(
   session: ChatSession,
@@ -290,6 +308,34 @@ function legacyNextFirstAgent(session: ChatSession): AgentName {
   return Math.floor(agentMessages.length / 2) % 2 === 0 ? 'codex' : 'claude';
 }
 
+function pendingResponseAgent(session: ChatSession): AgentName | undefined {
+  const pending = session.pendingExchange;
+  if (!pending) {
+    return undefined;
+  }
+  return pending.stage === 'awaiting-peer'
+    ? pending.secondAgent
+    : pending.firstAgent;
+}
+
+function abandonPendingExchange(session: ChatSession): void {
+  const pending = session.pendingExchange;
+  if (!pending) {
+    return;
+  }
+  session.latestPairedExchange = {
+    firstAgent: pending.firstAgent,
+    secondAgent: pending.secondAgent,
+    firstMessageSequence: pending.firstMessageSequence,
+    ...(pending.stage === 'awaiting-confirmation'
+      ? { secondMessageSequence: pending.secondMessageSequence }
+      : {}),
+    outcome: 'abandoned',
+  };
+  session.pendingExchange = undefined;
+  session.nextFirstAgent = pending.secondAgent;
+}
+
 async function runExchange({
   session,
   store,
@@ -320,28 +366,15 @@ async function runExchange({
   onPresentationError: (error: unknown) => void;
 }): Promise<boolean> {
   const pending = session.pendingExchange;
-  if (pending?.stage === 'awaiting-confirmation') {
-    throw new Error(
-      'Cannot resume an awaiting-confirmation exchange until confirmation coordination is available.',
-    );
-  }
   if (pending && participants) {
     // The chat loop rejects this before persisting a message, so reaching it
     // here is a coordinator bug rather than recoverable user input.
     throw new Error('Cannot target an agent while a peer response is pending.');
   }
-  const first =
-    pending?.firstAgent ??
-    session.nextFirstAgent ??
-    legacyNextFirstAgent(session);
-  const second = pending?.secondAgent ?? otherAgent(first);
-  let firstMessage = pending
-    ? session.messages[pending.firstMessageSequence - 1]
-    : undefined;
-  const agents = participants ?? (pending ? [second] : [first, second]);
-  const pairedExchange = participants === undefined;
-
-  for (const agent of agents) {
+  const callAgent = async (
+    agent: AgentName,
+    prompt: string,
+  ): Promise<Awaited<ReturnType<typeof runProviderWithRetry>>> => {
     const startedAt = Date.now();
     const model = agent === 'codex' ? session.codexModel : session.claudeModel;
     presenter.dispatch({
@@ -390,13 +423,7 @@ async function runExchange({
       try {
         response = await runProviderWithRetry({
           provider: providers[agent],
-          prompt: interactiveChatPrompt({
-            agent,
-            history: session.messages,
-            projectInstructions: instructions,
-            currentPeerResponse:
-              pairedExchange && agent === second ? firstMessage : undefined,
-          }),
+          prompt,
           options: {
             cwd: session.projectRoot,
             tempDirectory,
@@ -432,51 +459,190 @@ async function runExchange({
         presenter.dispatch({ type: 'agent-stream-finished', agent });
       } catch (error) {
         presenter.dispatch({ type: 'agent-failed', agent });
-        throw error;
+        if (signal.aborted || error instanceof ProcessAbortError) {
+          throw error;
+        }
+        throw new ChatProviderFailure(agent, error);
       }
-      const message = addMessage(
-        session,
-        agent,
-        response.text,
-        response.decision,
-      );
-      if (pairedExchange && agent === first) {
-        firstMessage = message;
-        session.pendingExchange = {
-          stage: 'awaiting-peer',
-          firstAgent: first,
-          secondAgent: second,
-          firstMessageSequence: message.sequence,
-        };
-      } else if (pairedExchange) {
-        session.pendingExchange = undefined;
-        session.nextFirstAgent = otherAgent(first);
-      }
-      await store.save(session);
-      presenter.dispatch({
-        type: 'agent-response',
-        agent,
-        message: presentedMessage(message),
-      });
-      presenter.dispatch({
-        type: 'exchange-status',
-        status: derivePairedExchangeStatus(
-          session.messages,
-          Boolean(session.pendingExchange),
-        ),
-      });
+      return response;
     } finally {
       clearInterval(heartbeat);
       if (activityTick) {
         clearInterval(activityTick);
       }
     }
-  }
+  };
 
-  if (!pairedExchange) {
+  const checkpointResponse = async (
+    agent: AgentName,
+    response: Awaited<ReturnType<typeof runProviderWithRetry>>,
+    transition: (message: ChatMessage) => void,
+  ): Promise<ChatMessage> => {
+    const snapshot = {
+      messageCount: session.messages.length,
+      updatedAt: session.updatedAt,
+      pendingExchange: session.pendingExchange,
+      latestPairedExchange: session.latestPairedExchange,
+      nextFirstAgent: session.nextFirstAgent,
+    };
+    const message = addMessage(
+      session,
+      agent,
+      response.text,
+      response.decision,
+    );
+    transition(message);
+    try {
+      await store.save(session);
+    } catch (error) {
+      session.messages.length = snapshot.messageCount;
+      session.updatedAt = snapshot.updatedAt;
+      session.pendingExchange = snapshot.pendingExchange;
+      session.latestPairedExchange = snapshot.latestPairedExchange;
+      session.nextFirstAgent = snapshot.nextFirstAgent;
+      throw new Error(
+        `Saving ${agentLabel(agent)}'s response failed. The response was not checkpointed; a later resume may repeat this read-only provider call.`,
+        { cause: error },
+      );
+    }
+    presenter.dispatch({
+      type: 'agent-response',
+      agent,
+      message: presentedMessage(message),
+    });
+    presenter.dispatch({
+      type: 'exchange-status',
+      status: derivePairedExchangeStatus(
+        session.messages,
+        Boolean(session.pendingExchange),
+      ),
+    });
+    return message;
+  };
+
+  const savedMessage = (sequence: number, role: AgentName): ChatMessage => {
+    const message = session.messages[sequence - 1];
+    if (message?.sequence !== sequence || message.role !== role) {
+      throw new Error(
+        `The saved chat no longer contains ${agentLabel(role)}'s referenced exchange response.`,
+      );
+    }
+    return message;
+  };
+
+  if (participants) {
+    for (const agent of participants) {
+      const response = await callAgent(
+        agent,
+        interactiveChatPrompt({
+          agent,
+          history: session.messages,
+          projectInstructions: instructions,
+        }),
+      );
+      await checkpointResponse(agent, response, () => {});
+    }
     return false;
   }
-  return derivePairedExchangeStatus(session.messages, false) === 'both-done';
+
+  const first =
+    pending?.firstAgent ??
+    session.nextFirstAgent ??
+    legacyNextFirstAgent(session);
+  const second = pending?.secondAgent ?? otherAgent(first);
+  let firstMessage = pending
+    ? savedMessage(pending.firstMessageSequence, first)
+    : undefined;
+
+  if (!pending) {
+    const firstResponse = await callAgent(
+      first,
+      interactiveChatPrompt({
+        agent: first,
+        history: session.messages,
+        projectInstructions: instructions,
+      }),
+    );
+    firstMessage = await checkpointResponse(first, firstResponse, (message) => {
+      session.pendingExchange = {
+        stage: 'awaiting-peer',
+        firstAgent: first,
+        secondAgent: second,
+        firstMessageSequence: message.sequence,
+      };
+    });
+  }
+
+  let activePending = session.pendingExchange;
+  if (activePending?.stage === 'awaiting-peer') {
+    const peerResponse = await callAgent(
+      second,
+      interactiveChatPrompt({
+        agent: second,
+        history: session.messages,
+        projectInstructions: instructions,
+        currentPeerResponse: firstMessage,
+      }),
+    );
+    await checkpointResponse(second, peerResponse, (message) => {
+      if (firstMessage?.decision === 'done' && message.decision === 'done') {
+        session.pendingExchange = {
+          stage: 'awaiting-confirmation',
+          firstAgent: first,
+          secondAgent: second,
+          firstMessageSequence: firstMessage.sequence,
+          secondMessageSequence: message.sequence,
+        };
+        return;
+      }
+      session.pendingExchange = undefined;
+      session.latestPairedExchange = {
+        firstAgent: first,
+        secondAgent: second,
+        firstMessageSequence: firstMessage!.sequence,
+        secondMessageSequence: message.sequence,
+        outcome: 'open',
+      };
+      session.nextFirstAgent = second;
+    });
+    activePending = session.pendingExchange;
+    if (!activePending) {
+      return false;
+    }
+  }
+
+  if (activePending?.stage !== 'awaiting-confirmation') {
+    throw new Error('The paired exchange has no resumable checkpoint stage.');
+  }
+  firstMessage = savedMessage(activePending.firstMessageSequence, first);
+  const peerMessage = savedMessage(activePending.secondMessageSequence, second);
+  const confirmationResponse = await callAgent(
+    first,
+    interactiveChatConfirmationPrompt({
+      agent: first,
+      history: session.messages,
+      projectInstructions: instructions,
+      firstResponse: firstMessage,
+      peerResponse: peerMessage,
+    }),
+  );
+  const confirmationMessage = await checkpointResponse(
+    first,
+    confirmationResponse,
+    (message) => {
+      session.pendingExchange = undefined;
+      session.latestPairedExchange = {
+        firstAgent: first,
+        secondAgent: second,
+        firstMessageSequence: firstMessage!.sequence,
+        secondMessageSequence: peerMessage.sequence,
+        confirmationMessageSequence: message.sequence,
+        outcome: message.decision === 'done' ? 'confirmed' : 'open',
+      };
+      session.nextFirstAgent = second;
+    },
+  );
+  return confirmationMessage.decision === 'done';
 }
 
 function createSession(
@@ -720,7 +886,11 @@ export async function runInteractiveChat({
         (await loadInstructionContext(session.projectRoot)).prompt;
       const runCancellableExchange = async (
         participants?: readonly AgentName[],
-      ): Promise<{ bothDone: boolean; cancelled: boolean }> => {
+      ): Promise<{
+        bothDone: boolean;
+        cancelled: boolean;
+        providerFailed: boolean;
+      }> => {
         resumeAfterSupplementalOutput();
         const previousMessageCount = session.messages.length;
         let responsesRevealed = false;
@@ -764,7 +934,7 @@ export async function runInteractiveChat({
             ...(participants ? { participants } : {}),
           });
           revealCompletedResponses();
-          return { bothDone, cancelled: false };
+          return { bothDone, cancelled: false, providerFailed: false };
         } catch (error) {
           revealCompletedResponses();
           if (terminalFailure) {
@@ -775,7 +945,21 @@ export async function runInteractiveChat({
             writeSupplemental(
               '\nActive agent work cancelled. The chat is saved and still open.\n',
             );
-            return { bothDone: false, cancelled: true };
+            return {
+              bothDone: false,
+              cancelled: true,
+              providerFailed: false,
+            };
+          }
+          if (error instanceof ChatProviderFailure) {
+            writeSupplemental(
+              `\n${error.message}\nThe saved chat checkpoint is unchanged. You can retry, pause, or complete the chat without the unfinished exchange.\n`,
+            );
+            return {
+              bothDone: false,
+              cancelled: false,
+              providerFailed: true,
+            };
           }
           throw error;
         } finally {
@@ -796,13 +980,15 @@ export async function runInteractiveChat({
         if (!session.pendingExchange) {
           return true;
         }
+        const pending = session.pendingExchange;
+        const agent = pendingResponseAgent(session)!;
         writeSupplemental(
-          `\nFinishing ${agentLabel(
-            session.pendingExchange.secondAgent,
-          )}'s outstanding reply from the interrupted exchange first.\n`,
+          pending.stage === 'awaiting-peer'
+            ? `\nFinishing ${agentLabel(agent)}'s outstanding peer response from the interrupted exchange first.\n`
+            : `\nFinishing ${agentLabel(agent)}'s outstanding reciprocal confirmation from the interrupted exchange first.\n`,
         );
-        const { cancelled } = await runCancellableExchange();
-        return !cancelled && !session.pendingExchange;
+        const { cancelled, providerFailed } = await runCancellableExchange();
+        return !cancelled && !providerFailed && !session.pendingExchange;
       };
       if (uiResolution.notice) {
         terminal.write(`${uiResolution.notice}. Continuing in plain mode.\n`);
@@ -817,9 +1003,15 @@ export async function runInteractiveChat({
 
       let pendingSettled = true;
       if (session.pendingExchange) {
-        terminal.write('\nResuming the interrupted peer response…\n');
-        const { cancelled } = await runCancellableExchange();
-        pendingSettled = !cancelled && !session.pendingExchange;
+        const pending = session.pendingExchange;
+        terminal.write(
+          pending.stage === 'awaiting-peer'
+            ? '\nResuming the interrupted peer response…\n'
+            : '\nResuming the interrupted reciprocal confirmation…\n',
+        );
+        const { cancelled, providerFailed } = await runCancellableExchange();
+        pendingSettled =
+          !cancelled && !providerFailed && !session.pendingExchange;
       }
       if (initialMessage && !pendingSettled) {
         // Sending it now would fold the task into the still-interrupted
@@ -933,8 +1125,29 @@ export async function runInteractiveChat({
           return;
         }
         if (command.kind === 'done') {
-          setPresentedStatus(session, presenter, 'completed');
+          if (session.pendingExchange) {
+            const pending = session.pendingExchange;
+            const missingAgent = agentLabel(pendingResponseAgent(session)!);
+            const missingStage =
+              pending.stage === 'awaiting-peer'
+                ? `${missingAgent}'s peer response`
+                : `${missingAgent}'s reciprocal confirmation`;
+            if (
+              !(await confirm(
+                `Complete this chat without ${missingStage}? [y/N]: `,
+                false,
+              ))
+            ) {
+              writeSupplemental(
+                'Completion cancelled. The unfinished exchange remains saved.\n',
+              );
+              continue;
+            }
+            abandonPendingExchange(session);
+          }
+          session.status = 'completed';
           await store.save(session);
+          presenter.dispatch({ type: 'session-status', status: 'completed' });
           completed = true;
           presenter.stop();
           terminal.write(`\nChat ${session.id} completed.\n`);
@@ -994,16 +1207,18 @@ ${
           }
           let bothDone = false;
           let cancelled = false;
+          let providerFailed = false;
           for (let round = 1; round <= rounds; round += 1) {
             terminal.write(`\nAutomatic exchange ${round}/${rounds}\n`);
             const result = await runCancellableExchange();
             bothDone = result.bothDone;
             cancelled = result.cancelled;
-            if (bothDone || cancelled) {
+            providerFailed = result.providerFailed;
+            if (bothDone || cancelled || providerFailed) {
               break;
             }
           }
-          if (!cancelled) {
+          if (!cancelled && !providerFailed) {
             writeSupplemental(
               bothDone
                 ? '\nBoth agents marked the same paired exchange done.\n'
