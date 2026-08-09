@@ -176,6 +176,7 @@ function unavailableProviders(): ProviderMap {
 
 test('parses interactive commands without accepting arbitrary actions', () => {
   assert.match(CHAT_HELP, /files stay unchanged/);
+  assert.match(CHAT_HELP, /reciprocal confirmation/);
   assert.match(CHAT_HELP, /Named agent edits; the other agent reviews/);
   assert.match(CHAT_HELP, /alternate editing and reviewing/);
   assert.deepEqual(parseChatInput('hello'), {
@@ -458,9 +459,9 @@ test('runs paired exchanges, autonomous done decisions, and a linked workflow', 
     assert.equal(terminal.resumes, 1);
     assert.equal(terminal.queuedInputObserver, undefined);
     const output = terminal.output.join('');
-    assert.match(output, /same paired exchange done/);
+    assert.match(output, /reciprocally marked this exchange done/);
     assert.doesNotMatch(output, /agree on the current answer/);
-    assert.match(output, /Maximum provider calls: 4/);
+    assert.match(output, /Maximum provider calls: 6/);
     assert.match(output, /Workflow preview/);
     assert.match(output, /Estimated provider calls:/);
     const enhancedEntries = output.split('\u001B[?1049h').length - 1;
@@ -513,7 +514,7 @@ test('chat startup task files use the interactive message limit', async () => {
   }
 });
 
-test('/auto warns before reopening a pair already marked done', async () => {
+test('/auto warns before reopening an already confirmed exchange', async () => {
   const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
   const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
   let calls = 0;
@@ -544,8 +545,127 @@ test('/auto warns before reopening a pair already marked done', async () => {
     );
     assert.match(
       terminal.output.join(''),
-      /latest pair is already marked done; starting will deliberately open another exchange/i,
+      /latest exchange is already reciprocally confirmed; starting will deliberately open another exchange/i,
     );
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('/auto previews three-stage call bounds from either pending stage', async () => {
+  for (const pendingStage of ['peer', 'confirmation'] as const) {
+    const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+    const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+    let calls = 0;
+    try {
+      const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+      const providers = providersWithRun(async () => {
+        calls += 1;
+        const cancelledCall = pendingStage === 'peer' ? 2 : 3;
+        if (calls === cancelledCall) {
+          throw new ProcessAbortError();
+        }
+        return { text: `done response ${calls}`, decision: 'done' };
+      });
+      const terminal = new ScriptedTerminal([
+        'Review this',
+        '/auto 2',
+        'yes',
+        '/done',
+      ]);
+
+      await runInteractiveChat({
+        options: parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+          initialCwd: project,
+          defaultOutput: paths.runsDirectory,
+        }),
+        appPaths: paths,
+        providers,
+        terminal,
+      });
+
+      assert.match(
+        terminal.output.join(''),
+        new RegExp(
+          `Maximum provider calls: ${pendingStage === 'peer' ? 5 : 4}`,
+        ),
+      );
+      assert.match(
+        terminal.output.join(''),
+        /stops early only after reciprocal confirmation/i,
+      );
+      assert.equal(calls, 4);
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  }
+});
+
+test('/auto labels a legacy two-done pair unconfirmed', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  let providerCalls = 0;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const store = new ChatSessionStore(paths.chatsDirectory);
+    const now = '2026-08-09T00:00:00.000Z';
+    const session: ChatSession = {
+      version: 4,
+      id: 'chat-legacy-done-pair',
+      createdAt: now,
+      updatedAt: now,
+      status: 'paused',
+      projectRoot: project,
+      projectKind: 'directory',
+      maxAutoRounds: 6,
+      maxWorkflowRounds: 6,
+      retries: 1,
+      timeoutMinutes: 30,
+      noTranscript: false,
+      ui: 'plain',
+      messages: [
+        { sequence: 1, createdAt: now, role: 'user', text: 'Review this' },
+        {
+          sequence: 2,
+          createdAt: now,
+          role: 'codex',
+          text: 'Legacy first',
+          decision: 'done',
+        },
+        {
+          sequence: 3,
+          createdAt: now,
+          role: 'claude',
+          text: 'Legacy second',
+          decision: 'done',
+        },
+      ],
+      workflows: [],
+    };
+    await store.save(session);
+    const terminal = new ScriptedTerminal(['/auto 1', 'no', '/pause']);
+
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--resume', session.id], {
+        initialCwd: project,
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers: providersWithRun(async () => {
+        providerCalls += 1;
+        return { text: 'unused', decision: 'continue' };
+      }),
+      terminal,
+    });
+
+    assert.equal(providerCalls, 0);
+    assert.match(
+      terminal.output.join(''),
+      /legacy pair has two done decisions but is not reciprocally confirmed/i,
+    );
+    assert.match(terminal.output.join(''), /Maximum provider calls: 3/);
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });

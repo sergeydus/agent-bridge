@@ -7,7 +7,15 @@ export const MAX_PRESENTED_LIVE_TEXT_CHARS = 50_000;
 export type PresentedRole = 'user' | 'codex' | 'claude' | 'system';
 export type PresentedSessionStatus = 'active' | 'paused' | 'completed';
 export type PresentedExchangeStatus =
-  'none' | 'pending-peer' | 'open' | 'both-done';
+  | 'none'
+  | 'pending-peer'
+  | 'pending-confirmation'
+  | 'open'
+  | 'both-done'
+  | 'confirmed'
+  | 'abandoned';
+
+export type PresentedActivityPhase = 'response' | 'confirmation';
 
 export interface PresentedMessage {
   readonly sequence: number;
@@ -31,6 +39,7 @@ export interface PresentedUsage {
 
 export interface PresentedActivity {
   readonly agent: AgentName;
+  readonly phase: PresentedActivityPhase;
   readonly model?: string;
   readonly startedAt: number;
   readonly observedAt: number;
@@ -74,6 +83,7 @@ export type PresentationModelEvent =
       type: 'agent-started';
       agent: AgentName;
       model?: string;
+      phase?: PresentedActivityPhase;
       startedAt: number;
     }
   | {
@@ -170,12 +180,23 @@ export function createTerminalViewModel({
   };
 }
 
-export function derivePairedExchangeStatus(
-  messages: readonly PresentedMessage[],
-  peerResponsePending: boolean,
-): PresentedExchangeStatus {
-  if (peerResponsePending) {
+export function derivePairedExchangeStatus({
+  messages,
+  pendingStage,
+  latestOutcome,
+}: {
+  messages: readonly PresentedMessage[];
+  pendingStage?: 'awaiting-peer' | 'awaiting-confirmation';
+  latestOutcome?: 'open' | 'confirmed' | 'abandoned';
+}): PresentedExchangeStatus {
+  if (pendingStage === 'awaiting-peer') {
     return 'pending-peer';
+  }
+  if (pendingStage === 'awaiting-confirmation') {
+    return 'pending-confirmation';
+  }
+  if (latestOutcome) {
+    return latestOutcome;
   }
   const latest = messages.slice(-2);
   if (
@@ -190,6 +211,27 @@ export function derivePairedExchangeStatus(
   return latest.every((message) => message.decision === 'done')
     ? 'both-done'
     : 'open';
+}
+
+export function describePresentedExchangeStatus(
+  status: PresentedExchangeStatus,
+): string {
+  switch (status) {
+    case 'none':
+      return 'none yet';
+    case 'pending-peer':
+      return 'waiting for peer response';
+    case 'pending-confirmation':
+      return 'waiting for reciprocal confirmation';
+    case 'open':
+      return 'open; another exchange may help';
+    case 'both-done':
+      return 'both agents marked the legacy pair done; not reciprocally confirmed';
+    case 'confirmed':
+      return 'both agents reciprocally marked this exchange done';
+    case 'abandoned':
+      return 'exchange left unfinished when the session was completed';
+  }
 }
 
 export function reducePresentationModel(
@@ -219,6 +261,7 @@ export function reducePresentationModel(
       ...model,
       activity: {
         agent: event.agent,
+        phase: event.phase ?? 'response',
         model: event.model,
         startedAt: event.startedAt,
         observedAt: event.startedAt,

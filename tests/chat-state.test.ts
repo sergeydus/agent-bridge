@@ -266,6 +266,10 @@ test('persists private chat state and a readable transcript', async () => {
       /Agent Bridge Interactive Chat/,
     );
     assert.match(formatChatTranscript(session), /Review this/);
+    assert.match(
+      formatChatTranscript(session),
+      /Latest paired exchange: none yet/,
+    );
 
     await store.delete(session.id);
     assert.equal(await store.latest(), null);
@@ -312,6 +316,10 @@ test('validates version 4 pending and recorded exchange invariants', () => {
     },
   };
   assert.equal(isChatSession(confirmed), true);
+  assert.match(
+    formatChatTranscript(confirmed),
+    /Latest paired exchange: both agents reciprocally marked this exchange done/,
+  );
   assert.equal(
     isChatSession({
       ...confirmed,
@@ -389,6 +397,10 @@ test('validates version 4 pending and recorded exchange invariants', () => {
     },
   };
   assert.equal(isChatSession(awaitingConfirmation), true);
+  assert.match(
+    formatChatTranscript(awaitingConfirmation),
+    /Latest paired exchange: waiting for reciprocal confirmation/,
+  );
   assert.equal(
     isChatSession({
       ...awaitingConfirmation,
@@ -411,6 +423,10 @@ test('validates version 4 pending and recorded exchange invariants', () => {
     },
   };
   assert.equal(isChatSession(abandoned), true);
+  assert.match(
+    formatChatTranscript(abandoned),
+    /Latest paired exchange: exchange left unfinished when the session was completed/,
+  );
   assert.equal(
     isChatSession({
       ...abandoned,

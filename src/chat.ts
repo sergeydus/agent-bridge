@@ -38,6 +38,7 @@ import {
 import {
   MAX_PRESENTED_MESSAGES,
   createTerminalViewModel,
+  describePresentedExchangeStatus,
   derivePairedExchangeStatus,
   type PresentationModelEvent,
   type PresentedMessage,
@@ -117,6 +118,14 @@ function presentedMessage(message: ChatMessage): PresentedMessage {
   };
 }
 
+function presentedExchangeStatus(session: ChatSession) {
+  return derivePairedExchangeStatus({
+    messages: session.messages,
+    pendingStage: session.pendingExchange?.stage,
+    latestOutcome: session.latestPairedExchange?.outcome,
+  });
+}
+
 function chatIntroduction(
   session: ChatSession,
   presentation: PresentationPreferences,
@@ -163,10 +172,7 @@ function createChatPresentation(
       messages: session.messages
         .slice(-MAX_PRESENTED_MESSAGES)
         .map(presentedMessage),
-      exchangeStatus: derivePairedExchangeStatus(
-        session.messages,
-        Boolean(session.pendingExchange),
-      ),
+      exchangeStatus: presentedExchangeStatus(session),
     }),
     renderer:
       uiMode === 'enhanced'
@@ -198,7 +204,10 @@ function addPresentedMessage(
     type: 'message-added',
     message: presentedMessage(message),
   });
-  presenter.dispatch({ type: 'exchange-status', status: 'none' });
+  presenter.dispatch({
+    type: 'exchange-status',
+    status: presentedExchangeStatus(session),
+  });
 }
 
 function setPresentedStatus(
@@ -254,18 +263,9 @@ function chatStatus(
   presentation: PresentationPreferences,
   uiMode: ResolvedUiMode,
 ): string {
-  const exchangeStatus = derivePairedExchangeStatus(
-    session.messages,
-    Boolean(session.pendingExchange),
+  const exchange = describePresentedExchangeStatus(
+    presentedExchangeStatus(session),
   );
-  const exchange =
-    exchangeStatus === 'pending-peer'
-      ? 'waiting for peer response'
-      : exchangeStatus === 'both-done'
-        ? 'both agents marked the latest pair done'
-        : exchangeStatus === 'open'
-          ? 'open; another exchange may help'
-          : 'none yet';
   return `Session: ${session.id}
 Status: ${session.status}
 Project: ${sanitizeTerminalText(session.projectRoot)} (${session.projectKind})
@@ -374,6 +374,7 @@ async function runExchange({
   const callAgent = async (
     agent: AgentName,
     prompt: string,
+    phase: 'response' | 'confirmation' = 'response',
   ): Promise<Awaited<ReturnType<typeof runProviderWithRetry>>> => {
     const startedAt = Date.now();
     const model = agent === 'codex' ? session.codexModel : session.claudeModel;
@@ -381,6 +382,7 @@ async function runExchange({
       type: 'agent-started',
       agent,
       model,
+      phase,
       startedAt,
     });
     let timerFailed = false;
@@ -512,10 +514,7 @@ async function runExchange({
     });
     presenter.dispatch({
       type: 'exchange-status',
-      status: derivePairedExchangeStatus(
-        session.messages,
-        Boolean(session.pendingExchange),
-      ),
+      status: presentedExchangeStatus(session),
     });
     return message;
   };
@@ -625,6 +624,7 @@ async function runExchange({
       firstResponse: firstMessage,
       peerResponse: peerMessage,
     }),
+    'confirmation',
   );
   const confirmationMessage = await checkpointResponse(
     first,
@@ -1125,6 +1125,7 @@ export async function runInteractiveChat({
           return;
         }
         if (command.kind === 'done') {
+          let abandonedPendingExchange = false;
           if (session.pendingExchange) {
             const pending = session.pendingExchange;
             const missingAgent = agentLabel(pendingResponseAgent(session)!);
@@ -1144,13 +1145,20 @@ export async function runInteractiveChat({
               continue;
             }
             abandonPendingExchange(session);
+            abandonedPendingExchange = true;
           }
           session.status = 'completed';
           await store.save(session);
           presenter.dispatch({ type: 'session-status', status: 'completed' });
           completed = true;
           presenter.stop();
-          terminal.write(`\nChat ${session.id} completed.\n`);
+          terminal.write(
+            `\nChat ${session.id} completed.${
+              abandonedPendingExchange
+                ? ' The exchange was left unfinished and recorded as abandoned.'
+                : ''
+            }\n`,
+          );
           return;
         }
         if (command.kind === 'message') {
@@ -1184,21 +1192,25 @@ export async function runInteractiveChat({
             await store.save(session);
           }
           const rounds = command.rounds ?? session.maxAutoRounds;
-          const currentExchangeStatus = derivePairedExchangeStatus(
-            session.messages,
-            Boolean(session.pendingExchange),
-          );
-          const maximumProviderCalls =
-            rounds * 2 - (session.pendingExchange ? 1 : 0);
+          const currentExchangeStatus = presentedExchangeStatus(session);
+          const pendingCallDiscount =
+            session.pendingExchange?.stage === 'awaiting-peer'
+              ? 1
+              : session.pendingExchange?.stage === 'awaiting-confirmation'
+                ? 2
+                : 0;
+          const maximumProviderCalls = rounds * 3 - pendingCallDiscount;
           writeSupplemental(`
 Automatic conversation preview
 Maximum exchanges: ${rounds}
 Maximum provider calls: ${maximumProviderCalls}
-It stops early if both agents mark the same paired exchange done.
+It stops early only after reciprocal confirmation.
 ${
-  currentExchangeStatus === 'both-done'
-    ? 'The latest pair is already marked done; starting will deliberately open another exchange.\n'
-    : ''
+  currentExchangeStatus === 'confirmed'
+    ? 'The latest exchange is already reciprocally confirmed; starting will deliberately open another exchange.\n'
+    : currentExchangeStatus === 'both-done'
+      ? 'The latest legacy pair has two done decisions but is not reciprocally confirmed; starting opens a version 4 exchange that can be confirmed.\n'
+      : ''
 }
 `);
           if (!(await confirm('Start automatic conversation? [Y/n]: ', true))) {
@@ -1221,7 +1233,7 @@ ${
           if (!cancelled && !providerFailed) {
             writeSupplemental(
               bothDone
-                ? '\nBoth agents marked the same paired exchange done.\n'
+                ? '\nBoth agents reciprocally marked this exchange done.\n'
                 : '\nAutomatic exchange limit reached; you remain in control.\n',
             );
           }

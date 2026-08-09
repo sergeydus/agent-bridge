@@ -1,7 +1,9 @@
 import { formatDuration, type AgentDecision, type AgentName } from './core.ts';
 import {
+  describePresentedExchangeStatus,
   MAX_PRESENTED_LIVE_TEXT_CHARS,
   reducePresentationModel,
+  type PresentedActivityPhase,
   type PresentationModelEvent,
   type TerminalViewModel,
 } from './presentation-model.ts';
@@ -387,20 +389,24 @@ function modelLabel(model?: string): string {
 export function formatAgentStarted({
   agent,
   model,
+  phase = 'response',
   preferences,
 }: {
   agent: AgentName;
   model?: string;
+  phase?: PresentedActivityPhase;
   preferences: PresentationPreferences;
 }): string {
+  const action =
+    phase === 'confirmation' ? 'reciprocal confirmation' : 'read-only response';
   if (preferences.screenReader) {
-    return `\n${agentLabel(agent)} started a read-only response using the ${modelLabel(
+    return `\n${agentLabel(agent)} started a ${action} using the ${modelLabel(
       model,
     )}.\n`;
   }
   return `\n${coloredAgentLabel(agent, preferences)} · ${modelLabel(
     model,
-  )} · thinking…\n`;
+  )} · ${phase === 'confirmation' ? 'confirming reciprocity…' : 'thinking…'}\n`;
 }
 
 export function formatAgentHeartbeat({
@@ -484,6 +490,7 @@ export function createPlainTerminalRenderer(
         return formatAgentStarted({
           agent: event.agent,
           model: event.model,
+          phase: event.phase,
           preferences,
         });
       }
@@ -533,12 +540,7 @@ export function createPlainTerminalRenderer(
         if (event.status === 'none') {
           return '';
         }
-        const status =
-          event.status === 'pending-peer'
-            ? 'waiting for the peer response'
-            : event.status === 'both-done'
-              ? 'both agents marked this paired exchange done'
-              : 'open; at least one agent requested another exchange';
+        const status = describePresentedExchangeStatus(event.status);
         return preferences.screenReader
           ? `Paired exchange status: ${status}.\n`
           : `  Paired exchange · ${status}\n`;

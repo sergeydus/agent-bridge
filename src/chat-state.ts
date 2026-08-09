@@ -10,6 +10,10 @@ import {
 } from './core.ts';
 import { acquireFileLock, FileLock } from './file-lock.ts';
 import { readFilePrefixBytes, writePrivateFileAtomic } from './filesystem.ts';
+import {
+  describePresentedExchangeStatus,
+  derivePairedExchangeStatus,
+} from './presentation-model.ts';
 import type { UiMode } from './terminal-capabilities.ts';
 import { sanitizeTerminalText } from './terminal-text.ts';
 
@@ -627,6 +631,11 @@ function migrateChatSession(
 }
 
 export function formatChatTranscript(session: ChatSession): string {
+  const exchangeStatus = derivePairedExchangeStatus({
+    messages: session.messages,
+    pendingStage: session.pendingExchange?.stage,
+    latestOutcome: session.latestPairedExchange?.outcome,
+  });
   const lines = [
     '# Agent Bridge Interactive Chat',
     '',
@@ -636,6 +645,7 @@ export function formatChatTranscript(session: ChatSession): string {
     `- Status: ${session.status}`,
     `- Project: ${session.projectRoot}`,
     `- Project type: ${session.projectKind}`,
+    `- Latest paired exchange: ${describePresentedExchangeStatus(exchangeStatus)}`,
     '',
   ];
   for (const message of session.messages) {

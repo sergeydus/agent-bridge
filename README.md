@@ -82,9 +82,11 @@ npm run chat -- --cwd /path/to/project
 ```
 
 Each message produces one read-only Codex/Claude exchange and then returns
-control to you. The bridge—not either provider—stores bounded conversation
-history, so provider calls remain ephemeral, portable, and independently
-sandboxed.
+control to you. Open exchanges use two provider calls. When both initial
+responses say `done`, the first provider receives the exact saved pair for a
+third, reciprocal-confirmation call. The bridge—not either provider—stores
+bounded conversation history, so provider calls remain ephemeral, portable,
+and independently sandboxed.
 
 While an agent works, Agent Bridge displays safe live progress instead of
 waiting silently for the final answer. Interactive chat streams user-facing
@@ -99,7 +101,7 @@ Inside the chat:
 /ask codex|claude <text> Ask one agent directly
 /both <text>              Explicitly ask both agents
 @codex|@claude|@both ... Short form for a targeted message
-/auto [1-20]              Continue until both mark one paired exchange done
+/auto [1-20]              Continue until one exchange is reciprocally confirmed
 /edit [codex|claude]      Preview and start safe alternating edits
 /implement codex|claude   Start safe fixed-role implementation and review
 /collaborate codex|claude Start safe alternating edits; named agent goes first
@@ -108,7 +110,7 @@ Inside the chat:
 /status                   Show session information
 /history [1-50]           Show recent messages
 /pause                    Save and leave
-/done                     Complete and leave
+/done                     Complete; confirm before abandoning pending work
 /help                     Show all commands
 ```
 
@@ -121,17 +123,22 @@ current paired exchange. This covers complete submitted lines. In an enhanced
 TTY, characters that have not reached Enter can still be echoed and repainted
 during live redraws; broader PTY input coordination remains hardening work.
 
-Ordinary messages and `/both` produce the normal two-agent exchange. `/ask`
+Ordinary messages and `/both` produce the normal paired exchange. Most open
+exchanges use two provider calls; two provisional `done` decisions trigger a
+third reciprocal-confirmation call. `/ask`
 and the `@codex` or `@claude` forms call only the selected agent, which is
 useful for a focused follow-up without paying for an unnecessary peer call.
 The targeted message and response remain part of the shared bounded history.
 These conversational turns are read-only: they cannot edit project files.
 
-The terminal reports whether the latest paired exchange is waiting for its
-peer, remains open, or has two `done` decisions. “Both marked done” is the exact
-structured state; it is not presented as independently verified agreement.
-Starting `/auto` from that state explicitly previews that it will open another
-exchange.
+The terminal distinguishes a pending peer, pending reciprocal confirmation,
+an open exchange, a confirmed exchange, and one explicitly abandoned during
+completion. Confirmation means both agents reciprocally marked the same
+checkpointed exchange `done`; it is not independent verification and never
+authorizes edits. `/auto` previews a worst-case three calls per requested
+exchange, adjusted for saved pending work, and warns before deliberately
+opening another exchange after confirmation. A migrated legacy pair with two
+`done` decisions is labeled unconfirmed rather than treated as agreement.
 
 `/edit` is the recommended editing command. It chooses alternating
 implementation and review with Claude first; `/edit codex` changes the first
