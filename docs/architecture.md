@@ -148,6 +148,12 @@ Direct editing is an explicit advanced mode. When accepted beside existing
 changes, those paths are fingerprinted before the first agent call and checked
 after every writer.
 
+The completion step reads its input through a `CompletionPrompt` rather than
+`process.stdin`, so every keep, apply, and discard path is exercised by
+deterministic tests against temporary repositories. The terminal implementation
+is constructed only when both streams are terminals; otherwise no prompt exists
+and the workspace is kept.
+
 ## Persistence
 
 `RunStateStore` validates versioned checkpoints at runtime, migrates supported

@@ -1,7 +1,4 @@
-import {
-  createInterface,
-  type Interface as ReadlineInterface,
-} from 'node:readline/promises';
+import { createInterface } from 'node:readline/promises';
 
 import {
   applyPatch,
@@ -12,21 +9,72 @@ import {
 } from './git.ts';
 import type { ProgressReporter } from './ui.ts';
 
+/**
+ * The completion step's only input source. `ask` resolves `undefined` when the
+ * user declines to answer, so no completion question can reject and end a run
+ * that has already finished successfully.
+ */
+export interface CompletionPrompt {
+  ask(question: string): Promise<string | undefined>;
+  close(): void;
+}
+
+type TerminalInput = NodeJS.ReadableStream & { isTTY?: boolean };
+type TerminalOutput = NodeJS.WritableStream & { isTTY?: boolean };
+
+export function createReadlineCompletionPrompt({
+  input,
+  output,
+}: {
+  input: NodeJS.ReadableStream;
+  output: NodeJS.WritableStream;
+}): CompletionPrompt {
+  const interface_ = createInterface({ input, output });
+  return {
+    ask: (question) => interface_.question(question),
+    close: () => interface_.close(),
+  };
+}
+
+/** Interactive completion is offered only when both streams are terminals. */
+export function createTerminalCompletionPrompt({
+  input = process.stdin,
+  output = process.stdout,
+}: { input?: TerminalInput; output?: TerminalOutput } = {}):
+  CompletionPrompt | undefined {
+  if (!input.isTTY || !output.isTTY) {
+    return undefined;
+  }
+  return createReadlineCompletionPrompt({ input, output });
+}
+
 async function askForChoice(
-  interface_: ReadlineInterface,
-  prompt: string,
+  prompt: CompletionPrompt,
+  question: string,
   choices: string[],
   defaultChoice: string,
-): Promise<string> {
+): Promise<string | undefined> {
+  let correction = '';
   while (true) {
-    const answer = (await interface_.question(prompt)).trim().toLowerCase();
-    const choice = answer || defaultChoice;
+    const answer = await prompt.ask(`${correction}${question}`);
+    if (answer === undefined) {
+      return undefined;
+    }
+    const choice = answer.trim().toLowerCase() || defaultChoice;
     if (choices.includes(choice)) {
       return choice;
     }
-    console.log(`Please enter ${choices.join(', ')}.`);
+    correction = `Please enter ${choices.join(', ')}.\n`;
   }
 }
+
+const COMPLETION_MENU = `
+What should happen to the completed changes?
+  1) Keep the isolated workspace for inspection (safest)
+  2) Apply the patch to the original checkout and keep the workspace
+  3) Discard the isolated workspace
+
+Choose 1, 2, or 3 [1]: `;
 
 export async function patchApplicationRefusalReason({
   repository,
@@ -55,12 +103,14 @@ export async function finishIsolatedRun({
   patchPath,
   baseRevision,
   reporter,
+  createPrompt = createTerminalCompletionPrompt,
 }: {
   repository: string;
   workspace: string;
   patchPath: string;
   baseRevision?: string;
   reporter: ProgressReporter;
+  createPrompt?: () => CompletionPrompt | undefined;
 }): Promise<{ patchPath?: string; workspace?: string; applied?: boolean }> {
   const patchCreated = await createPatch({
     workspace,
@@ -71,24 +121,15 @@ export async function finishIsolatedRun({
     return { workspace };
   }
   reporter.success(`Saved a portable patch to ${patchPath}`);
-  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+  const prompt = createPrompt();
+  if (!prompt) {
     return { patchPath, workspace };
   }
 
-  const interface_ = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
   try {
-    console.log(`
-What should happen to the completed changes?
-  1) Keep the isolated workspace for inspection (safest)
-  2) Apply the patch to the original checkout and keep the workspace
-  3) Discard the isolated workspace
-`);
     const choice = await askForChoice(
-      interface_,
-      'Choose 1, 2, or 3 [1]: ',
+      prompt,
+      COMPLETION_MENU,
       ['1', '2', '3'],
       '1',
     );
@@ -108,12 +149,12 @@ What should happen to the completed changes?
     }
     if (choice === '3') {
       const confirmed = await askForChoice(
-        interface_,
+        prompt,
         'Discard this isolated workspace permanently? [y/N]: ',
         ['y', 'yes', 'n', 'no'],
         'n',
       );
-      if (['y', 'yes'].includes(confirmed)) {
+      if (confirmed !== undefined && ['y', 'yes'].includes(confirmed)) {
         await removeIsolatedWorktree({ repository, workspace });
         reporter.success('Discarded the isolated workspace.');
         return { patchPath };
@@ -121,6 +162,6 @@ What should happen to the completed changes?
     }
     return { patchPath, workspace };
   } finally {
-    interface_.close();
+    prompt.close();
   }
 }
