@@ -576,6 +576,10 @@ The dedicated command uses Node's test-runner force-exit option so a failed
 native case returns after the known tests and cleanup finish instead of holding
 the CI job open on a lingering platform PTY handle. This does not convert a
 failure or timeout into a pass.
+The PTY file deliberately does not match the ordinary `tests/*.test.ts` glob;
+`npm run check` and coverage therefore keep their deterministic scope, while
+the preceding required PTY step is the single cross-platform authority for the
+native cases.
 
 The harness compares visible prompt ordering after removing VT controls rather
 than requiring literal trailing spaces in the byte stream. Windows ConPTY may
