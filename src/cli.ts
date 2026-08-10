@@ -307,7 +307,7 @@ continue from its actual state instead of repeating changes blindly.`;
       return;
     }
     await stateStore.save({
-      version: 2,
+      version: 3,
       id: runId,
       createdAt: startedAt,
       updatedAt: new Date().toISOString(),

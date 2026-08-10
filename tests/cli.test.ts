@@ -374,7 +374,7 @@ test('a failed run-lock acquisition does not overwrite the active owner state', 
   const store = new RunStateStore(paths.stateDirectory);
   const now = new Date().toISOString();
   const savedRun: SavedRun = {
-    version: 2,
+    version: 3,
     id: 'run-20260730-active123',
     createdAt: now,
     updatedAt: now,

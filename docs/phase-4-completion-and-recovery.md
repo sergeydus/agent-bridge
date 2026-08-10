@@ -1,7 +1,6 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 6, incorporating five rounds of Codex review; awaiting
-approval before implementation
+Status: Contract revision 7, approved; slices 1 and 2 implemented
 
 Target release: 0.7.0
 
@@ -389,13 +388,35 @@ export interface SavedRun {
 record. This is independent of the `--on-complete` decision below: the
 instruction stays fresh, the action that occurred becomes durable.
 
-Version 2 migrates by setting `version: 3` and leaving `completion` absent,
-which correctly reads as "this run predates completion recording" rather than
-as any particular outcome. No message, workspace, or status information is lost.
+**Version 3 is the new compatibility baseline, and no run-state migration
+ships.** Revisions 1 through 6 specified a version 2 migration. That was
+reconsidered against the evidence: no run checkpoint has ever been written on
+the maintainer's machine — the `runs` directory does not exist — and the package
+is unpublished. Migrating a format with no instances is speculative code on the
+path that decides whether a user's work can be recovered.
+
+The removal is scoped to run checkpoints only:
+
+- `SavedRunV1`, `SavedRunV2`, their validators, and both migrations are deleted,
+  along with `legacyDecision`, whose only remaining caller was the v1 migration.
+- Only version 3 checkpoints are accepted. An older version is recognized by its
+  version number and refused with a message that names the version, states that
+  version 3 is the baseline, and says explicitly that the checkpoint file and
+  any isolated workspace it created were left untouched. `list` skips such a
+  checkpoint with a warning instead of failing.
+- Version numbers are never reused. The next format change is version 4.
+- **Chat session migrations are not touched.** They are load-bearing today: the
+  maintainer's saved chats are at version 2 against a current format of version
+  4, which is the concrete evidence that stranding persisted data is a real
+  failure mode rather than a hypothetical one.
+
+`completion` remains optional in version 3. Absent still reads as "no completion
+was recorded" rather than as any particular outcome, which is what a checkpoint
+written before slice 3 will look like.
 
 Per `AGENTS.md`, the TypeScript type, `isSavedRun`, `hasOnlyKeys`,
-`schemas/run-state.schema.json`, the v2 migration, and fixture tests change in
-one slice.
+`schemas/run-state.schema.json`, the superseded-version refusal, and fixture
+tests change in one slice.
 
 #### Cross-field invariants
 
@@ -705,10 +726,14 @@ tests against old and new records rather than a migration.
 
 Two persisted formats change.
 
-**Run state, versioned:** version 2 to version 3, adding optional `completion`.
-Type, `isSavedRun`, `hasOnlyKeys`, JSON Schema, migration, and fixtures change
-together in one slice. Version 1 continues to migrate through version 2 as it
-does today.
+**Run state, versioned:** version 3 adds optional `completion` and becomes the
+compatibility baseline. Type, `isSavedRun`, `hasOnlyKeys`, JSON Schema, the
+superseded-version refusal, and fixtures change together in one slice. No
+run-state migration ships: versions 1 and 2 are refused with an actionable
+message that leaves the checkpoint and its workspace untouched. The version
+field and the schema `const` stay, because they are what distinguishes "written
+by an older build" from "corrupt", and they are what makes a future version 4
+migration possible.
 
 **Lock records, transient and unversioned:** additive `host` and ownership
 token. No migration. Old records are readable and are treated as unknown-owner,
@@ -740,13 +765,16 @@ observable behavior of every existing path unchanged.
 
 ### Slice 2 — run state version 3
 
-Type, validator, exact-key list, JSON Schema, v2 migration, and fixtures for the
-optional `completion` record. No behavior yet reads or writes it beyond a
-round-trip test.
+Type, validator, exact-key list, JSON Schema, and fixtures for the optional
+`completion` record, plus removal of the version 1 and version 2 types,
+validators, and migrations. No behavior yet reads or writes `completion` beyond
+a round-trip test.
 
-Acceptance: a version 2 fixture migrates with `completion` absent; a version 3
-fixture round-trips; an unknown outcome string is rejected; each of the six
-cross-field invariants is rejected by a dedicated case.
+Acceptance: a version 3 fixture round-trips; a version 1 and a version 2 fixture
+are each refused by version number with the file left byte-identical on disk; a
+superseded checkpoint is skipped with a warning by `list` rather than failing
+it; an unknown outcome string is rejected; each of the six cross-field
+invariants is rejected by a dedicated case.
 
 ### Slice 3 — completion cannot fail a finished run
 
@@ -859,7 +887,8 @@ repository.
   repository root itself;
 - binary, executable-bit, symlink, deletion, and untracked-file patches survive
   a create-then-apply round trip;
-- version 2 to version 3 run-state migration and fixture round-trips;
+- version 3 run-state fixture round-trips, and superseded version 1 and 2
+  checkpoints refused by version number with their files left untouched;
 - lock records: a 0-byte or malformed record is never treated as stale; a
   foreign-host record is never removed; a local record whose PID is gone is
   removed; `release` after another process took over does not unlink the new
@@ -926,9 +955,10 @@ Phase 4 is complete when:
 10. A lock is held by at most one process, is released only by its owner, and an
     unknown or foreign-host record is never removed automatically. Lock
     contention names the lock path and a recovery step.
-11. Run state version 3 ships with type, validator, schema, migration, and
-    fixtures changed together; every cross-field invariant is enforced at
-    runtime; and version 1 and 2 checkpoints still load.
+11. Run state version 3 ships with type, validator, schema, superseded-version
+    refusal, and fixtures changed together; every cross-field invariant is
+    enforced at runtime; and version 1 and 2 checkpoints are refused with an
+    actionable message that changes nothing on disk.
 12. An impossible `--on-complete` is rejected before any provider call.
 13. `artifacts.ts` line coverage above 90%; `file-lock.ts` branch coverage above
     80%.
@@ -1056,10 +1086,25 @@ created from, and only a _resumed_ run must never persist a derived fallback.
 The D9 test also reloads the saved checkpoint and asserts `baseRevision` is
 still absent, and a matching criterion covers the fresh-run path.
 
+**Revision 7** drops run-state migration in favour of a version 3 baseline.
+
+Requested by the maintainer during slice 2 and scoped by Codex to run
+checkpoints only. The evidence behind it: no run checkpoint has ever been
+written on the maintainer's machine, and the package is unpublished, so both
+migrations existed for zero files. `SavedRunV1`, `SavedRunV2`, their validators,
+both migrations, and the now-unreferenced `legacyDecision` are removed; older
+versions are refused by version number with the checkpoint and its workspace
+left untouched.
+
+Chat migrations are deliberately untouched, and the reason is the same evidence
+read the other way: the maintainer's saved chats are at version 2 against a
+current format of version 4. Removing those would strand real data.
+
 ## Questions for review
 
-None. Revision 6 adopts the scoping correction, revision 5 adopted both earlier
-requested corrections, and the remaining open items
+None. Revision 7 records the migration decision, revision 6 adopted the scoping
+correction, revision 5 adopted both earlier requested corrections, and the
+remaining open items
 are recorded as decisions: the empty-lock residual, accepted in exchange for
 guaranteed mutual exclusion and mitigated by naming that case in the recovery
 message; scoping `completion` to the run's own completion step, which follows

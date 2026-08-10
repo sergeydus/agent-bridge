@@ -30,6 +30,53 @@ export type RunStatus =
   | 'failed'
   | 'cancelled';
 
+/** How a run's own completion step resolved. */
+export type CompletionOutcome =
+  | 'no-changes'
+  | 'kept'
+  | 'declined'
+  | 'applied'
+  | 'apply-refused'
+  | 'apply-failed'
+  | 'discarded'
+  | 'discard-failed'
+  | 'patch-failed';
+
+export const COMPLETION_OUTCOMES: readonly CompletionOutcome[] = [
+  'no-changes',
+  'kept',
+  'declined',
+  'applied',
+  'apply-refused',
+  'apply-failed',
+  'discarded',
+  'discard-failed',
+  'patch-failed',
+];
+
+/**
+ * Refusals and failures must say why. The remaining outcomes describe an action
+ * that succeeded, so a reason on one of them would be contradictory data.
+ */
+const OUTCOMES_REQUIRING_REASON: readonly CompletionOutcome[] = [
+  'apply-refused',
+  'apply-failed',
+  'discard-failed',
+  'patch-failed',
+];
+
+export function isCompletionOutcome(
+  value: unknown,
+): value is CompletionOutcome {
+  return COMPLETION_OUTCOMES.includes(value as CompletionOutcome);
+}
+
+export function completionOutcomeRequiresReason(
+  outcome: CompletionOutcome,
+): boolean {
+  return OUTCOMES_REQUIRING_REASON.includes(outcome);
+}
+
 export interface WorkflowSelection {
   kind: WorkflowKind;
   firstAgent?: AgentName;
@@ -173,28 +220,6 @@ export function editorForRound(
     throw new Error('round must be a positive integer');
   }
   return round % 2 === 1 ? firstAgent : otherAgent(firstAgent);
-}
-
-/**
- * Compatibility parser for older providers. New providers use JSON Schema.
- * A legacy status is accepted only when it is the one final tag in the answer.
- */
-export function legacyDecision(answer: string): AgentDecision | null {
-  const matches = [
-    ...answer.matchAll(/<status>\s*(DONE|CONTINUE)\s*<\/status>/gi),
-  ];
-  if (matches.length !== 1) {
-    return null;
-  }
-  const match = matches[0];
-  if (!match || match.index === undefined) {
-    return null;
-  }
-  const trailing = answer.slice(match.index + match[0].length).trim();
-  if (trailing) {
-    return null;
-  }
-  return match[1]?.toUpperCase() === 'DONE' ? 'done' : 'continue';
 }
 
 export function isTransientAgentFailure(error: unknown): boolean {

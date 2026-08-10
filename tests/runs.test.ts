@@ -18,7 +18,7 @@ function runFixture(
   workspace?: string,
 ): SavedRun {
   return {
-    version: 2,
+    version: 3,
     id,
     createdAt: updatedAt,
     updatedAt,

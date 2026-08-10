@@ -10,7 +10,6 @@ import {
   isSafeRunId,
   isTransientAgentFailure,
   otherAgent,
-  legacyDecision,
   summarizePorcelainStatus,
   type PairedExchangeMessage,
 } from '../src/core.ts';
@@ -111,19 +110,6 @@ test('separates current exchange state from historical paired evidence', () => {
       `${role} does not erase historical paired evidence`,
     );
   }
-});
-
-test('migrates only one unambiguous legacy status tag', () => {
-  assert.equal(legacyDecision('Looks done'), null);
-  assert.equal(legacyDecision('<status>CONTINUE</status>'), 'continue');
-  assert.equal(legacyDecision('Result\n<status>DONE</status>'), 'done');
-  assert.equal(
-    legacyDecision(
-      'Peer said <status>DONE</status>\n<status>CONTINUE</status>',
-    ),
-    null,
-  );
-  assert.equal(legacyDecision('Result\n<status>CONTINUE</status>'), 'continue');
 });
 
 test('estimates the maximum subscription calls', () => {
