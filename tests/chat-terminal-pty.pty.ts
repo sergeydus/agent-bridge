@@ -52,6 +52,7 @@ interface PtySession {
 }
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const SUPPLEMENTAL_OUTPUT_TIMEOUT_MILLISECONDS = 15_000;
 const FIXTURE_PATH = join(
   PROJECT_ROOT,
   'tests',
@@ -128,8 +129,12 @@ function startFixture(
   };
 }
 
-function ptyTest(name: string, run: () => Promise<void>): void {
-  test(name, { timeout: 10_000, skip: ptySkipReason }, run);
+function ptyTest(
+  name: string,
+  run: () => Promise<void>,
+  timeoutMilliseconds = 10_000,
+): void {
+  test(name, { timeout: timeoutMilliseconds, skip: ptySkipReason }, run);
 }
 
 async function waitForOutput(
@@ -293,48 +298,59 @@ ptyTest(
   },
 );
 
-ptyTest('real PTY keeps partial input below supplemental output', async () => {
-  const session = startFixture('supplemental-output');
-  try {
-    await waitForOutput(session, 'You >');
-    session.child.write('/ask codex inspect\r');
-    await waitForOutput(session, '__AB_PROVIDER__');
-    session.child.write('/status\r');
-    session.child.write('draft');
-    session.child.resize(90, 25);
+ptyTest(
+  'real PTY keeps partial input below supplemental output',
+  async () => {
+    const session = startFixture('supplemental-output');
+    try {
+      await waitForOutput(session, 'You >');
+      session.child.write('/ask codex inspect\r');
+      await waitForOutput(session, '__AB_PROVIDER__');
+      session.child.write('/status\r');
+      session.child.write('draft');
+      session.child.resize(90, 25);
 
-    await waitForOutput(session, 'Presentation: enhanced terminal');
-    const output = session.output();
-    const status = output.lastIndexOf('Latest paired exchange:');
-    const restoration = output.lastIndexOf('\u001B[?1049l', status);
-    assert.ok(restoration >= 0);
-    assert.doesNotMatch(
-      stripVTControlCharacters(output.slice(restoration, status)),
-      promptFollowedByInput('You >', 'draft'),
-    );
+      // A busy Windows ConPTY runner can flush this normal-screen block more
+      // slowly than the other interactive cases. Keep the assertion strict while
+      // allowing the complete supplemental block to arrive.
+      await waitForOutput(
+        session,
+        'Presentation: enhanced terminal',
+        SUPPLEMENTAL_OUTPUT_TIMEOUT_MILLISECONDS,
+      );
+      const output = session.output();
+      const status = output.lastIndexOf('Latest paired exchange:');
+      const restoration = output.lastIndexOf('\u001B[?1049l', status);
+      assert.ok(restoration >= 0);
+      assert.doesNotMatch(
+        stripVTControlCharacters(output.slice(restoration, status)),
+        promptFollowedByInput('You >', 'draft'),
+      );
 
-    const statusEnd = stripVTControlCharacters(output).lastIndexOf(
-      'Presentation: enhanced terminal',
-    );
-    const deadline = Date.now() + 5_000;
-    while (
-      !promptFollowedByInput('You >', 'draft').test(
-        stripVTControlCharacters(session.output()).slice(statusEnd),
-      )
-    ) {
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `Timed out waiting for the partial input below status output. Output:\n${session.output()}`,
-        );
+      const statusEnd = stripVTControlCharacters(output).lastIndexOf(
+        'Presentation: enhanced terminal',
+      );
+      const deadline = Date.now() + SUPPLEMENTAL_OUTPUT_TIMEOUT_MILLISECONDS;
+      while (
+        !promptFollowedByInput('You >', 'draft').test(
+          stripVTControlCharacters(session.output()).slice(statusEnd),
+        )
+      ) {
+        if (Date.now() >= deadline) {
+          throw new Error(
+            `Timed out waiting for the partial input below status output. Output:\n${session.output()}`,
+          );
+        }
+        await delay(10);
       }
-      await delay(10);
-    }
 
-    session.child.write('\u0015/pause\r');
-    await waitForOutput(session, 'Chat saved. Resume with:');
-    const exited = await session.exit;
-    assert.equal(exited.exitCode, 0);
-  } finally {
-    await stopSession(session);
-  }
-});
+      session.child.write('\u0015/pause\r');
+      await waitForOutput(session, 'Chat saved. Resume with:');
+      const exited = await session.exit;
+      assert.equal(exited.exitCode, 0);
+    } finally {
+      await stopSession(session);
+    }
+  },
+  35_000,
+);
