@@ -23,6 +23,7 @@ import {
 import { parseArgs } from '../src/options.ts';
 import { getAppPaths } from '../src/paths.ts';
 import { ProcessAbortError } from '../src/process.ts';
+import type { TerminalRenderer } from '../src/presentation.ts';
 import type {
   AgentProvider,
   ProviderMap,
@@ -38,6 +39,7 @@ class ScriptedTerminal implements ChatTerminal {
   pauses = 0;
   resumes = 0;
   closes = 0;
+  redraws = 0;
   queuedInputObserver: ((count: number) => void) | undefined;
 
   constructor(inputs: string[]) {
@@ -53,7 +55,9 @@ class ScriptedTerminal implements ChatTerminal {
     this.output.push(text);
   }
 
-  redrawPrompt(): void {}
+  redrawPrompt(): void {
+    this.redraws += 1;
+  }
 
   setQueuedInputObserver(observer?: (count: number) => void): void {
     this.queuedInputObserver = observer;
@@ -103,13 +107,19 @@ class FailingRestoreTerminal extends ScriptedTerminal {
 }
 
 class FailingRedrawTerminal extends ScriptedTerminal {
+  #failRedraw = false;
+
   override prompt(): Promise<string | null> {
+    this.#failRedraw = true;
     process.stdout.emit('resize');
     return Promise.resolve(null);
   }
 
   override redrawPrompt(): void {
-    throw new Error('prompt redraw failed');
+    if (this.#failRedraw) {
+      throw new Error('prompt redraw failed');
+    }
+    super.redrawPrompt();
   }
 }
 
@@ -124,6 +134,13 @@ class FailingActivityTerminal extends ScriptedTerminal {
       }
     }
     super.write(text);
+  }
+}
+
+class RecordingRedrawTerminal extends ScriptedTerminal {
+  override redrawPrompt(): void {
+    super.redrawPrompt();
+    this.output.push('<prompt-redraw>');
   }
 }
 
@@ -2457,6 +2474,86 @@ test('releases the chat lock even when terminal restoration fails', async () => 
   }
 });
 
+test('does not repaint a prompt while enhanced presentation falls back to plain output', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const terminal = new RecordingRedrawTerminal(['/pause']);
+  let renderCalls = 0;
+  const enhancedRenderer: TerminalRenderer = {
+    start: () => '<enter-enhanced>',
+    render: () => {
+      renderCalls += 1;
+      if (renderCalls === 1) {
+        return '<initial-frame>';
+      }
+      throw new Error('layout failed');
+    },
+    redraw: () => '',
+    suspend: () => '',
+    resume: () => '',
+    stop: () => '<leave-enhanced>',
+  };
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const options = parseArgs(['chat', '--cwd', project, '--ui', 'enhanced'], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+
+    await runInteractiveChat({
+      options,
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal,
+      terminalCapabilities: ENHANCED_TERMINAL_CAPABILITIES,
+      enhancedRenderer,
+    });
+
+    assert.equal(terminal.redraws, 1);
+    const output = terminal.output.join('');
+    const restoration = output.indexOf('<leave-enhanced>');
+    assert.ok(restoration >= 0);
+    assert.match(
+      output.slice(restoration),
+      /Enhanced terminal rendering failed\. Continuing in plain mode\./,
+    );
+    assert.doesNotMatch(output.slice(restoration), /<prompt-redraw>/);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('does not repaint a prompt after enhanced terminal teardown begins', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const terminal = new RecordingRedrawTerminal(['/pause']);
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const options = parseArgs(['chat', '--cwd', project, '--ui', 'enhanced'], {
+      initialCwd: '/',
+      defaultOutput: paths.runsDirectory,
+    });
+
+    await runInteractiveChat({
+      options,
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal,
+      terminalCapabilities: ENHANCED_TERMINAL_CAPABILITIES,
+    });
+
+    const output = terminal.output.join('');
+    const restoration = output.lastIndexOf('\u001B[?1049l');
+    assert.ok(restoration >= 0);
+    assert.doesNotMatch(output.slice(restoration), /<prompt-redraw>/);
+    assert.match(output.slice(restoration), /Chat saved\. Resume with:/);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('routes fatal resize callback failures through chat cleanup', async () => {
   const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
   const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
@@ -2513,7 +2610,7 @@ test('animates enhanced activity while a provider is running', async () => {
       await new Promise((resolve) => setTimeout(resolve, 30));
       observedTimerUpdate =
         terminal.output.filter((text) => text.startsWith('\u001B[H')).length >=
-        2;
+          2 && terminal.redraws >= 3;
       return { text: 'Finished waiting.', decision: 'done' };
     });
 

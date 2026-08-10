@@ -119,9 +119,11 @@ for the current process and removes duplicate entries; it is not written to a
 separate shell-history file. A complete line typed while an agent is working is
 queued for the next prompt. Both terminal modes show the queued count, never
 the queued text, and the line is never inserted between the two agents in the
-current paired exchange. This covers complete submitted lines. In an enhanced
-TTY, characters that have not reached Enter can still be echoed and repainted
-during live redraws; broader PTY input coordination remains hardening work.
+current paired exchange. In an enhanced TTY, characters that have not reached
+Enter remain editable and keep their cursor position across provider frames
+and terminal resizes. Real-PTY tests cover that partial-input behavior, Ctrl+C,
+Ctrl+D, alternate-screen restoration, and clean prompt placement around
+supplemental output.
 
 Ordinary messages and `/both` produce the normal paired exchange. Most open
 exchanges use two provider calls; two provisional `done` decisions trigger a
@@ -224,7 +226,10 @@ the next agent starts. The renderer also suspends before a linked workflow
 inherits the terminal and restores normal terminal state on exit. Supplemental
 command output such as help and history stays on the normal screen until the
 next agent starts. If enhanced drawing fails after normal terminal state is
-restored, the chat continues with plain output. Use
+restored, the chat continues with plain output. Readline repaint stops before
+supplemental or fallback output and before terminal teardown, then resumes
+below the completed block, so an old prompt is not inserted into append-only
+output. Use
 `--ui plain` to retain append-only output or `--ui enhanced` to request the
 full-screen view explicitly. Screen-reader mode, redirected streams,
 `TERM=dumb`, and terminals that are too small use the complete plain interface.
@@ -516,13 +521,16 @@ chat                     Open interactive human-guided chat mode
 ```sh
 npm install
 npm run check
+npm run test:pty
 npm run test:coverage
 npm pack --dry-run
 ```
 
 The test suite uses temporary repositories, fake providers, and isolated
 application-data locations. It never invokes real agents or uses subscription
-calls.
+calls. `npm run test:pty` uses the native PTY driver when it is available and
+otherwise reports explicit skips; CI promotes those skips to failures across
+the Linux, macOS, and Windows matrix.
 
 Start with [AGENTS.md](AGENTS.md), then see
 [Architecture](docs/architecture.md),

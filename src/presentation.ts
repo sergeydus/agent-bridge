@@ -57,6 +57,8 @@ export class PresentationController {
   #renderer: TerminalRenderer;
   #fallback: RendererFallback | undefined;
   #usingFallback = false;
+  #started = false;
+  #suspended = false;
   #write: (text: string) => void;
 
   constructor({
@@ -84,7 +86,16 @@ export class PresentationController {
     return this.#usingFallback;
   }
 
+  get started(): boolean {
+    return this.#started;
+  }
+
+  get suspended(): boolean {
+    return this.#suspended;
+  }
+
   start(): void {
+    this.#started = true;
     this.#renderWithFallback(
       (renderer) => renderer.start(this.#model),
       () => '',
@@ -107,6 +118,7 @@ export class PresentationController {
   }
 
   suspend(): void {
+    this.#suspended = true;
     this.#renderWithFallback(
       (renderer) => renderer.suspend(),
       (renderer) => renderer.suspend(),
@@ -114,6 +126,7 @@ export class PresentationController {
   }
 
   resume(): void {
+    this.#suspended = false;
     this.#renderWithFallback(
       (renderer) => renderer.resume(this.#model),
       (renderer) => renderer.resume(this.#model),
@@ -121,6 +134,8 @@ export class PresentationController {
   }
 
   stop(): void {
+    this.#started = false;
+    this.#suspended = false;
     this.#emit(this.#renderer.stop());
   }
 

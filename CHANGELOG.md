@@ -35,8 +35,18 @@
 - Made complete terminal lines typed during provider work visibly queue for the
   next prompt instead of appearing lost in enhanced redraws. Both renderers show
   only the queue count. The readline path is now injectable, and deterministic
-  stream coverage proves complete-line queue order and counts. Partial TTY input
-  echo and cancellation/restoration paths remain release-hardening work.
+  stream coverage proves complete-line queue order and counts. A development-
+  only cross-platform PTY harness now proves that enhanced frames and resizes
+  repaint readline's partial buffer without moving its cursor, Ctrl+C retains
+  its cancellation path, Ctrl+D closes a pending prompt, and alternate-screen
+  output is restored before exit. A missing native PTY driver skips those PTY
+  cases with a reason instead of failing the entire suite, and its test-only
+  files are excluded from the package. Prompt repaint now stops before
+  supplemental output, enhanced-to-plain fallback output, or terminal teardown,
+  preventing a stray prompt label from preceding completed responses, status
+  blocks, or other append-only output. CI now runs the real PTY suite in
+  required mode on Linux, macOS, and Windows, where an unavailable native
+  driver fails the matrix instead of silently turning those cases into skips.
 
 ## 0.6.0 - 2026-08-09
 

@@ -44,10 +44,35 @@ export interface ChatTerminal {
   close(): void;
 }
 
+export interface ChatReadlineOptions {
+  input: Readable;
+  output: Writable;
+  completer: (line: string) => [string[], string];
+  historySize: number;
+  removeHistoryDuplicates: boolean;
+}
+
+export interface ChatReadline {
+  readonly line: string;
+  readonly cursor: number;
+  on(event: 'line', listener: (line: string) => void): this;
+  on(event: 'close' | 'SIGINT', listener: () => void): this;
+  setPrompt(prompt: string): void;
+  prompt(preserveCursor?: boolean): void;
+  pause(): void;
+  resume(): void;
+  close(): void;
+}
+
+export type ChatReadlineFactory = (
+  options: ChatReadlineOptions,
+) => ChatReadline;
+
 export interface ChatTerminalDependencies {
   input?: Readable;
   output?: Writable;
   signalEmitter?: Pick<EventEmitter, 'emit'>;
+  createReadline?: ChatReadlineFactory;
 }
 
 export type ChatCommand =
@@ -270,8 +295,9 @@ export function createChatTerminal({
   input = process.stdin,
   output = process.stdout,
   signalEmitter = process,
+  createReadline = (options) => createInterface(options),
 }: ChatTerminalDependencies = {}): ChatTerminal {
-  const interface_ = createInterface({
+  const interface_ = createReadline({
     input,
     output,
     completer: completeChatInput,
@@ -282,6 +308,7 @@ export function createChatTerminal({
   let queueObserver: ((count: number) => void) | undefined;
   const reportQueue = (): void => queueObserver?.(queuedLines.length);
   let closed = false;
+  let promptInitialized = false;
   let pending:
     | {
         resolve: (value: string | null) => void;
@@ -317,6 +344,8 @@ export function createChatTerminal({
     prompt(label, signal) {
       const queued = queuedLines.shift();
       if (queued !== undefined) {
+        interface_.setPrompt(label);
+        promptInitialized = true;
         output.write(label);
         reportQueue();
         return Promise.resolve(queued);
@@ -325,9 +354,16 @@ export function createChatTerminal({
         return Promise.resolve(null);
       }
       interface_.setPrompt(label);
-      interface_.prompt();
+      promptInitialized = true;
+      if (interface_.line) {
+        interface_.prompt(true);
+      } else {
+        interface_.prompt();
+      }
       return new Promise<string | null>((resolvePromise) => {
         const onAbort = (): void => {
+          // Defensive only: this can differ when prompts overlap, while the
+          // coordinator awaits every prompt before starting another one.
           if (pending?.resolve !== resolvePromise) {
             return;
           }
@@ -346,7 +382,7 @@ export function createChatTerminal({
       output.write(text);
     },
     redrawPrompt() {
-      if (pending) {
+      if (promptInitialized && !closed) {
         interface_.prompt(true);
       }
     },

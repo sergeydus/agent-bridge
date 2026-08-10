@@ -110,7 +110,8 @@ When behavior changes:
    dry-run command assertion.
 6. For new subprocesses, prove argument-array execution, cancellation, timeout,
    and useful error output.
-7. Run `npm run check`, `npm run test:coverage`, and `npm pack --dry-run`.
+7. Run `npm run check`, `npm run test:pty`, `npm run test:coverage`, and
+   `npm pack --dry-run`.
 
 Tests use temporary repositories, fake providers, and temporary
 `AGENT_BRIDGE_HOME` directories. They must not require network access, global
