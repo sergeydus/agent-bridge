@@ -482,9 +482,10 @@ and workflow suspension; conversation history remains available through native
 terminal scrollback rather than custom mouse capture. Complete-line queueing and
 the readline callback lifecycle are covered deterministically through injected
 streams and a readline factory. A real-PTY harness now covers partial input and
-cursor preservation, resize, supplemental-output placement, Ctrl+C, Ctrl+D, and
-alternate-screen restoration locally; full CI-matrix execution and manual
-screen-reader coverage remain Slice 5 release-hardening work.
+cursor preservation, resize, supplemental-output placement, Ctrl+C, Ctrl+D,
+and alternate-screen restoration across the required Linux, macOS, and Windows
+CI matrix. The manual terminal and screen-reader acceptance matrix remains
+Slice 5 release-hardening work.
 
 ### Slice 1: shared presentation model
 
@@ -554,16 +555,14 @@ real terminal echo or cursor restoration.
 The PTY driver is the exact development-only release
 `node-pty@1.2.0-beta.14`. It supplies one API and packaged native binaries for
 the supported macOS, Linux, and Windows architectures; it is not shipped as a
-runtime Agent Bridge dependency. This prerelease is pinned deliberately while
-the CI matrix evaluates its packaged native binaries; it must be reconsidered
-when a suitable stable release exists and cannot become a required release
-gate on local or CI platforms until that matrix is green. Until then, the
-harness loads it dynamically and reports an explicit skip when the native
-module is unavailable. The harness launches only the local Node fixture at the
-same permission level as the test process, and the PTY test and fixture are
-excluded from the published package. The full CI matrix must prove installation
-and execution before these tests are treated as the cross-platform release
-gate.
+runtime Agent Bridge dependency. This prerelease is pinned deliberately after
+the CI matrix proved its packaged native binaries and must be reconsidered when
+a suitable stable release exists. Optional local runs load the harness
+dynamically and report an explicit skip when the native module is unavailable;
+CI requires it. The harness launches only the local Node fixture at the same
+permission level as the test process, and the PTY test and fixture are excluded
+from the published package. The full matrix has proved installation and real
+PTY execution, so the dedicated step is now the cross-platform release gate.
 
 The CI workflow runs `npm run test:pty` on Ubuntu with the minimum supported
 Node release and the current Node release, and on macOS and Windows with the
@@ -576,6 +575,7 @@ The dedicated command uses Node's test-runner force-exit option so a failed
 native case returns after the known tests and cleanup finish instead of holding
 the CI job open on a lingering platform PTY handle. This does not convert a
 failure or timeout into a pass.
+
 The PTY file deliberately does not match the ordinary `tests/*.test.ts` glob;
 `npm run check` and coverage therefore keep their deterministic scope, while
 the preceding required PTY step is the single cross-platform authority for the
