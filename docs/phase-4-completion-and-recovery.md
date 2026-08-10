@@ -1,6 +1,6 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 4, incorporating three rounds of Codex review;
+Status: Contract revision 5, incorporating four rounds of Codex review;
 awaiting approval before implementation
 
 Target release: 0.7.0
@@ -190,6 +190,40 @@ inside a retained worktree before running `--discard-workspace`.
 This also silently weakens per-cycle change detection. `workspaceFingerprint`
 shares `runCompleteWorkspaceDiff`, so an agent commit currently produces an
 unchanged fingerprint while the files did change.
+
+### D9 — a missing base revision is silently replaced at startup
+
+Found by Codex while reviewing revision 4's legacy-run protection, and confirmed
+here as an existing defect rather than only a future risk.
+
+`baseRevision` starts as `resumedRun?.baseRevision`
+([cli.ts:214](../src/cli.ts#L214)) and is then filled in with
+`baseRevision ??= await currentCommit(repository)`
+([cli.ts:227](../src/cli.ts#L227)). A resumed run that recorded no base
+revision therefore acquires the repository's **current** `HEAD`, which may be an
+entirely different commit from the one its workspace was created against.
+
+The consequences are already live:
+
+- `patchApplicationRefusalReason` refuses only when `baseRevision` is undefined
+  ([artifacts.ts:40](../src/artifacts.ts#L40)). With a fabricated value that
+  branch never fires.
+- Its next check compares `currentCommit(repository)` against `baseRevision`,
+  which now compares equal by construction, so the guard passes.
+- A legacy resumed run can therefore auto-apply a patch whose true baseline is
+  unknown, which is exactly what the "predates base-revision tracking" message
+  exists to prevent.
+
+Under this contract it would also defeat the new protections: the discard
+refusal for runs with no recorded baseline would never trigger, and D8's
+explicit baseline would be computed against a commit the workspace was never
+based on.
+
+**Provenance must be preserved.** A recorded base revision and a runtime-derived
+one are different facts and are stored as different fields. The derived value
+may continue to serve the purposes it serves today — creating a workspace for a
+fresh run, and reporting — but it never authorizes apply or discard. Only a
+base revision that was recorded by the run that created the workspace does that.
 
 ## Non-goals
 
@@ -445,19 +479,63 @@ conservative.
 #### Commits inside a workspace
 
 Fixing the baseline preserves the _content_ of committed work, but a patch
-cannot carry commit messages, authorship, or history. For a destructive
-operation that is worth surfacing rather than silently flattening:
+cannot carry commit messages, authorship, signatures, or topology. That is worth
+surfacing before a destructive operation rather than flattening silently.
 
-- **Non-interactive removal is refused** when the workspace `HEAD` differs from
-  `baseRevision`. An unattended script should not decide that commit history is
-  expendable.
-- **Interactive removal** requires a confirmation that names how many commits
-  the workspace holds beyond its base and states that the patch preserves file
-  contents but not history.
+Revision 4 keyed this on `HEAD !== baseRevision`. Codex is right that the
+predicate is too broad: a user who responds to the refusal by creating a branch
+has made the history durable, yet the rule would keep refusing forever. The
+question is not whether `HEAD` moved but whether anything would still point at
+those commits afterwards.
 
-This adds nothing to the normal path, where `HEAD` equals `baseRevision` and
-neither rule engages. It is beyond what the review asked for, and it is flagged
-in the revision history as the one addition Codex has not yet ruled on.
+The predicate is **anchoring**:
+
+```text
+git for-each-ref --contains <workspace HEAD> --count=1 refs/heads refs/tags
+```
+
+Verified to return nothing for a detached worktree commit and the ref name once
+a branch or tag contains it. Refs are shared across worktrees, so this runs
+correctly from inside the workspace.
+
+- **Unanchored** — no branch or tag contains the workspace `HEAD`. Removing the
+  worktree would drop the last reference to those commits. Non-interactive
+  removal is refused, and the message explains how to anchor them
+  (`git branch <name> <sha>` from inside the workspace).
+- **Anchored** — a branch or tag contains `HEAD`. The history survives removal
+  independently, so removal proceeds after the normal fresh-patch checks with no
+  extra ceremony.
+- **Interactive removal of unanchored history** remains permitted, behind a
+  confirmation that states precisely what survives: the patch preserves the
+  resulting files, not commit messages, authorship, signatures, or topology.
+
+Describing the divergence requires care. `baseRevision` is not necessarily an
+ancestor of `HEAD` — a reset or rebase inside the workspace breaks that
+assumption — so the message distinguishes the two cases with
+`git merge-base --is-ancestor`:
+
+- ancestor: report the count from `git rev-list --count <base>..<HEAD>`;
+- not an ancestor: report the workspace as **diverged** from its base and do not
+  claim a commit count.
+
+None of this engages on the normal path, where `HEAD` equals `baseRevision`.
+
+#### Baseline provenance (D9)
+
+Two distinct fields replace today's single `baseRevision` variable:
+
+- the **recorded** base revision, written by the run that created the workspace;
+- a **derived** revision, computed at startup when none was recorded.
+
+The derived value keeps its existing uses — creating a workspace for a fresh run
+and reporting — and is never promoted into the recorded field. Apply and discard
+consult only the recorded value, so a legacy run keeps the fact that its
+original baseline is unknown for its whole lifetime, across any number of
+resumes.
+
+This is enforced end to end rather than only at the call sites: a resume test
+loads a checkpoint with no `baseRevision`, runs to completion, and asserts that
+both apply and discard are refused for that reason.
 
 #### Atomic transcripts
 
@@ -672,16 +750,19 @@ status is `completed`.
 ### Slice 4 — atomic artifacts, correct baselines, and safe discard
 
 Atomic patch and transcript writing through `filesystem.ts` (D7), the explicit
-baseline for patch creation and fingerprinting (D8), the fresh-patch
-preservation rule, the empty-workspace exception, the committed-workspace rules,
-and the `agentCwd` reset on both the CLI and run-management removal paths.
+baseline for patch creation and fingerprinting (D8), separated recorded and
+derived baseline provenance (D9), the fresh-patch preservation rule, the
+empty-workspace exception, the anchoring rules for committed history, and the
+`agentCwd` reset on both the CLI and run-management removal paths.
 
 Acceptance: an interrupted patch or transcript write never leaves a file at the
 final path; a workspace edited after its patch was written is re-patched before
 removal; a workspace holding a commit beyond its base produces a patch
 containing that committed change; a no-change workspace is discardable; removal
 is refused when patch creation fails, when the run has no recorded base
-revision, and non-interactively when the workspace holds commits.
+revision, and non-interactively when the workspace `HEAD` is unanchored;
+removal proceeds once a branch or tag contains that `HEAD`; a resumed legacy run
+never gains an apparently trusted baseline.
 
 ### Slice 5 — scriptable completion
 
@@ -748,9 +829,14 @@ repository.
 - **D8 regression:** a user commits inside a retained worktree, then invokes
   `--discard-workspace`; the generated patch contains that committed change, and
   applying it to a fresh checkout of the base reproduces the committed content;
-- a workspace whose `HEAD` moved past `baseRevision` is refused non-interactive
-  removal, and its interactive confirmation names the commit count;
+- an unanchored workspace `HEAD` is refused non-interactive removal, and the
+  same workspace is removable once `git branch` anchors it;
+- the interactive confirmation reports a commit count when `baseRevision` is an
+  ancestor of `HEAD`, and reports divergence when it is not;
 - removal refused for a run with no recorded `baseRevision`;
+- **D9 end to end:** a resumed checkpoint with no `baseRevision` completes, and
+  both apply and discard are refused for that reason rather than proceeding
+  against a revision derived at startup;
 - `workspaceFingerprint` changes when a commit is made inside the workspace,
   which it does not do today;
 - after removal, both `workspace` and `agentCwd` are corrected;
@@ -804,7 +890,7 @@ the acceptance criteria carry that weight instead.
 
 Phase 4 is complete when:
 
-1. D1 through D8 no longer reproduce, each with a test that fails against
+1. D1 through D9 no longer reproduce, each with a test that fails against
    `8009945`.
 2. `finishIsolatedRun` is driven entirely through injected input in tests.
 3. Every completion outcome is reachable non-interactively except `ask`.
@@ -813,24 +899,27 @@ Phase 4 is complete when:
 5. No completion or run-management path removes a workspace without a fresh
    complete patch against the run's recorded base revision, or a fresh proof
    against that same base that the workspace holds no changes. Removal is
-   refused when no base revision was recorded.
-6. Patch creation captures committed work inside a workspace, and no persisted
+   refused when no base revision was recorded, and a revision derived at
+   startup never satisfies that requirement.
+6. No unattended path removes a workspace whose `HEAD` is contained by no
+   branch or tag, and an anchored `HEAD` removes without extra ceremony.
+7. Patch creation captures committed work inside a workspace, and no persisted
    run artifact — patch, transcript, or context manifest — can be observed
    partially written at its final path.
-7. Interactive apply into a non-clean checkout discloses that state before
+8. Interactive apply into a non-clean checkout discloses that state before
    asking and remains permitted; non-interactive apply into a non-clean
    checkout is refused.
-8. Apply and removal failures name the artifact locations and the next step.
-9. A lock is held by at most one process, is released only by its owner, and an
-   unknown or foreign-host record is never removed automatically. Lock
-   contention names the lock path and a recovery step.
-10. Run state version 3 ships with type, validator, schema, migration, and
+9. Apply and removal failures name the artifact locations and the next step.
+10. A lock is held by at most one process, is released only by its owner, and an
+    unknown or foreign-host record is never removed automatically. Lock
+    contention names the lock path and a recovery step.
+11. Run state version 3 ships with type, validator, schema, migration, and
     fixtures changed together; every cross-field invariant is enforced at
     runtime; and version 1 and 2 checkpoints still load.
-11. An impossible `--on-complete` is rejected before any provider call.
-12. `artifacts.ts` line coverage above 90%; `file-lock.ts` branch coverage above
+12. An impossible `--on-complete` is rejected before any provider call.
+13. `artifacts.ts` line coverage above 90%; `file-lock.ts` branch coverage above
     80%.
-13. `npm run check`, `npm run test:pty`, `npm run test:coverage`, and
+14. `npm run check`, `npm run test:pty`, `npm run test:coverage`, and
     `npm pack --dry-run` pass.
 
 ## Relationship to Phase 3
@@ -923,17 +1012,34 @@ when the workspace `HEAD` has moved past `baseRevision`, and requires an
 interactive confirmation naming the commit count. This does not touch the
 normal path, where the two are equal.
 
+**Revision 5** narrows the committed-history rule and adds D9.
+
+Codex approved revision 4's safeguard in principle but correctly rejected its
+predicate. `HEAD !== baseRevision` never clears, so a user who anchored their
+commits to a branch — the very remedy the refusal recommends — would stay
+blocked forever. The rule now turns on whether any branch or tag contains the
+workspace `HEAD`, verified with `git for-each-ref --contains` inside a real
+detached worktree. Divergence is reported with `git merge-base --is-ancestor`
+rather than assuming a linear count, and the interactive confirmation now
+enumerates what a patch cannot carry: messages, authorship, signatures, and
+topology.
+
+D9 is Codex's finding and is an existing defect, not only an interaction with
+this contract. `baseRevision ??= await currentCommit(repository)` gives a
+resumed legacy run a fabricated baseline, which disables
+`patchApplicationRefusalReason`'s "predates base-revision tracking" branch and
+makes its revision comparison pass by construction — so a legacy run can already
+auto-apply a patch whose true base is unknown. Recorded and derived baselines
+are now separate fields, only the recorded one authorizes apply or discard, and
+an end-to-end resume test enforces it.
+
 ## Questions for review
 
-1. The committed-workspace rules above are not part of what Codex asked for.
-   Confirm that refusing unattended removal of a workspace holding commits is
-   proportionate, or that capturing content in the patch is sufficient and the
-   extra refusal should be dropped.
-
-Previously raised and now recorded as decisions rather than open questions: the
-empty-lock residual, accepted in exchange for guaranteed mutual exclusion and
-mitigated by naming that case in the recovery message; and scoping `completion`
-to the run's own completion step, which follows from the version 3 cross-field
-invariants.
+None. Revision 5 adopts both requested corrections, and the earlier open items
+are recorded as decisions: the empty-lock residual, accepted in exchange for
+guaranteed mutual exclusion and mitigated by naming that case in the recovery
+message; scoping `completion` to the run's own completion step, which follows
+from the version 3 cross-field invariants; and the committed-history safeguard,
+now keyed on anchoring per this review.
 
 Ready for slice 1 on approval.
