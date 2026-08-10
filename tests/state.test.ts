@@ -127,7 +127,7 @@ test('refuses a superseded checkpoint without touching it', async () => {
         assert.match(error.message, /checkpoint version 2/);
         assert.match(error.message, /version 3 is the supported baseline/);
         assert.match(error.message, /Nothing was changed or deleted/);
-        assert.match(error.message, new RegExp(store.pathFor('v2-run')));
+        assert.ok(error.message.includes(store.pathFor('v2-run')));
         return true;
       },
     );

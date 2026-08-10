@@ -165,7 +165,7 @@ Run checkpoints are at version 3, which is the compatibility baseline: no
 run-state migration ships. A checkpoint written by an older build is recognized
 by its version number and refused with a message naming the file, and neither it
 nor the isolated workspace it created is modified. Chat sessions are separate
-and do migrate, from version 2 upward.
+and retain their supported migration chain.
 
 Successful runs create Markdown and JSON transcripts plus a small context
 manifest. `--no-transcript` still uses an active checkpoint for recovery and

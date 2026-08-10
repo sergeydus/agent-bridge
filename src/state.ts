@@ -507,7 +507,7 @@ export class RunStateStore {
             return await this.load(name.slice(0, -5));
           } catch (error) {
             this.#onWarning(
-              `Ignoring invalid saved run ${name}: ${
+              `Ignoring unreadable saved run ${name}: ${
                 error instanceof Error ? error.message : String(error)
               }`,
             );
