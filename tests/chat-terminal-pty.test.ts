@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
 
-import type { IPty } from 'node-pty';
+import type { IDisposable, IPty } from 'node-pty';
 
 interface PtyAvailability {
   module?: typeof import('node-pty');
@@ -45,6 +45,7 @@ const { module: nodePty, skipReason: ptySkipReason } = enforceRequiredPty(
 
 interface PtySession {
   child: IPty;
+  dispose: () => void;
   exit: Promise<{ exitCode: number; signal?: number }>;
   exitResult: () => { exitCode: number; signal?: number } | undefined;
   output: () => string;
@@ -100,17 +101,27 @@ function startFixture(
       env: { ...process.env, TERM: 'xterm-256color' },
     },
   );
-  child.onData((data) => {
-    output += data;
-  });
+  const subscriptions: IDisposable[] = [];
+  subscriptions.push(
+    child.onData((data) => {
+      output += data;
+    }),
+  );
   const exit = new Promise<{ exitCode: number; signal?: number }>((resolve) => {
-    child.onExit((result) => {
-      exitResult = result;
-      resolve(result);
-    });
+    subscriptions.push(
+      child.onExit((result) => {
+        exitResult = result;
+        resolve(result);
+      }),
+    );
   });
   return {
     child,
+    dispose: () => {
+      for (const subscription of subscriptions.splice(0)) {
+        subscription.dispose();
+      }
+    },
     exit,
     exitResult: () => exitResult,
     output: () => output,
@@ -123,20 +134,28 @@ function ptyTest(name: string, run: () => Promise<void>): void {
 
 async function waitForOutput(
   session: PtySession,
-  expected: string,
+  expected: string | RegExp,
   timeoutMilliseconds = 5_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMilliseconds;
-  while (!stripVTControlCharacters(session.output()).includes(expected)) {
+  const matches = (): boolean => {
+    const visibleOutput = stripVTControlCharacters(session.output());
+    return typeof expected === 'string'
+      ? visibleOutput.includes(expected)
+      : expected.test(visibleOutput);
+  };
+  const description =
+    typeof expected === 'string' ? JSON.stringify(expected) : String(expected);
+  while (!matches()) {
     const exited = session.exitResult();
     if (exited) {
       throw new Error(
-        `PTY exited with ${exited.exitCode} before ${JSON.stringify(expected)}. Output:\n${session.output()}`,
+        `PTY exited with ${exited.exitCode} before ${description}. Output:\n${session.output()}`,
       );
     }
     if (Date.now() >= deadline) {
       throw new Error(
-        `Timed out waiting for ${JSON.stringify(expected)}. Output:\n${session.output()}`,
+        `Timed out waiting for ${description}. Output:\n${session.output()}`,
       );
     }
     await delay(10);
@@ -144,14 +163,26 @@ async function waitForOutput(
 }
 
 async function stopSession(session: PtySession): Promise<void> {
-  if (!session.exitResult()) {
-    session.child.kill();
-    await Promise.race([session.exit, delay(1_000)]);
+  try {
+    if (!session.exitResult()) {
+      session.child.kill();
+      await Promise.race([session.exit, delay(1_000)]);
+    }
+  } finally {
+    session.dispose();
   }
 }
 
 function occurrences(text: string, expected: string): number {
   return text.split(expected).length - 1;
+}
+
+function promptFollowedByInput(prompt: string, input: string): RegExp {
+  const escape = (value: string): string =>
+    value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // ConPTY can represent the prompt's trailing space and cursor position with
+  // VT operations. Match the visible ordering instead of serialized spacing.
+  return new RegExp(`${escape(prompt)}[\\s\\S]*${escape(input)}`);
 }
 
 ptyTest(
@@ -160,9 +191,9 @@ ptyTest(
     const session = startFixture('prompt');
     try {
       await waitForOutput(session, '__AB_TTY__true:true');
-      await waitForOutput(session, 'You > ');
+      await waitForOutput(session, 'You >');
       session.child.write('partial');
-      await waitForOutput(session, 'You > partial');
+      await waitForOutput(session, promptFollowedByInput('You >', 'partial'));
 
       session.child.resize(100, 30);
       await waitForOutput(session, '__AB_RESIZED__');
@@ -170,7 +201,7 @@ ptyTest(
       const afterResize = visibleOutput.slice(
         visibleOutput.lastIndexOf('__AB_RESIZED__'),
       );
-      assert.match(afterResize, /You > partial/);
+      assert.match(afterResize, promptFollowedByInput('You >', 'partial'));
 
       session.child.write(' input\r');
       await waitForOutput(session, '__AB_RESULT__"partial input"');
@@ -213,7 +244,7 @@ ptyTest(
 ptyTest('real PTY resolves a pending prompt on Ctrl+D', async () => {
   const session = startFixture('prompt');
   try {
-    await waitForOutput(session, 'You > ');
+    await waitForOutput(session, 'You >');
     session.child.write('\u0004');
     await waitForOutput(session, '__AB_RESULT__null');
     const exited = await session.exit;
@@ -228,7 +259,7 @@ ptyTest(
   async () => {
     const session = startFixture('between-prompts');
     try {
-      await waitForOutput(session, 'Start > ');
+      await waitForOutput(session, 'Start >');
       session.child.write('go\r');
       await waitForOutput(session, '__AB_WORKING__');
       session.child.write('draft');
@@ -239,10 +270,10 @@ ptyTest(
       const afterFrame = stripVTControlCharacters(session.output()).slice(
         stripVTControlCharacters(session.output()).lastIndexOf('__AB_FRAME__'),
       );
-      assert.match(afterFrame, /Start > draft/);
+      assert.match(afterFrame, promptFollowedByInput('Start >', 'draft'));
 
       session.child.resize(100, 30);
-      await waitForOutput(session, 'Next > draft');
+      await waitForOutput(session, promptFollowedByInput('Next >', 'draft'));
       session.child.write(' message\r');
       await waitForOutput(session, '__AB_RESULT__"draft message"');
       const exited = await session.exit;
@@ -256,7 +287,7 @@ ptyTest(
 ptyTest('real PTY keeps partial input below supplemental output', async () => {
   const session = startFixture('supplemental-output');
   try {
-    await waitForOutput(session, 'You > ');
+    await waitForOutput(session, 'You >');
     session.child.write('/ask codex inspect\r');
     await waitForOutput(session, '__AB_PROVIDER__');
     session.child.write('/status\r');
@@ -270,7 +301,7 @@ ptyTest('real PTY keeps partial input below supplemental output', async () => {
     assert.ok(restoration >= 0);
     assert.doesNotMatch(
       stripVTControlCharacters(output.slice(restoration, status)),
-      /You > draft/,
+      promptFollowedByInput('You >', 'draft'),
     );
 
     const statusEnd = stripVTControlCharacters(output).lastIndexOf(
@@ -278,9 +309,9 @@ ptyTest('real PTY keeps partial input below supplemental output', async () => {
     );
     const deadline = Date.now() + 5_000;
     while (
-      !stripVTControlCharacters(session.output())
-        .slice(statusEnd)
-        .includes('You > draft')
+      !promptFollowedByInput('You >', 'draft').test(
+        stripVTControlCharacters(session.output()).slice(statusEnd),
+      )
     ) {
       if (Date.now() >= deadline) {
         throw new Error(

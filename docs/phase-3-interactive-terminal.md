@@ -572,6 +572,15 @@ an unavailable native driver is a hard failure rather than a skip. A green
 general test count is not sufficient evidence because optional local runs may
 still skip the PTY cases. The dependency graduates to a required release gate
 only after all four matrix entries have reported the real PTY cases as passed.
+The dedicated command uses Node's test-runner force-exit option so a failed
+native case returns after the known tests and cleanup finish instead of holding
+the CI job open on a lingering platform PTY handle. This does not convert a
+failure or timeout into a pass.
+
+The harness compares visible prompt ordering after removing VT controls rather
+than requiring literal trailing spaces in the byte stream. Windows ConPTY may
+represent that spacing and the cursor position with erase and cursor-movement
+sequences; those bytes are a valid rendering of the same prompt and input.
 
 The PTY harness launches a small terminal-boundary fixture with fake providers
 and no network or authentication. Its failing between-prompts case showed that
