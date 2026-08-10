@@ -1,7 +1,7 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 3, incorporating two rounds of Codex review; awaiting
-approval before implementation
+Status: Contract revision 4, incorporating three rounds of Codex review;
+awaiting approval before implementation
 
 Target release: 0.7.0
 
@@ -150,6 +150,47 @@ partial artifact is indistinguishable from a complete one. This matters most
 under the discard rule below, where "a patch exists" would otherwise be taken
 as proof that work is preserved.
 
+The same gap exists for the completed Markdown transcript, JSON transcript, and
+context JSON, which are written with three direct `writeFile` calls at
+[cli.ts:587](../src/cli.ts#L587).
+
+Two other direct writes are **not** in scope and the invariant is worded to
+exclude them: [chat-workflow.ts:138](../src/chat-workflow.ts#L138) and
+[providers.ts:232](../src/providers.ts#L232) write into freshly created
+`mkdtemp` directories and are consumed by a subprocess within the same process
+lifetime. No reader survives the process, and a partial write there fails the
+subprocess loudly rather than masquerading as complete.
+
+### D8 — committed work inside a workspace is invisible to patch creation
+
+Found by Codex while reviewing revision 3's preservation rule, and confirmed
+here. `runCompleteWorkspaceDiff` seeds its temporary index from the workspace's
+**current** `HEAD` and diffs against that same `HEAD`
+([git.ts:169](../src/git.ts#L169)). If anything commits inside the worktree,
+`HEAD` moves and the committed work vanishes from the comparison.
+
+Reproduced: an isolated worktree at base commit A, a file edited and committed
+as B, then `createPatch`:
+
+```json
+{ "base": "546e9b1", "head": "f82ac10", "created": false, "patchExists": false }
+```
+
+`createPatch` reports no changes. Worse, no branch or ref contains commit B — it
+is reachable only as the detached worktree's `HEAD`, so
+`git worktree remove --force` drops the last reference to it and the objects
+become unreferenced. Revision 3's preservation rule would therefore have
+authorized removing a workspace whose work it had just failed to capture,
+which is exactly the failure the rule exists to prevent.
+
+Agents are instructed not to commit, so this is an off-nominal state. It is
+still reachable: an agent may disregard the instruction, and a user may commit
+inside a retained worktree before running `--discard-workspace`.
+
+This also silently weakens per-cycle change detection. `workspaceFingerprint`
+shares `runCompleteWorkspaceDiff`, so an agent commit currently produces an
+unchanged fingerprint while the files did change.
+
 ## Non-goals
 
 Phase 4 does not:
@@ -187,14 +228,18 @@ These hold before and after every slice.
    status. Later saves may refine `workspace`, `agentCwd`, and the recorded
    completion outcome only.
 6. No completion or run-management path removes a workspace unless a complete
-   patch representing that workspace's **current** contents was written first,
-   or a fresh inspection proves the workspace holds no changes.
+   patch representing that workspace's **current** contents **relative to the
+   run's recorded base revision** was written first, or a fresh inspection
+   against that same base proves the workspace holds no changes.
 7. Every completion path terminates: no path can leave a pending prompt that
    never settles.
-8. Every persisted artifact, including patches, is written through an atomic
-   rename so a partial file never occupies the final path. Lock records are
-   deliberately excluded: their exclusivity comes from `open(path, 'wx')`, which
-   rename semantics would defeat. See "Lock recovery and ownership".
+8. Every persisted artifact written to the run output directory — patches,
+   transcripts, and context manifests — is written through an atomic rename so a
+   partial file never occupies the final path. Temporary files in a process-owned
+   `mkdtemp` directory, consumed by a subprocess within the same process
+   lifetime, are outside this invariant. Lock records are also excluded: their
+   exclusivity comes from `open(path, 'wx')`, which rename semantics would
+   defeat. See "Lock recovery and ownership".
 9. A lock is held by at most one process at a time, and a lock is released only
    by the process that acquired it. A lock whose ownership cannot be determined
    is treated as held, never as stale.
@@ -359,8 +404,9 @@ under revision 1's rule would have made it permanently undiscardable.
 The rule becomes: **before any workspace removal, from either the completion
 step or run management,**
 
-1. run a complete `createPatch` over the workspace's current contents through
-   the atomic path from D7;
+1. run a complete `createPatch` over the workspace's current contents
+   **against the run's recorded `baseRevision`**, through the atomic path from
+   D7;
 2. if patch creation fails, preserve the workspace and report `patch-failed`
    or the run-management equivalent — never remove;
 3. if that same `createPatch` reports no changes, removal is permitted with no
@@ -373,6 +419,53 @@ empty-workspace proof is a full `createPatch` returning "no changes", not the
 cheaper `workingTreeStatus`. A destructive path should use the same mechanism
 that would have preserved binary content, mode bits, symlinks, deletions, and
 untracked files, and the cost is negligible against permanent removal.
+
+#### Explicit baseline (D8)
+
+Patch creation takes the baseline as a required argument instead of implying it
+from the workspace's `HEAD`:
+
+- `runCompleteWorkspaceDiff` seeds its temporary index from the current
+  worktree and diffs it against the supplied `baseRevision`.
+- `createPatch` and `workspaceFingerprint` both require the baseline. Making it
+  required rather than defaulted forces every call site to state its intent,
+  which is what the current implicit `HEAD` failed to do.
+
+This changes `workspaceFingerprint` semantics, and the change is the point: a
+fingerprint taken against a fixed base now moves when an agent commits, where
+today it does not. Cycle-to-cycle comparison stays valid because the baseline
+is stable across a run.
+
+A run with no recorded `baseRevision` cannot be proven safe to discard. Removal
+is refused for those runs with a message pointing at the retained workspace.
+`patchApplicationRefusalReason` already refuses to apply in the same situation
+([artifacts.ts:40](../src/artifacts.ts#L40)); this makes removal equally
+conservative.
+
+#### Commits inside a workspace
+
+Fixing the baseline preserves the _content_ of committed work, but a patch
+cannot carry commit messages, authorship, or history. For a destructive
+operation that is worth surfacing rather than silently flattening:
+
+- **Non-interactive removal is refused** when the workspace `HEAD` differs from
+  `baseRevision`. An unattended script should not decide that commit history is
+  expendable.
+- **Interactive removal** requires a confirmation that names how many commits
+  the workspace holds beyond its base and states that the patch preserves file
+  contents but not history.
+
+This adds nothing to the normal path, where `HEAD` equals `baseRevision` and
+neither rule engages. It is beyond what the review asked for, and it is flagged
+in the revision history as the one addition Codex has not yet ruled on.
+
+#### Atomic transcripts
+
+The three transcript and context writes at [cli.ts:587](../src/cli.ts#L587)
+move to `writePrivateFileAtomic`. Codex offered narrowing invariant 8 as the
+alternative; routing them is correct, because `AGENTS.md` already requires every
+persisted format to go through `filesystem.ts`, and all three are string writes
+that match the helper's existing signature and file mode exactly.
 
 Point 4 is a requirement Codex asked for and is also an existing defect.
 `saveState` writes `agentCwd: options.cwd`, and `options.cwd` was reassigned to
@@ -576,16 +669,19 @@ Acceptance: D1 no longer reproduces, in a deterministic test and in the PTY
 harness; injected apply and removal failures leave a reloaded checkpoint whose
 status is `completed`.
 
-### Slice 4 — atomic patches and safe discard
+### Slice 4 — atomic artifacts, correct baselines, and safe discard
 
-Atomic patch writing through `filesystem.ts` (D7), the fresh-patch preservation
-rule, the empty-workspace exception, and the `agentCwd` reset on both the CLI
-and run-management removal paths.
+Atomic patch and transcript writing through `filesystem.ts` (D7), the explicit
+baseline for patch creation and fingerprinting (D8), the fresh-patch
+preservation rule, the empty-workspace exception, the committed-workspace rules,
+and the `agentCwd` reset on both the CLI and run-management removal paths.
 
-Acceptance: an interrupted patch write never leaves a file at the final path; a
-workspace edited after its patch was written is re-patched before removal; a
-no-change workspace is discardable; removal is refused when patch creation
-fails.
+Acceptance: an interrupted patch or transcript write never leaves a file at the
+final path; a workspace edited after its patch was written is re-patched before
+removal; a workspace holding a commit beyond its base produces a patch
+containing that committed change; a no-change workspace is discardable; removal
+is refused when patch creation fails, when the run has no recorded base
+revision, and non-interactively when the workspace holds commits.
 
 ### Slice 5 — scriptable completion
 
@@ -649,8 +745,17 @@ repository.
 - removal refused when patch creation fails; removal permitted for a workspace
   with no changes; a workspace modified after its patch was written is
   re-patched before removal;
+- **D8 regression:** a user commits inside a retained worktree, then invokes
+  `--discard-workspace`; the generated patch contains that committed change, and
+  applying it to a fresh checkout of the base reproduces the committed content;
+- a workspace whose `HEAD` moved past `baseRevision` is refused non-interactive
+  removal, and its interactive confirmation names the commit count;
+- removal refused for a run with no recorded `baseRevision`;
+- `workspaceFingerprint` changes when a commit is made inside the workspace,
+  which it does not do today;
 - after removal, both `workspace` and `agentCwd` are corrected;
-- an interrupted patch write leaves no file at the final destination;
+- an interrupted patch or transcript write leaves no file at the final
+  destination, and the three transcript artifacts are written atomically;
 - `removeIsolatedWorktree` still refuses an unregistered path and the
   repository root itself;
 - binary, executable-bit, symlink, deletion, and untracked-file patches survive
@@ -699,15 +804,19 @@ the acceptance criteria carry that weight instead.
 
 Phase 4 is complete when:
 
-1. D1 through D7 no longer reproduce, each with a test that fails against
+1. D1 through D8 no longer reproduce, each with a test that fails against
    `8009945`.
 2. `finishIsolatedRun` is driven entirely through injected input in tests.
 3. Every completion outcome is reachable non-interactively except `ask`.
 4. Once a run is recorded `completed`, no completion-step event can change that
    status, proven by reloading the checkpoint after injected failures.
 5. No completion or run-management path removes a workspace without a fresh
-   complete patch or a fresh proof that the workspace holds no changes.
-6. No persisted artifact can be observed partially written at its final path.
+   complete patch against the run's recorded base revision, or a fresh proof
+   against that same base that the workspace holds no changes. Removal is
+   refused when no base revision was recorded.
+6. Patch creation captures committed work inside a workspace, and no persisted
+   run artifact — patch, transcript, or context manifest — can be observed
+   partially written at its final path.
 7. Interactive apply into a non-clean checkout discloses that state before
    asking and remains permitted; non-interactive apply into a non-clean
    checkout is refused.
@@ -788,18 +897,43 @@ run-management discard that wrote a `completion` record would produce a
 checkpoint failing its own validator. Resolved by scoping `completion` to the
 run's own completion step; run management never writes it.
 
+**Revision 4** adds D8 and resolves the atomic-write scope.
+
+D8 is Codex's finding and reproduces exactly as reported: patch creation seeds
+its index from the workspace's current `HEAD` and diffs against that same
+`HEAD`, so a commit made inside the worktree is invisible. Confirmed here that
+the resulting commit is reachable from no branch or ref, meaning
+`git worktree remove --force` drops the last reference to it — revision 3's
+preservation rule would have authorized removing a workspace whose work it had
+just failed to capture. Patch creation and fingerprinting now take an explicit
+required baseline.
+
+The transcript writes are routed through `writePrivateFileAtomic` rather than
+narrowing invariant 8, since `AGENTS.md` already requires it and all three are
+string writes matching the helper's signature. Invariant 8's scope is now
+stated precisely: run-output artifacts are covered; process-owned `mkdtemp`
+files consumed by a subprocess in the same process lifetime
+([chat-workflow.ts:138](../src/chat-workflow.ts#L138),
+[providers.ts:232](../src/providers.ts#L232)) are not.
+
+One addition beyond the review, flagged for a ruling. Fixing the baseline
+preserves committed _content_ but a patch cannot carry commit messages,
+authorship, or history. Revision 4 therefore refuses non-interactive removal
+when the workspace `HEAD` has moved past `baseRevision`, and requires an
+interactive confirmation naming the commit count. This does not touch the
+normal path, where the two are equal.
+
 ## Questions for review
 
-None blocking. Revision 3 adopts every recommendation from the revision 2
-review, and the two open items it raised are recorded as decisions rather than
-questions:
+1. The committed-workspace rules above are not part of what Codex asked for.
+   Confirm that refusing unattended removal of a workspace holding commits is
+   proportionate, or that capturing content in the patch is sufficient and the
+   extra refusal should be dropped.
 
-1. The empty-lock residual — a process killed between claiming the path and
-   writing its record leaves a lock that no longer self-heals. Accepted
-   knowingly in exchange for guaranteed mutual exclusion, mitigated by naming
-   that case explicitly in the recovery message, with `link()` publication as
-   the documented escape hatch.
-2. Scoping `completion` to the run's own completion step, which follows from
-   the cross-field invariants rather than being an independent choice.
+Previously raised and now recorded as decisions rather than open questions: the
+empty-lock residual, accepted in exchange for guaranteed mutual exclusion and
+mitigated by naming that case in the recovery message; and scoping `completion`
+to the run's own completion step, which follows from the version 3 cross-field
+invariants.
 
 Ready for slice 1 on approval.
