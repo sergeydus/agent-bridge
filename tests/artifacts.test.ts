@@ -179,7 +179,7 @@ test('keeps both the patch and the workspace on the default choice', async () =>
   );
 });
 
-test('repeats the menu with a correction until the answer is a listed choice', async () => {
+test('a correction repeats only the choice line, never the whole menu', async () => {
   await withFixture(
     async ({ repository, workspace, patchPath, baseRevision, reporter }) => {
       const prompt = scriptedPrompt(['4', 'maybe', '1']);
@@ -194,9 +194,12 @@ test('repeats the menu with a correction until the answer is a listed choice', a
 
       assert.deepEqual(result, { patchPath, workspace });
       assert.equal(prompt.questions.length, 3);
-      assert.equal(prompt.questions[0]?.startsWith('Please enter'), false);
+      assert.match(prompt.questions[0] ?? '', /^\nWhat should happen/);
       for (const question of prompt.questions.slice(1)) {
-        assert.match(question, /^Please enter 1, 2, 3\.\n\nWhat should happen/);
+        assert.equal(
+          question,
+          'Please enter 1, 2, 3.\nChoose 1, 2, or 3 [1]: ',
+        );
       }
     },
   );
@@ -292,6 +295,28 @@ test('refuses to apply a patch that conflicts with the original checkout', async
         await readFile(join(repository, 'tracked.txt'), 'utf8'),
         'conflicting\n',
       );
+    },
+  );
+});
+
+test('a rejected discard answer repeats the same short confirmation', async () => {
+  await withFixture(
+    async ({ repository, workspace, patchPath, baseRevision, reporter }) => {
+      const prompt = scriptedPrompt(['3', 'maybe', 'n']);
+      await finishIsolatedRun({
+        repository,
+        workspace,
+        patchPath,
+        baseRevision,
+        reporter,
+        createPrompt: () => prompt,
+      });
+
+      assert.equal(
+        prompt.questions[2],
+        'Please enter y, yes, n, no.\nDiscard this isolated workspace permanently? [y/N]: ',
+      );
+      assert.equal(await exists(workspace), true);
     },
   );
 });

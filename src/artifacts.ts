@@ -10,9 +10,10 @@ import {
 import type { ProgressReporter } from './ui.ts';
 
 /**
- * The completion step's only input source. `ask` resolves `undefined` when the
- * user declines to answer, so no completion question can reject and end a run
- * that has already finished successfully.
+ * The completion step's only input source. `ask` reports a declined question as
+ * `undefined` rather than as a rejection, so callers must handle "no answer"
+ * explicitly. The terminal implementation does not yet normalize end of input;
+ * until it does, a real Ctrl+D still rejects.
  */
 export interface CompletionPrompt {
   ask(question: string): Promise<string | undefined>;
@@ -48,15 +49,27 @@ export function createTerminalCompletionPrompt({
   return createReadlineCompletionPrompt({ input, output });
 }
 
+/**
+ * Asks until the answer is one of `choices`. A retry repeats only
+ * `retryQuestion`, so a long menu is not reprinted after every mistake.
+ */
 async function askForChoice(
   prompt: CompletionPrompt,
-  question: string,
-  choices: string[],
-  defaultChoice: string,
+  {
+    question,
+    retryQuestion = question,
+    choices,
+    defaultChoice,
+  }: {
+    question: string;
+    retryQuestion?: string;
+    choices: string[];
+    defaultChoice: string;
+  },
 ): Promise<string | undefined> {
-  let correction = '';
+  let asked = question;
   while (true) {
-    const answer = await prompt.ask(`${correction}${question}`);
+    const answer = await prompt.ask(asked);
     if (answer === undefined) {
       return undefined;
     }
@@ -64,9 +77,11 @@ async function askForChoice(
     if (choices.includes(choice)) {
       return choice;
     }
-    correction = `Please enter ${choices.join(', ')}.\n`;
+    asked = `Please enter ${choices.join(', ')}.\n${retryQuestion}`;
   }
 }
+
+const COMPLETION_CHOICE = 'Choose 1, 2, or 3 [1]: ';
 
 const COMPLETION_MENU = `
 What should happen to the completed changes?
@@ -74,7 +89,7 @@ What should happen to the completed changes?
   2) Apply the patch to the original checkout and keep the workspace
   3) Discard the isolated workspace
 
-Choose 1, 2, or 3 [1]: `;
+${COMPLETION_CHOICE}`;
 
 export async function patchApplicationRefusalReason({
   repository,
@@ -127,12 +142,12 @@ export async function finishIsolatedRun({
   }
 
   try {
-    const choice = await askForChoice(
-      prompt,
-      COMPLETION_MENU,
-      ['1', '2', '3'],
-      '1',
-    );
+    const choice = await askForChoice(prompt, {
+      question: COMPLETION_MENU,
+      retryQuestion: COMPLETION_CHOICE,
+      choices: ['1', '2', '3'],
+      defaultChoice: '1',
+    });
     if (choice === '2') {
       const refusalReason = await patchApplicationRefusalReason({
         repository,
@@ -148,12 +163,11 @@ export async function finishIsolatedRun({
       return { patchPath, workspace, applied: true };
     }
     if (choice === '3') {
-      const confirmed = await askForChoice(
-        prompt,
-        'Discard this isolated workspace permanently? [y/N]: ',
-        ['y', 'yes', 'n', 'no'],
-        'n',
-      );
+      const confirmed = await askForChoice(prompt, {
+        question: 'Discard this isolated workspace permanently? [y/N]: ',
+        choices: ['y', 'yes', 'n', 'no'],
+        defaultChoice: 'n',
+      });
       if (confirmed !== undefined && ['y', 'yes'].includes(confirmed)) {
         await removeIsolatedWorktree({ repository, workspace });
         reporter.success('Discarded the isolated workspace.');
