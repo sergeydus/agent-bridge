@@ -203,7 +203,8 @@ function createChatPresentation(
       }
     },
   });
-  shouldRedrawPrompt = () => presenter.started && !presenter.usingFallback;
+  shouldRedrawPrompt = () =>
+    presenter.started && !presenter.suspended && !presenter.usingFallback;
   return presenter;
 }
 

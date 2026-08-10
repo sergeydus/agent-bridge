@@ -56,7 +56,7 @@ test('PTY driver load failure becomes an explicit skip reason', async () => {
 });
 
 function startFixture(
-  mode: 'between-prompts' | 'prompt' | 'signal',
+  mode: 'between-prompts' | 'prompt' | 'signal' | 'supplemental-output',
 ): PtySession {
   if (!nodePty) {
     throw new Error(ptySkipReason ?? 'node-pty is unavailable');
@@ -226,3 +226,49 @@ ptyTest(
     }
   },
 );
+
+ptyTest('real PTY keeps partial input below supplemental output', async () => {
+  const session = startFixture('supplemental-output');
+  try {
+    await waitForOutput(session, 'You > ');
+    session.child.write('/ask codex inspect\r');
+    await waitForOutput(session, '__AB_PROVIDER__');
+    session.child.write('/status\r');
+    session.child.write('draft');
+    session.child.resize(90, 25);
+
+    await waitForOutput(session, 'Presentation: enhanced terminal');
+    const output = session.output();
+    const status = output.lastIndexOf('Latest paired exchange:');
+    const restoration = output.lastIndexOf('\u001B[?1049l', status);
+    assert.ok(restoration >= 0);
+    assert.doesNotMatch(
+      stripVTControlCharacters(output.slice(restoration, status)),
+      /You > draft/,
+    );
+
+    const statusEnd = stripVTControlCharacters(output).lastIndexOf(
+      'Presentation: enhanced terminal',
+    );
+    const deadline = Date.now() + 5_000;
+    while (
+      !stripVTControlCharacters(session.output())
+        .slice(statusEnd)
+        .includes('You > draft')
+    ) {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for the partial input below status output. Output:\n${session.output()}`,
+        );
+      }
+      await delay(10);
+    }
+
+    session.child.write('\u0015/pause\r');
+    await waitForOutput(session, 'Chat saved. Resume with:');
+    const exited = await session.exit;
+    assert.equal(exited.exitCode, 0);
+  } finally {
+    await stopSession(session);
+  }
+});

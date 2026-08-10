@@ -46,7 +46,10 @@ readline receives a complete submitted line. In an enhanced TTY, readline keeps
 partial input and its cursor authoritative between coordinator prompts. Every
 enhanced frame repaints that owned buffer, and reopening the next prompt
 preserves its cursor rather than moving insertion to the start of the line.
-Real-PTY tests cover resize, Ctrl+C, Ctrl+D, and alternate-screen restoration.
+Suspending the enhanced renderer suppresses prompt repaint until supplemental
+normal-screen output finishes, after which the next prompt restores the partial
+line below that block. Real-PTY tests cover that ordering, resize, Ctrl+C,
+Ctrl+D, and alternate-screen restoration.
 
 If interruption occurs after the first response, the checkpoint records the
 pending peer and exact saved message. If it occurs after two provisional
@@ -233,9 +236,9 @@ native terminal scrollback remains available, then reconstructs its live frame
 before the next agent starts. It also suspends and restores the normal screen
 before a linked workflow starts. Help, history, status, and other supplemental
 command output stays on the normal screen so the text remains readable until
-the next agent starts. A
-recoverable enhanced-renderer failure restores the terminal and continues with
-the plain renderer.
+the next agent starts. Prompt repaint is disabled while that normal-screen block
+is being emitted and resumes beneath it. A recoverable enhanced-renderer failure
+restores the terminal and continues with the plain renderer.
 
 Speaker names and structured decisions are always written as text, so color is
 supplemental. Presentation preferences are restored when a chat is resumed

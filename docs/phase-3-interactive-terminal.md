@@ -482,9 +482,9 @@ and workflow suspension; conversation history remains available through native
 terminal scrollback rather than custom mouse capture. Complete-line queueing and
 the readline callback lifecycle are covered deterministically through injected
 streams and a readline factory. A real-PTY harness now covers partial input and
-cursor preservation, resize, Ctrl+C, Ctrl+D, and alternate-screen restoration
-locally; full CI-matrix execution and manual screen-reader coverage remain
-Slice 5 release-hardening work.
+cursor preservation, resize, supplemental-output placement, Ctrl+C, Ctrl+D, and
+alternate-screen restoration locally; full CI-matrix execution and manual
+screen-reader coverage remain Slice 5 release-hardening work.
 
 ### Slice 1: shared presentation model
 
@@ -570,8 +570,13 @@ and no network or authentication. Its failing between-prompts case showed that
 readline retained the partial line but lost the effective cursor position after
 a redraw, turning text appended to `draft` into text inserted before it. The
 selected design therefore keeps readline active and repaints its owned line and
-cursor after enhanced frames. Pausing readline was rejected because it would
-hide characters while providers work. The alternatives evaluated were:
+cursor after enhanced frames. A second failing case showed that leaving the
+alternate screen for completed responses or `/status` repainted `You > draft`
+above the supplemental block. The presentation controller therefore marks
+itself suspended before emitting restoration bytes, suppresses repaint for the
+whole normal-screen block, and clears suspension before resume redraws the live
+view. Pausing readline was rejected because it would hide characters while
+providers work. The alternatives evaluated were:
 
 - keep an active readline prompt while providers work and repaint its buffer;
 - pause readline while providers work and restore buffered input afterward.

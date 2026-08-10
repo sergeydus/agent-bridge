@@ -122,7 +122,8 @@ the queued text, and the line is never inserted between the two agents in the
 current paired exchange. In an enhanced TTY, characters that have not reached
 Enter remain editable and keep their cursor position across provider frames
 and terminal resizes. Real-PTY tests cover that partial-input behavior, Ctrl+C,
-Ctrl+D, and alternate-screen restoration.
+Ctrl+D, alternate-screen restoration, and clean prompt placement around
+supplemental output.
 
 Ordinary messages and `/both` produce the normal paired exchange. Most open
 exchanges use two provider calls; two provisional `done` decisions trigger a
@@ -226,8 +227,9 @@ inherits the terminal and restores normal terminal state on exit. Supplemental
 command output such as help and history stays on the normal screen until the
 next agent starts. If enhanced drawing fails after normal terminal state is
 restored, the chat continues with plain output. Readline repaint stops before
-that fallback output and before terminal teardown, so an old prompt is not
-inserted into append-only output. Use
+supplemental or fallback output and before terminal teardown, then resumes
+below the completed block, so an old prompt is not inserted into append-only
+output. Use
 `--ui plain` to retain append-only output or `--ui enhanced` to request the
 full-screen view explicitly. Screen-reader mode, redirected streams,
 `TERM=dumb`, and terminals that are too small use the complete plain interface.

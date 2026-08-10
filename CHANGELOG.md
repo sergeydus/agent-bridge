@@ -42,8 +42,9 @@
   output is restored before exit. A missing native PTY driver skips those PTY
   cases with a reason instead of failing the entire suite, and its test-only
   files are excluded from the package. Prompt repaint now stops before
-  enhanced-to-plain fallback output or terminal teardown, preventing a stray
-  prompt label in append-only output.
+  supplemental output, enhanced-to-plain fallback output, or terminal teardown,
+  preventing a stray prompt label from preceding completed responses, status
+  blocks, or other append-only output.
 
 ## 0.6.0 - 2026-08-09
 
