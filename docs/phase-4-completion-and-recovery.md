@@ -1,7 +1,7 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 5, incorporating four rounds of Codex review;
-awaiting approval before implementation
+Status: Contract revision 6, incorporating five rounds of Codex review; awaiting
+approval before implementation
 
 Target release: 0.7.0
 
@@ -220,10 +220,13 @@ explicit baseline would be computed against a commit the workspace was never
 based on.
 
 **Provenance must be preserved.** A recorded base revision and a runtime-derived
-one are different facts and are stored as different fields. The derived value
-may continue to serve the purposes it serves today — creating a workspace for a
-fresh run, and reporting — but it never authorizes apply or discard. Only a
-base revision that was recorded by the run that created the workspace does that.
+fallback are different facts. For a fresh run, the revision captured when its
+workspace is created becomes the recorded baseline — that run observed the
+commit its workspace was built from, so recording it is exactly right. For a
+resumed run, only the checkpoint's existing `baseRevision` is authoritative. If
+it is absent, a runtime-derived fallback may support non-destructive operations
+but is never persisted as the run's baseline and never authorizes apply or
+discard.
 
 ## Non-goals
 
@@ -522,20 +525,27 @@ None of this engages on the normal path, where `HEAD` equals `baseRevision`.
 
 #### Baseline provenance (D9)
 
-Two distinct fields replace today's single `baseRevision` variable:
+Two distinct values replace today's single `baseRevision` variable, and which
+one exists depends on how the run started:
 
-- the **recorded** base revision, written by the run that created the workspace;
-- a **derived** revision, computed at startup when none was recorded.
+- **Fresh run.** The revision captured when its workspace is created is the
+  **recorded** baseline. That run observed the commit its workspace was built
+  from, so it is written to the checkpoint and authorizes apply and discard for
+  the rest of the run's life. Nothing changes for these runs.
+- **Resumed run.** Only the checkpoint's existing `baseRevision` is
+  authoritative. When it is absent, a **derived** fallback may be computed at
+  startup and used for non-destructive purposes — reporting, and any comparison
+  whose failure mode is a message rather than a deletion — but it is never
+  persisted as the run's baseline and never authorizes apply or discard.
 
-The derived value keeps its existing uses — creating a workspace for a fresh run
-and reporting — and is never promoted into the recorded field. Apply and discard
-consult only the recorded value, so a legacy run keeps the fact that its
-original baseline is unknown for its whole lifetime, across any number of
-resumes.
+So a legacy run keeps the fact that its original baseline is unknown for its
+whole lifetime, across any number of resumes, while a run that recorded a real
+baseline is unaffected.
 
 This is enforced end to end rather than only at the call sites: a resume test
-loads a checkpoint with no `baseRevision`, runs to completion, and asserts that
-both apply and discard are refused for that reason.
+loads a checkpoint with no `baseRevision`, runs to completion, asserts that both
+apply and discard are refused for that reason, and then reloads the saved
+checkpoint and asserts `baseRevision` is still absent.
 
 #### Atomic transcripts
 
@@ -834,9 +844,12 @@ repository.
 - the interactive confirmation reports a commit count when `baseRevision` is an
   ancestor of `HEAD`, and reports divergence when it is not;
 - removal refused for a run with no recorded `baseRevision`;
-- **D9 end to end:** a resumed checkpoint with no `baseRevision` completes, and
-  both apply and discard are refused for that reason rather than proceeding
-  against a revision derived at startup;
+- **D9 end to end:** a resumed checkpoint with no `baseRevision` completes, both
+  apply and discard are refused for that reason rather than proceeding against a
+  revision derived at startup, and reloading the saved checkpoint afterwards
+  shows `baseRevision` is still absent;
+- a **fresh** run records the revision its workspace was created from, and its
+  apply and discard paths are authorized by it;
 - `workspaceFingerprint` changes when a commit is made inside the workspace,
   which it does not do today;
 - after removal, both `workspace` and `agentCwd` are corrected;
@@ -1033,9 +1046,20 @@ auto-apply a patch whose true base is unknown. Recorded and derived baselines
 are now separate fields, only the recorded one authorizes apply or discard, and
 an end-to-end resume test enforces it.
 
+**Revision 6** corrects the baseline-provenance wording.
+
+Revision 5 said a derived revision "is never promoted into the recorded field",
+which read as applying to every run and would have left fresh runs with no
+authoritative baseline — refusing their apply and discard paths too. The rule
+is scoped where it belongs: a fresh run records the revision its workspace was
+created from, and only a _resumed_ run must never persist a derived fallback.
+The D9 test also reloads the saved checkpoint and asserts `baseRevision` is
+still absent, and a matching criterion covers the fresh-run path.
+
 ## Questions for review
 
-None. Revision 5 adopts both requested corrections, and the earlier open items
+None. Revision 6 adopts the scoping correction, revision 5 adopted both earlier
+requested corrections, and the remaining open items
 are recorded as decisions: the empty-lock residual, accepted in exchange for
 guaranteed mutual exclusion and mitigated by naming that case in the recovery
 message; scoping `completion` to the run's own completion step, which follows
