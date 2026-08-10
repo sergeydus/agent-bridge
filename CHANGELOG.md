@@ -44,7 +44,9 @@
   files are excluded from the package. Prompt repaint now stops before
   supplemental output, enhanced-to-plain fallback output, or terminal teardown,
   preventing a stray prompt label from preceding completed responses, status
-  blocks, or other append-only output.
+  blocks, or other append-only output. CI now runs the real PTY suite in
+  required mode on Linux, macOS, and Windows, where an unavailable native
+  driver fails the matrix instead of silently turning those cases into skips.
 
 ## 0.6.0 - 2026-08-09
 

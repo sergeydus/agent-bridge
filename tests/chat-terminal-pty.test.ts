@@ -26,7 +26,22 @@ async function loadNodePty(
   }
 }
 
-const { module: nodePty, skipReason: ptySkipReason } = await loadNodePty();
+function enforceRequiredPty(
+  availability: PtyAvailability,
+  required: boolean,
+): PtyAvailability {
+  if (required && !availability.module) {
+    throw new Error(
+      `Real PTY tests are required, but ${availability.skipReason ?? 'node-pty is unavailable'}`,
+    );
+  }
+  return availability;
+}
+
+const { module: nodePty, skipReason: ptySkipReason } = enforceRequiredPty(
+  await loadNodePty(),
+  process.env.AGENT_BRIDGE_REQUIRE_PTY === '1',
+);
 
 interface PtySession {
   child: IPty;
@@ -52,6 +67,17 @@ test('PTY driver load failure becomes an explicit skip reason', async () => {
   assert.equal(
     availability.skipReason,
     'node-pty is unavailable: native module could not load',
+  );
+});
+
+test('required PTY mode rejects an unavailable native driver', () => {
+  assert.throws(
+    () =>
+      enforceRequiredPty(
+        { skipReason: 'node-pty is unavailable: native load failed' },
+        true,
+      ),
+    /Real PTY tests are required, but node-pty is unavailable: native load failed/,
   );
 });
 

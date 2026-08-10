@@ -565,6 +565,14 @@ excluded from the published package. The full CI matrix must prove installation
 and execution before these tests are treated as the cross-platform release
 gate.
 
+The CI workflow runs `npm run test:pty` on Ubuntu with the minimum supported
+Node release and the current Node release, and on macOS and Windows with the
+current Node release. Those steps set `AGENT_BRIDGE_REQUIRE_PTY=1`; in that mode
+an unavailable native driver is a hard failure rather than a skip. A green
+general test count is not sufficient evidence because optional local runs may
+still skip the PTY cases. The dependency graduates to a required release gate
+only after all four matrix entries have reported the real PTY cases as passed.
+
 The PTY harness launches a small terminal-boundary fixture with fake providers
 and no network or authentication. Its failing between-prompts case showed that
 readline retained the partial line but lost the effective cursor position after
@@ -639,7 +647,8 @@ Phase 3 is complete when:
     invariants are unchanged.
 11. Deterministic tests cover both renderers, lifecycle, cancellation, and
     fallback behavior on supported CI platforms.
-12. `npm run check`, `npm run test:coverage`, and `npm pack --dry-run` pass.
+12. `npm run check`, `npm run test:coverage`, and `npm pack --dry-run` pass, and
+    the required-PTY step reports real test passes on every CI matrix entry.
 
 ## Release safeguards
 

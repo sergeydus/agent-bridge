@@ -521,13 +521,16 @@ chat                     Open interactive human-guided chat mode
 ```sh
 npm install
 npm run check
+npm run test:pty
 npm run test:coverage
 npm pack --dry-run
 ```
 
 The test suite uses temporary repositories, fake providers, and isolated
 application-data locations. It never invokes real agents or uses subscription
-calls.
+calls. `npm run test:pty` uses the native PTY driver when it is available and
+otherwise reports explicit skips; CI promotes those skips to failures across
+the Linux, macOS, and Windows matrix.
 
 Start with [AGENTS.md](AGENTS.md), then see
 [Architecture](docs/architecture.md),

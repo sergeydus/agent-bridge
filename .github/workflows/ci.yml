@@ -10,9 +10,11 @@ permissions:
 
 jobs:
   check:
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -30,6 +32,10 @@ jobs:
           node-version: ${{ matrix.node-version }}
           cache: npm
       - run: npm ci
+      - name: Require real PTY execution
+        env:
+          AGENT_BRIDGE_REQUIRE_PTY: '1'
+        run: npm run test:pty
       - run: npm run check
       - name: Run coverage thresholds
         if: matrix.node-version != 22.6
