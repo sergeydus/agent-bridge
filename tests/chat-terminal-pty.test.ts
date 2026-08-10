@@ -182,8 +182,17 @@ function promptFollowedByInput(prompt: string, input: string): RegExp {
     value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   // ConPTY can represent the prompt's trailing space and cursor position with
   // VT operations. Match the visible ordering instead of serialized spacing.
-  return new RegExp(`${escape(prompt)}[\\s\\S]*${escape(input)}`);
+  return new RegExp(`${escape(prompt)}\\s*${escape(input)}`);
 }
+
+test('PTY prompt matching does not cross an earlier submitted command', () => {
+  const promptWithCursorSpacing = 'You >\r\n\r\ndraft';
+  const submittedCommandThenInput = 'You > /status\r\n\r\ndraft';
+  const pattern = promptFollowedByInput('You >', 'draft');
+
+  assert.match(promptWithCursorSpacing, pattern);
+  assert.doesNotMatch(submittedCommandThenInput, pattern);
+});
 
 ptyTest(
   'real PTY preserves a partial readline buffer across resize',
