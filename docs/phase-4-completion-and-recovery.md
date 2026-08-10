@@ -1,7 +1,7 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 2, incorporating Codex review; awaiting approval
-before implementation
+Status: Contract revision 3, incorporating two rounds of Codex review; awaiting
+approval before implementation
 
 Target release: 0.7.0
 
@@ -126,10 +126,11 @@ writes its record as a separate step
 the file inside that window sees `''`, `JSON.parse` throws, and the catch at
 [file-lock.ts:48](../src/file-lock.ts#L48) unlinks a live lock and proceeds.
 
-Reproduced directly: with a 0-byte lock file present and its owner alive and
-about to write its record, a second `acquireFileLock` returned successfully.
-Both callers then believe they hold the lock. This is a mutual-exclusion
-failure, not only a stale-detection weakness.
+Reproduced deterministically rather than by racing: with a 0-byte lock file
+present and its owner holding the handle open with its record deliberately
+unwritten, a second `acquireFileLock` returned successfully. Both callers then
+believe they hold the lock. This is a mutual-exclusion failure, not only a
+stale-detection weakness.
 
 Codex's related observation is also correct and separate: `FileLock.release`
 unlinks by path with no ownership check
@@ -191,9 +192,12 @@ These hold before and after every slice.
 7. Every completion path terminates: no path can leave a pending prompt that
    never settles.
 8. Every persisted artifact, including patches, is written through an atomic
-   rename so a partial file never occupies the final path.
+   rename so a partial file never occupies the final path. Lock records are
+   deliberately excluded: their exclusivity comes from `open(path, 'wx')`, which
+   rename semantics would defeat. See "Lock recovery and ownership".
 9. A lock is held by at most one process at a time, and a lock is released only
-   by the process that acquired it.
+   by the process that acquired it. A lock whose ownership cannot be determined
+   is treated as held, never as stale.
 10. Subprocesses keep `shell: false` and argument-array execution.
 11. Error messages name the failed action, where the artifacts are, and the
     safest next step.
@@ -209,17 +213,17 @@ The completion step resolves to exactly one outcome. Revision 1 defined no
 outcome for the D4 failures, which Codex correctly identified as a gap; the
 failure outcomes below close it.
 
-| Outcome          | Workspace | Patch   | Original checkout | Exit code |
-| ---------------- | --------- | ------- | ----------------- | --------- |
-| `no-changes`     | retained  | none    | untouched         | unchanged |
-| `kept`           | retained  | on disk | untouched         | unchanged |
-| `declined`       | retained  | on disk | untouched         | unchanged |
-| `applied`        | retained  | on disk | patch applied     | unchanged |
-| `apply-refused`  | retained  | on disk | untouched         | unchanged |
-| `apply-failed`   | retained  | on disk | see below         | 1         |
-| `discarded`      | removed   | on disk | untouched         | unchanged |
-| `discard-failed` | retained  | on disk | untouched         | 1         |
-| `patch-failed`   | retained  | none    | untouched         | 1         |
+| Outcome          | Workspace | Patch   | Original checkout | Exit code   |
+| ---------------- | --------- | ------- | ----------------- | ----------- |
+| `no-changes`     | retained  | none    | untouched         | unchanged   |
+| `kept`           | retained  | on disk | untouched         | unchanged   |
+| `declined`       | retained  | on disk | untouched         | unchanged   |
+| `applied`        | retained  | on disk | patch applied     | unchanged   |
+| `apply-refused`  | retained  | on disk | untouched         | conditional |
+| `apply-failed`   | retained  | on disk | see below         | 1           |
+| `discarded`      | removed   | on disk | untouched         | unchanged   |
+| `discard-failed` | retained  | on disk | untouched         | 1           |
+| `patch-failed`   | retained  | none    | untouched         | 1           |
 
 `declined` covers D1: the user ended input or cancelled. Its effect on disk is
 identical to `kept`; it is recorded separately so the completion summary can be
@@ -227,7 +231,14 @@ honest about whether a choice was made. It is not a failure and does not change
 the exit code.
 
 `apply-refused` is today's behavior when `patchApplicationRefusalReason` returns
-a reason. It is a successful refusal, not an error.
+a reason, extended by the non-interactive dirty-checkout refusal below. Its exit
+code is conditional, which Codex is right to require:
+
+- refused after an **interactive** answer, the exit code is unchanged, because
+  the user is present, saw the reason, and can act on it;
+- refused after an **explicit `--on-complete apply`**, the exit code is `1`,
+  because an unattended script asked for an application that did not happen and
+  would otherwise read the run as a success.
 
 `apply-failed` means `git apply` itself failed after both gates passed. `git
 apply` without `--3way` validates before writing, so the expected state is an
@@ -238,9 +249,16 @@ tell the user to inspect the checkout and points at the retained patch.
 always retained in this case, and no discard is offered.
 
 "Exit code unchanged" means the run's own exit-code rules continue to apply:
-`0`, or `2` under `--require-agreement` without convergence. The three failure
-outcomes set exit code `1` while leaving the checkpoint status `completed`,
-because the work finished and only the completion action failed.
+`0`, or `2` under `--require-agreement` without convergence. The failure and
+non-interactive-refusal outcomes set exit code `1` while leaving the checkpoint
+status `completed`, because the work finished and only the completion action
+failed.
+
+**Precedence:** completion failure or non-interactive refusal produces exit code
+`1` even when `--require-agreement` would otherwise produce `2`. A completion
+action that did not happen is the more actionable signal, and the persisted
+`completion.outcome` plus the run's `converged` field let a script recover the
+finer detail without overloading the exit status.
 
 ### The one-way completion boundary
 
@@ -297,6 +315,37 @@ Per `AGENTS.md`, the TypeScript type, `isSavedRun`, `hasOnlyKeys`,
 `schemas/run-state.schema.json`, the v2 migration, and fixture tests change in
 one slice.
 
+#### Cross-field invariants
+
+Codex is right that structure is not enough. The JSON Schema documents shape;
+the runtime validator owns these semantics and rejects a checkpoint violating
+any of them:
+
+1. `completion` is present only when `status === 'completed'`.
+2. `recordedAt` parses as an ISO timestamp.
+3. `apply-refused`, `apply-failed`, `discard-failed`, and `patch-failed`
+   require a non-empty bounded `reason`.
+4. `no-changes`, `kept`, `declined`, `applied`, and `discarded` reject `reason`
+   entirely, so a success cannot carry contradictory failure data.
+5. `discarded` requires `workspace === undefined` and
+   `agentCwd === originalCwd`.
+6. `no-changes` and `patch-failed` require `workspace` to be present, since both
+   mean nothing was captured to a patch.
+
+Invariant 1 has a consequence worth stating rather than discovering in slice 4.
+`discardRunWorkspace` accepts runs whose status is `completed` **or**
+`cancelled` ([runs.ts:66](../src/runs.ts#L66)). If run management also wrote a
+`completion` record, a discarded `cancelled` run would fail its own validator.
+
+Resolution: `completion` describes how **the run's own completion step**
+resolved, and run management never writes it. A workspace later removed through
+`--discard-workspace` therefore leaves `completion.outcome` as whatever the run
+recorded — commonly `kept` — with `workspace` absent. That is permitted, because
+invariant 5 is one-directional: `discarded` implies no workspace, but an absent
+workspace does not imply `discarded`. Run management remains responsible for
+setting `workspace: undefined` and `agentCwd: originalCwd`, which it already
+does.
+
 ### Preserving work before any removal
 
 Codex's objection to "a patch exists" is correct on both sides, and D7 makes it
@@ -310,14 +359,20 @@ under revision 1's rule would have made it permanently undiscardable.
 The rule becomes: **before any workspace removal, from either the completion
 step or run management,**
 
-1. create a complete patch of the workspace's current contents through the
-   atomic path from D7;
+1. run a complete `createPatch` over the workspace's current contents through
+   the atomic path from D7;
 2. if patch creation fails, preserve the workspace and report `patch-failed`
    or the run-management equivalent — never remove;
-3. if the fresh inspection shows the workspace holds no changes relative to its
-   base, removal is permitted with no patch, because there is nothing to lose;
+3. if that same `createPatch` reports no changes, removal is permitted with no
+   patch, because there is nothing to lose;
 4. after successful removal, save `workspace: undefined` **and**
    `agentCwd: originalCwd`.
+
+Point 3 answers revision 2's open question in Codex's direction: the
+empty-workspace proof is a full `createPatch` returning "no changes", not the
+cheaper `workingTreeStatus`. A destructive path should use the same mechanism
+that would have preserved binary content, mode bits, symlinks, deletions, and
+untracked files, and the cost is negligible against permanent removal.
 
 Point 4 is a requirement Codex asked for and is also an existing defect.
 `saveState` writes `agentCwd: options.cwd`, and `options.cwd` was reassigned to
@@ -397,46 +452,68 @@ the run, which is a privacy setting rather than an authorization.
 `--on-complete discard` alongside `--no-isolation` at parse time. Codex is
 right that this is insufficient: a resumed run takes its isolation from the
 checkpoint, so parse-time inspection of the current flags cannot tell whether
-an isolated workspace exists. `apply` and `discard` are therefore validated
-against the resolved run state at the point where
-[cli.ts:622](../src/cli.ts#L622) already gates on `workspace && repository`, and
-rejected with an explanatory message when there is no isolated workspace.
-Parse-time rejection of the flag combination is retained as an early,
-better-worded error, not as the enforcement point.
+an isolated workspace exists.
+
+Revision 2 then placed the runtime check at the completion gate
+([cli.ts:622](../src/cli.ts#L622)), which Codex is also right to reject — a
+resumed direct run would pay for every remaining provider call before learning
+the option was impossible.
+
+The check runs as early as the information exists. `options.isolation` is
+resolved from the checkpoint at [cli.ts:150](../src/cli.ts#L150) and
+`editingWorkflow` at [cli.ts:162](../src/cli.ts#L162), both before the run lock,
+before workspace creation, and before any provider call. `apply` and `discard`
+are validated immediately after that point and rejected with an explanatory
+message when the effective mode has no isolated workspace. A test asserts the
+rejection performs **zero** provider calls.
+
+Parse-time rejection of an incompatible flag combination is retained as an
+early, better-worded error, not as the enforcement point.
 
 ### Lock recovery and ownership
 
-`acquireFileLock` writes a record containing the PID, a hostname, a random
-ownership token, and the creation time, and it writes that record **before**
-the lock becomes visible at its final path — closing D6's window by using the
-same atomic-rename discipline as invariant 8, with `open(path, 'wx')` retained
-as the exclusivity primitive on the final name.
+Revision 2 asked for a complete record to become visible atomically _and_ for
+`open(path, 'wx')` to stay the exclusivity primitive on the final name. Codex is
+right that those are mutually exclusive: opening the final path first is what
+creates the empty-file window, and publishing by rename uses replacement
+semantics — [writePrivateFileAtomic](../src/filesystem.ts#L12) would silently
+overwrite a live lock, which is worse than the defect it was meant to fix.
+
+**Adopted protocol.** Exclusivity stays with `open(path, 'wx')`, and D6 is
+closed on the reader side instead:
+
+1. `open(path, 'wx')` creates the lock. Winning that call is what confers
+   ownership.
+2. The owner then writes a record containing the PID, hostname, a random
+   ownership token, and the creation time.
+3. Any other process that finds the path occupied and reads empty or malformed
+   content treats it as an **occupied lock with an unknown owner** — never as
+   stale, never removable.
+
+Step 3 is the whole fix. The window between steps 1 and 2 still exists, but a
+process observing it now backs off instead of unlinking a live lock.
 
 `FileLock.release` re-reads the record and unlinks only when the ownership
 token still matches, closing Codex's ABA case.
 
-`removeStaleLock`:
+`removeStaleLock` removes a lock only when the record parses, its host matches
+the current host, and its PID is gone. A record from a different host is not
+stale. A missing, malformed, or unparseable record is unknown, never stale.
 
-- removes a lock only when the record's host matches the current host **and**
-  its PID is gone;
-- treats a record from a different host as **not** stale;
-- treats a missing, malformed, or unparseable record as **unknown**, never as
-  stale.
+**Residual failure mode, accepted knowingly.** A process killed between steps 1
+and 2 leaves a 0-byte lock that no longer self-heals; today's code would clear
+it. The window is small and the existing code already unlinks on a _failed_
+write ([file-lock.ts:73](../src/file-lock.ts#L73)), so only an uncatchable kill
+reaches it. Trading a rare manual recovery for guaranteed mutual exclusion is
+the right direction, but the recovery message must name the empty-lock case
+specifically, because "the lock file is empty" is otherwise an unreadable
+symptom.
 
-The last point corrects revision 1. Treating a legacy host-less record "exactly
-as today" would have left the cross-host defect intact for every lock written
-before this phase, and treating an unparseable record as stale is precisely the
-D6 mutual-exclusion failure. Unknown records are never removed automatically;
-the contention message explains how to verify the owner and remove that exact
-lock file manually.
-
-This does trade one risk for another and the trade should be reviewed
-explicitly: a lock left by a crashed pre-Phase-4 process now requires manual
-removal. That cost is bounded — such records only exist until the next
-successful acquisition — but it is a real regression in an environment where
-an older Agent Bridge keeps writing host-less records alongside a newer one,
-which is reachable in this repository via a global install beside
-`npm run talk`. The mitigation is the recovery message, not automatic removal.
+**Rejected alternative.** Publishing a prewritten temporary file with an
+exclusive `link()` would close the window entirely. It is not adopted in this
+phase: it needs cross-platform CI proof, and NTFS supports hard links while
+other Windows filesystems do not. It is recorded as the extension point if the
+empty-lock recovery proves annoying in practice.
 
 Revision 1 also stated "no persisted format changes", which Codex correctly
 called inaccurate. The lock record is a persisted format. It is transient
@@ -454,8 +531,15 @@ does today.
 
 **Lock records, transient and unversioned:** additive `host` and ownership
 token. No migration. Old records are readable and are treated as unknown-owner,
-never auto-removed. New records are ignored safely by older Agent Bridge
-versions, which read only `pid`.
+never auto-removed.
+
+Revision 2 claimed new records are "ignored safely by older Agent Bridge
+versions". Codex is right that this holds only on one host. An older binary
+reads `pid` and ignores `host`, so a record written on host A can be evaluated
+against host B's process table and cleared while genuinely held. **All Agent
+Bridge installations sharing a data directory must be upgraded together.** This
+is documented in `docs/security.md` alongside the existing filesystem
+invariants, and mixed versions on a single host remain safe.
 
 Chat session state is untouched and stays at version 4.
 
@@ -480,7 +564,8 @@ optional `completion` record. No behavior yet reads or writes it beyond a
 round-trip test.
 
 Acceptance: a version 2 fixture migrates with `completion` absent; a version 3
-fixture round-trips; an unknown outcome string is rejected.
+fixture round-trips; an unknown outcome string is rejected; each of the six
+cross-field invariants is rejected by a dedicated case.
 
 ### Slice 3 — completion cannot fail a finished run
 
@@ -508,7 +593,8 @@ fails.
 non-interactive dirty-checkout refusal, help text, and README coverage.
 
 Acceptance: every outcome reachable without a TTY except `ask`; `apply` and
-`discard` rejected for a resumed non-isolated run, not only at parse time.
+`discard` rejected for a resumed non-isolated run before any provider call;
+non-interactive `apply-refused` exits `1` and takes precedence over `2`.
 
 ### Slice 6 — disclosure and error quality
 
@@ -520,8 +606,10 @@ Acceptance: D3 and D4 no longer reproduce.
 
 ### Slice 7 — lock correctness and recovery
 
-Atomic lock-record publication (D6), ownership-token release, host recording,
-unknown-record conservatism, and recovery hints in both contention messages.
+The adopted `wx`-plus-unknown-owner protocol (D6), ownership-token release, host
+recording, unknown-record conservatism, recovery hints in both contention
+messages including the empty-lock case, and the shared-data-directory note in
+`docs/security.md`.
 
 Acceptance: D5 and D6 no longer reproduce; `file-lock.ts` branch coverage above
 80%.
@@ -543,6 +631,12 @@ repository.
 - injected apply failure and injected removal failure each leave a reloaded
   checkpoint status of `completed` with the matching failure outcome and exit
   code `1`;
+- interactive `apply-refused` leaves the exit code unchanged while
+  non-interactive `apply-refused` exits `1`, and exit code `1` wins over the
+  `--require-agreement` code `2`;
+- each version 3 cross-field invariant rejected individually, including a
+  `completion` record on a non-`completed` status and a `discarded` outcome that
+  still names a workspace;
 - a run left by a declined completion can still be discarded through
   `discardRunWorkspace`, which is the durable consequence of D1;
 - `--on-complete` parsing, defaults, TTY interaction, and runtime rejection for
@@ -565,13 +659,23 @@ repository.
 - lock records: a 0-byte or malformed record is never treated as stale; a
   foreign-host record is never removed; a local record whose PID is gone is
   removed; `release` after another process took over does not unlink the new
-  holder's lock; both contention messages name the lock path.
+  holder's lock; both contention messages name the lock path, and the empty-lock
+  message names that case specifically.
 
 ### Concurrency
 
-D6 needs a test that two `acquireFileLock` calls racing on the same path
-produce exactly one holder. It runs in-process against a temporary directory
-with no providers and no network.
+D6 needs a test proving that two acquirers cannot both hold the same path.
+Codex is right that a probabilistic race is not adequate evidence, and it is
+not needed: the boundary between claiming the path and writing the record is
+directly controllable. The test creates the 0-byte lock, holds it open, and
+calls `acquireFileLock` while the record is deliberately unwritten — the exact
+state reproduced against `main` — then asserts the second call is refused.
+
+A second case runs the same sequence in the opposite order to prove the first
+holder's `release` does not unlink a successor's lock.
+
+Both run in-process against a temporary directory with no providers, no network,
+and no timing dependence.
 
 ### PTY
 
@@ -612,10 +716,12 @@ Phase 4 is complete when:
    unknown or foreign-host record is never removed automatically. Lock
    contention names the lock path and a recovery step.
 10. Run state version 3 ships with type, validator, schema, migration, and
-    fixtures changed together, and version 1 and 2 checkpoints still load.
-11. `artifacts.ts` line coverage above 90%; `file-lock.ts` branch coverage above
+    fixtures changed together; every cross-field invariant is enforced at
+    runtime; and version 1 and 2 checkpoints still load.
+11. An impossible `--on-complete` is rejected before any provider call.
+12. `artifacts.ts` line coverage above 90%; `file-lock.ts` branch coverage above
     80%.
-12. `npm run check`, `npm run test:pty`, `npm run test:coverage`, and
+13. `npm run check`, `npm run test:pty`, `npm run test:coverage`, and
     `npm pack --dry-run` pass.
 
 ## Relationship to Phase 3
@@ -649,16 +755,51 @@ simultaneously, reproduced directly. D7 records that patch artifacts bypass
 `filesystem.ts` and can be left truncated at their final path, which is what
 made revision 1's "a patch exists" rule unsound in the first place.
 
+**Revision 3** resolves Codex's review of revision 2.
+
+The blocking item was real: revision 2 asked for atomic publication of the lock
+record while keeping `open(path, 'wx')` on the final name, which is not
+implementable — the first requirement creates the empty-file window and the
+second forbids the rename that would close it. Adopted Codex's recommended
+protocol: exclusivity stays with `wx`, and an empty or malformed record is read
+as an occupied lock with an unknown owner. Exclusive `link()` publication is
+recorded as a rejected alternative with its cross-platform caveat rather than
+left as an unstated assumption. The D6 test is now deterministic at the
+claim/write boundary instead of probabilistic.
+
+Also accepted: non-interactive `apply-refused` must exit non-zero, with
+completion exit code `1` taking precedence over the agreement-cap code `2`;
+`--on-complete` validation moves to [cli.ts:150](../src/cli.ts#L150)–
+[162](../src/cli.ts#L162), before any provider call, with a zero-provider-call
+assertion; version 3 gains six runtime cross-field invariants; and the
+empty-workspace proof uses a full `createPatch`.
+
+Two corrections to revision 2's own text. The claim that unknown legacy locks
+"only exist until the next successful acquisition" was backwards — such a lock
+_prevents_ that acquisition until its owner releases it or an operator removes
+it. And "new records are ignored safely by older versions" holds only on a
+single host, since an older binary reads `pid` while ignoring `host`; the
+requirement that all installations sharing a data directory be upgraded
+together is now stated and routed to `docs/security.md`.
+
+One consequence surfaced while accepting invariant 1 of the version 3
+cross-field rules. `discardRunWorkspace` accepts `cancelled` runs, so a
+run-management discard that wrote a `completion` record would produce a
+checkpoint failing its own validator. Resolved by scoping `completion` to the
+run's own completion step; run management never writes it.
+
 ## Questions for review
 
-1. The unknown-record lock rule trades automatic recovery from crashed
-   pre-Phase-4 processes for cross-host safety. Slice 7 states the mitigation
-   is a recovery message. Confirm that is the right trade in the mixed-version
-   case described, where an older install keeps writing host-less records.
-2. `apply-failed` sets exit code `1` while the checkpoint stays `completed`.
-   That combination is deliberate but unusual; confirm it reads correctly to a
-   script that checks exit status.
-3. Whether the empty-workspace exception in the preservation rule should
-   require the fresh inspection to be a full `createPatch` returning "no
-   changes", or may use the cheaper `workingTreeStatus`. This contract assumes
-   the former, for consistency with what the patch would have captured.
+None blocking. Revision 3 adopts every recommendation from the revision 2
+review, and the two open items it raised are recorded as decisions rather than
+questions:
+
+1. The empty-lock residual — a process killed between claiming the path and
+   writing its record leaves a lock that no longer self-heals. Accepted
+   knowingly in exchange for guaranteed mutual exclusion, mitigated by naming
+   that case explicitly in the recovery message, with `link()` publication as
+   the documented escape hatch.
+2. Scoping `completion` to the run's own completion step, which follows from
+   the cross-field invariants rather than being an independent choice.
+
+Ready for slice 1 on approval.
