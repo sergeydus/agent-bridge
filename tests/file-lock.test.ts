@@ -559,13 +559,8 @@ test(
   async () => {
     await withDirectory(async (directory) => {
       const path = join(directory, 'r.lock');
-      const original = `${JSON.stringify({
-        pid: 999_999,
-        host: hostname(),
-        token: 'departed',
-        createdAt: '2026-08-11T00:00:00.000Z',
-      })}\n`;
-      await writeFile(path, original, { mode: 0o600 });
+      const original = `${JSON.stringify(STALE)}\n`;
+      await seedLockText(path, original);
 
       await assert.rejects(
         acquireFileLock({ path, activeMessage: ACTIVE }),
@@ -577,7 +572,7 @@ test(
         },
       );
 
-      assert.equal(await readFile(path, 'utf8'), original);
+      assert.equal(await readFile(ownerPath(path), 'utf8'), original);
       assert.equal(await exists(join(path, MARKER)), false);
     });
   },
@@ -589,13 +584,8 @@ test(
   async () => {
     await withDirectory(async (directory) => {
       const path = join(directory, 'r.lock');
-      const original = `${JSON.stringify({
-        pid: 999_999,
-        host: hostname(),
-        token: 'departed',
-        createdAt: '2026-08-11T00:00:00.000Z',
-      })}\n`;
-      await writeFile(path, original, { mode: 0o600 });
+      const original = `${JSON.stringify(STALE)}\n`;
+      await seedLockText(path, original);
 
       const results = await Promise.allSettled(
         Array.from({ length: 32 }, () =>
@@ -607,7 +597,7 @@ test(
         results.filter((result) => result.status === 'fulfilled').length,
         0,
       );
-      assert.equal(await readFile(path, 'utf8'), original);
+      assert.equal(await readFile(ownerPath(path), 'utf8'), original);
     });
   },
 );
