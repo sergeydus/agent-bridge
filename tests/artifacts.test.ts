@@ -75,10 +75,12 @@ async function withFixture(
     await execute('git', ['add', 'tracked.txt'], { cwd: repository });
     await execute('git', ['commit', '-m', 'initial'], { cwd: repository });
 
+    const baseRevision = await currentCommit(repository);
     const workspace = await createIsolatedWorktree({
       repository,
       runsDirectory: join(root, 'runs'),
       runId: 'run',
+      revision: baseRevision,
     });
     if (edit) {
       await writeFile(join(workspace, 'tracked.txt'), 'after\n');
@@ -88,7 +90,7 @@ async function withFixture(
       repository,
       workspace,
       patchPath: join(root, 'run.patch'),
-      baseRevision: await currentCommit(repository),
+      baseRevision,
       reporter: new ProgressReporter({ silent: true }),
     });
   } finally {
@@ -1115,6 +1117,93 @@ test('a legacy run is refused a discard without being asked to confirm it', asyn
     assert.equal(result.workspace, fixture.workspace);
     // Asking to confirm a removal that will not happen would be misleading.
     assert.equal(prompt.questions.length, 1);
+    assert.equal(await exists(fixture.workspace), true);
+  });
+});
+
+test('an uninspectable history refuses removal instead of escaping', async () => {
+  await withFixture(async (fixture) => {
+    // A tree object: Git can diff against it, so the patch is written, but it
+    // is not a commit and every history question against it fails.
+    const treeRevision = (
+      await execute('git', ['rev-parse', `${fixture.baseRevision}^{tree}`], {
+        cwd: fixture.repository,
+      })
+    ).stdout.trim();
+
+    const plan = await planWorkspaceRemoval({
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: treeRevision,
+      interactive: true,
+    });
+
+    assert.equal(plan.removable, false);
+    assert.equal(plan.removable === false && plan.outcome, 'discard-failed');
+    assert.match(
+      plan.removable === false ? plan.reason : '',
+      /history could not be inspected/,
+    );
+    // The refreshed patch is named, because it is where the work now lives.
+    assert.match(
+      plan.removable === false ? plan.reason : '',
+      new RegExp(
+        `A complete patch is at ${fixture.patchPath.replace(/[.]/g, '\\.')}`,
+      ),
+    );
+    assert.equal(await exists(fixture.workspace), true);
+    assert.equal(await exists(fixture.patchPath), true);
+  });
+});
+
+test('an uninspectable history is persisted as a completion outcome', async () => {
+  await withFixture(async (fixture) => {
+    const treeRevision = (
+      await execute('git', ['rev-parse', `${fixture.baseRevision}^{tree}`], {
+        cwd: fixture.repository,
+      })
+    ).stdout.trim();
+    const store = new RunStateStore(join(fixture.root, 'state'));
+    const base = savedRunFixture({
+      originalCwd: fixture.repository,
+      agentCwd: fixture.workspace,
+      workspace: fixture.workspace,
+      outputDirectory: fixture.root,
+      baseRevision: treeRevision,
+    });
+
+    const result = await recordRunCompletion({
+      markCompleted: () => store.save(base).then(() => undefined),
+      finish: () =>
+        finishIsolatedRun({
+          repository: fixture.repository,
+          workspace: fixture.workspace,
+          patchPath: fixture.patchPath,
+          baseRevision: treeRevision,
+          reporter: fixture.reporter,
+          createPrompt: () => scriptedPrompt(['3']),
+        }),
+      recordOutcome: async (finished) => {
+        await store.save({
+          ...base,
+          completion: {
+            outcome: finished.outcome,
+            recordedAt: '2026-08-11T00:00:01.000Z',
+            reason: finished.reason,
+          },
+        });
+      },
+      reporter: fixture.reporter,
+    });
+
+    assert.equal(result?.outcome, 'discard-failed');
+    const reloaded = await store.load(base.id);
+    assert.equal(reloaded.status, 'completed');
+    assert.equal(reloaded.completion?.outcome, 'discard-failed');
+    assert.match(
+      reloaded.completion?.reason ?? '',
+      /history could not be inspected/,
+    );
     assert.equal(await exists(fixture.workspace), true);
   });
 });

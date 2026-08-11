@@ -413,11 +413,19 @@ continue from its actual state instead of repeating changes blindly.`;
       !options.dryRun &&
       repository
     ) {
+      if (!baseRevision) {
+        throw new Error(
+          'An isolated workspace needs a recorded base revision and none was captured.',
+        );
+      }
       reporter.phase('Creating an isolated Git workspace');
       workspace = await createIsolatedWorktree({
         repository,
         runsDirectory: options.output,
         runId,
+        // The recorded baseline, not symbolic HEAD: the workspace must start
+        // at the exact commit every later decision is measured against.
+        revision: baseRevision,
       });
       options.cwd = workspace;
       task +=

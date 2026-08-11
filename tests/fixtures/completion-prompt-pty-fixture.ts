@@ -35,6 +35,7 @@ async function main(): Promise<void> {
       repository,
       runsDirectory: join(root, 'runs'),
       runId: 'pty-run',
+      revision: await currentCommit(repository),
     });
     await writeFile(join(workspace, 'tracked.txt'), 'after\n');
 

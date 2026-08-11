@@ -73,6 +73,7 @@ test('isolates edits and exports tracked and untracked files as a patch', async 
       repository,
       runsDirectory,
       runId: 'test-run',
+      revision: await currentCommit(repository),
     });
     await writeFile(join(workspace, 'tracked.txt'), 'after\n');
     await writeFile(join(workspace, 'new.txt'), 'new file\n');
@@ -158,6 +159,7 @@ test('a patch is published atomically or not at all', async () => {
       repository,
       runsDirectory: join(root, 'runs'),
       runId: 'atomic',
+      revision: await currentCommit(repository),
     });
     await writeFile(join(workspace, 'tracked.txt'), 'after\n');
     const destination = join(root, 'atomic.patch');
@@ -197,6 +199,7 @@ test('an empty capture removes a stale patch instead of leaving it current', asy
       repository,
       runsDirectory: join(root, 'runs'),
       runId: 'stale',
+      revision: await currentCommit(repository),
     });
     const destination = join(root, 'stale.patch');
     const baseRevision = await currentCommit(repository);
@@ -228,6 +231,7 @@ test('a workspace commit is unanchored until a branch or tag contains it', async
       repository,
       runsDirectory: join(root, 'runs'),
       runId: 'anchor',
+      revision: await currentCommit(repository),
     });
     await writeFile(join(workspace, 'tracked.txt'), 'after\n');
     await execute('git', ['commit', '--all', '-m', 'inside'], {
@@ -261,6 +265,7 @@ test('a workspace that left its base behind is reported as diverged', async () =
       repository,
       runsDirectory: join(root, 'runs'),
       runId: 'diverge',
+      revision: await currentCommit(repository),
     });
 
     // An unrelated root commit: the base is not an ancestor of it.
@@ -286,7 +291,7 @@ test('a workspace that left its base behind is reported as diverged', async () =
   }
 });
 
-test('a fingerprint against a fixed base moves when an agent commits', async () => {
+test('a fingerprint against a fixed base survives an agent committing', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-bridge-fingerprint-'));
   try {
     const repository = await initializeFixtureRepository(root);
@@ -295,6 +300,7 @@ test('a fingerprint against a fixed base moves when an agent commits', async () 
       repository,
       runsDirectory: join(root, 'runs'),
       runId: 'fingerprint',
+      revision: await currentCommit(repository),
     });
 
     const clean = await workspaceFingerprint({ workspace, baseRevision });
@@ -302,14 +308,45 @@ test('a fingerprint against a fixed base moves when an agent commits', async () 
     const edited = await workspaceFingerprint({ workspace, baseRevision });
     assert.notEqual(edited, clean);
 
-    // D8: committing used to move HEAD with the fingerprint, so an agent could
-    // commit its work and the workspace would look unchanged.
+    // D8: committing moved HEAD with the fingerprint, so the edit disappeared
+    // and the workspace looked identical to its clean state again. Against a
+    // fixed base the fingerprint stays at its edited value instead.
     await execute('git', ['commit', '--all', '-m', 'inside'], {
       cwd: workspace,
     });
     const committed = await workspaceFingerprint({ workspace, baseRevision });
     assert.equal(committed, edited);
     assert.notEqual(committed, clean);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a workspace starts at the recorded revision, not at a moved HEAD', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-revision-'));
+  try {
+    const repository = await initializeFixtureRepository(root);
+    const recorded = await currentCommit(repository);
+
+    // The source branch advances between recording the baseline and creating
+    // the workspace, which is exactly what symbolic HEAD would have followed.
+    await writeFile(join(repository, 'later.txt'), 'moved on\n');
+    await execute('git', ['add', '--all'], { cwd: repository });
+    await execute('git', ['commit', '-m', 'source moved'], { cwd: repository });
+    assert.notEqual(await currentCommit(repository), recorded);
+
+    const workspace = await createIsolatedWorktree({
+      repository,
+      runsDirectory: join(root, 'runs'),
+      runId: 'pinned',
+      revision: recorded,
+    });
+
+    assert.equal(await currentCommit(workspace), recorded);
+    await assert.rejects(
+      () => readFile(join(workspace, 'later.txt'), 'utf8'),
+      /ENOENT/,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

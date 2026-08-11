@@ -211,6 +211,7 @@ test('run management refuses to remove a workspace holding unanchored commits', 
       repository,
       runsDirectory: join(root, 'runs'),
       runId: 'gate-run',
+      revision: await currentCommit(repository),
     });
     await writeFile(join(workspace, 'tracked.txt'), 'after\n');
     await execute('git', ['commit', '--all', '-m', 'inside'], {
@@ -272,6 +273,7 @@ test('run management removes a workspace once its history is anchored', async ()
       repository,
       runsDirectory: join(root, 'runs'),
       runId: 'anchored-run',
+      revision: await currentCommit(repository),
     });
     await writeFile(join(workspace, 'tracked.txt'), 'after\n');
     await execute('git', ['commit', '--all', '-m', 'inside'], {

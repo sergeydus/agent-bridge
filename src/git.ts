@@ -65,18 +65,27 @@ export async function repositoryHasHead(cwd: string): Promise<boolean> {
   return result.exitCode === 0;
 }
 
+/**
+ * Creates the workspace at an explicit revision rather than at symbolic `HEAD`.
+ * The caller records a baseline before this runs, and every later patch, apply,
+ * and removal decision is made against it; resolving `HEAD` again here would
+ * let the source move in between and silently build the workspace from a
+ * different commit than the one recorded.
+ */
 export async function createIsolatedWorktree({
   repository,
   runsDirectory,
   runId,
+  revision,
 }: {
   repository: string;
   runsDirectory: string;
   runId: string;
+  revision: string;
 }): Promise<string> {
   const workspace = join(runsDirectory, 'workspaces', runId);
   await mkdir(dirname(workspace), { recursive: true, mode: 0o700 });
-  await execute('git', ['worktree', 'add', '--detach', workspace, 'HEAD'], {
+  await execute('git', ['worktree', 'add', '--detach', workspace, revision], {
     cwd: repository,
   });
   return workspace;

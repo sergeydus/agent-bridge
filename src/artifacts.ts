@@ -227,12 +227,30 @@ export async function planWorkspaceRemoval({
     };
   }
 
-  const history = await describeCommitsSinceBase({ workspace, baseRevision });
-  // Only commits made inside the workspace are at stake; on the normal path
-  // HEAD still equals the base and none of this engages.
-  const anchored =
-    history.head === baseRevision ||
-    (await isCommitAnchored({ workspace, revision: history.head }));
+  let history: Awaited<ReturnType<typeof describeCommitsSinceBase>>;
+  let anchored: boolean;
+  try {
+    history = await describeCommitsSinceBase({ workspace, baseRevision });
+    // Only commits made inside the workspace are at stake; on the normal path
+    // HEAD still equals the base and none of this engages.
+    anchored =
+      history.head === baseRevision ||
+      (await isCommitAnchored({ workspace, revision: history.head }));
+  } catch (error) {
+    // Unable to tell whether removal would drop the last reference to any
+    // commit, so removal is refused. The patch above may already have been
+    // refreshed, and saying where it is makes the refusal actionable.
+    return {
+      removable: false,
+      outcome: 'discard-failed',
+      reason: boundedCompletionReason(
+        'The workspace was kept because its history could not be inspected ' +
+          `against the recorded base revision: ${errorMessage(error)}` +
+          (patchCreated ? ` A complete patch is at ${patchPath}.` : '') +
+          ` Workspace: ${workspace}`,
+      ),
+    };
+  }
   if (!anchored && !interactive) {
     return {
       removable: false,

@@ -1,6 +1,6 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 8, approved; slices 1 to 3 implemented
+Status: Contract revision 9, approved; slices 1 to 4 implemented
 
 Target release: 0.7.0
 
@@ -506,10 +506,13 @@ from the workspace's `HEAD`:
   required rather than defaulted forces every call site to state its intent,
   which is what the current implicit `HEAD` failed to do.
 
-This changes `workspaceFingerprint` semantics, and the change is the point: a
-fingerprint taken against a fixed base now moves when an agent commits, where
-today it does not. Cycle-to-cycle comparison stays valid because the baseline
-is stable across a run.
+This changes `workspaceFingerprint` semantics, and the change is the point.
+Against the moving `HEAD`, committing an edit returned the fingerprint to its
+clean value: the work was still there, but the workspace looked untouched.
+Against a fixed base the fingerprint keeps the value the edit gave it, so
+committed and uncommitted work are indistinguishable to the comparison — which
+is what it needs. Cycle-to-cycle comparison stays valid because the baseline is
+stable across a run.
 
 A run with no recorded `baseRevision` cannot be proven safe to discard. Removal
 is refused for those runs with a message pointing at the retained workspace.
@@ -560,6 +563,18 @@ assumption — so the message distinguishes the two cases with
   claim a commit count.
 
 None of this engages on the normal path, where `HEAD` equals `baseRevision`.
+
+#### The workspace starts where the baseline says (D10)
+
+Codex found during slice 4 review that the recorded baseline and the workspace
+were not guaranteed to be the same commit. `cli.ts` records the source revision,
+then `createIsolatedWorktree` ran `git worktree add --detach <path> HEAD`,
+resolving `HEAD` a second time. Reproduced directly: recorded `A`, advanced the
+source to `B`, and the workspace was created at `B` while every later patch,
+apply, and removal decision measured against `A`.
+
+`createIsolatedWorktree` now requires an explicit revision and is given the
+recorded baseline, so the workspace is pinned to the commit the run wrote down.
 
 #### Baseline provenance (D9)
 
@@ -1146,6 +1161,23 @@ thing — known operational failures become outcomes inside the completion step,
 and an unexpected post-boundary throw fabricates nothing. Prompt construction
 and use are named as inside the completion step, since "somewhere else" was
 wrong.
+
+**Revision 9** records D10 and two slice 4 boundary corrections.
+
+Codex reproduced both against the slice 4 implementation. D10 is the workspace
+baseline mismatch above. The second is that `planWorkspaceRemoval` guarded
+patch creation but not the history inspection that follows it: a `baseRevision`
+naming a tree object lets the patch succeed and then makes
+`git merge-base --is-ancestor` exit 128, so the gate threw instead of returning
+an outcome — and the persisted-state validator accepts that input, because
+`baseRevision` is any string. Both history checks are inside the guard now and
+return a bounded `discard-failed` that names the refreshed patch.
+
+The fingerprint description was also wrong in the same direction as the fix.
+Against a moving `HEAD` a commit returned the fingerprint to its clean value;
+the property is that a fixed base keeps the edited value, not that the
+fingerprint "moves when an agent commits". The test always asserted the correct
+property.
 
 ## Questions for review
 
