@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline/promises';
 import {
   applyPatch,
   canApplyPatch,
+  countPatchedFiles,
   createPatch,
   currentCommit,
   describeCommitsSinceBase,
@@ -303,24 +304,51 @@ export async function planWorkspaceRemoval({
  * undo. Counts are reported rather than paths, because compact output does not
  * expose project paths by default.
  */
-async function dirtyCheckoutRefusalReason(
+async function describeDirtyCheckout(
   repository: string,
-): Promise<string | undefined> {
+): Promise<{ changed: number; untracked: number } | undefined> {
   const summary = summarizePorcelainStatus(
     await workingTreeStatus({ cwd: repository }),
   );
   // Unique tracked files, not status flags: one file that is both staged and
   // modified is one file the user would have to reconcile.
-  const dirty = summary.files.length - summary.untrackedFiles;
-  if (dirty === 0 && summary.untrackedFiles === 0) {
-    return undefined;
-  }
-  return boundedCompletionReason(
-    'The original checkout has uncommitted work ' +
-      `(${dirty} changed, ${summary.untrackedFiles} untracked), and applying ` +
-      "unattended would mix it with the agents' changes. The patch was not " +
-      'applied. Commit or stash that work, or apply interactively.',
-  );
+  const changed = summary.files.length - summary.untrackedFiles;
+  return changed === 0 && summary.untrackedFiles === 0
+    ? undefined
+    : { changed, untracked: summary.untrackedFiles };
+}
+
+async function dirtyCheckoutRefusalReason(
+  repository: string,
+): Promise<string | undefined> {
+  const dirty = await describeDirtyCheckout(repository);
+  return dirty
+    ? boundedCompletionReason(
+        'The original checkout has uncommitted work ' +
+          `(${dirty.changed} changed, ${dirty.untracked} untracked), and ` +
+          "applying unattended would mix it with the agents' changes. The " +
+          'patch was not applied. Commit or stash that work, or apply ' +
+          'interactively.',
+      )
+    : undefined;
+}
+
+/**
+ * What an interactive user must be told before authorizing an apply into their
+ * own uncommitted work. Counts rather than paths, because compact output does
+ * not expose project paths by default.
+ */
+async function dirtyCheckoutDisclosure(
+  repository: string,
+): Promise<string | undefined> {
+  const dirty = await describeDirtyCheckout(repository);
+  return dirty
+    ? `The original checkout already has uncommitted work: ${dirty.changed} ` +
+        `changed file${dirty.changed === 1 ? '' : 's'} and ${dirty.untracked} ` +
+        `untracked file${dirty.untracked === 1 ? '' : 's'}. Applying now mixes ` +
+        "the agents' changes into it, and Agent Bridge never commits or " +
+        'stages, so there is no undo.'
+    : undefined;
 }
 
 /**
@@ -339,6 +367,7 @@ export async function finishIsolatedRun({
   createPrompt = createTerminalCompletionPrompt,
   apply = applyPatch,
   removeWorkspace = removeIsolatedWorktree,
+  countFiles = countPatchedFiles,
 }: {
   repository: string;
   workspace: string;
@@ -350,6 +379,7 @@ export async function finishIsolatedRun({
   createPrompt?: () => CompletionPrompt | undefined;
   apply?: typeof applyPatch;
   removeWorkspace?: typeof removeIsolatedWorktree;
+  countFiles?: typeof countPatchedFiles;
 }): Promise<CompletionResult> {
   // Capturing a patch is non-destructive, so a derived baseline may serve a
   // resumed run that recorded none. Applying and removing may not: those read
@@ -384,8 +414,9 @@ export async function finishIsolatedRun({
   reporter.success(`Saved a portable patch to ${patchPath}`);
 
   const applyToCheckout = async (
-    interactive: boolean,
+    confirmDirty?: (disclosure: string) => Promise<'yes' | 'no' | 'unanswered'>,
   ): Promise<CompletionResult> => {
+    const interactive = confirmDirty !== undefined;
     let refusalReason: string | undefined;
     try {
       // A disclosure printed to a process nobody is watching authorizes
@@ -418,16 +449,56 @@ export async function finishIsolatedRun({
         ...(interactive ? {} : { refusedInstruction: true }),
       };
     }
+    if (confirmDirty) {
+      // The user authorizes applying into their own uncommitted work only
+      // after being told it is there, so the disclosure is part of the
+      // question rather than something printed before it.
+      const disclosure = await dirtyCheckoutDisclosure(repository);
+      if (disclosure) {
+        const answer = await confirmDirty(disclosure);
+        if (answer === 'unanswered') {
+          return { outcome: 'declined', patchPath, workspace };
+        }
+        if (answer === 'no') {
+          return { outcome: 'kept', patchPath, workspace };
+        }
+      }
+    }
+    // Counted before applying: --numstat only parses the patch, and doing it
+    // first keeps a counting failure away from the applied state.
+    let touched: number | undefined;
+    try {
+      touched = await countFiles({ repository, patchPath });
+    } catch (error) {
+      // The count is a convenience, not a gate, so it must not block the
+      // apply — but it is reported rather than silently dropped, because a
+      // silent fallback here hides a broken command behind a vaguer message.
+      touched = undefined;
+      reporter.warning(
+        boundedCompletionReason(
+          `The applied file count is unavailable: ${errorMessage(error)}`,
+        ),
+      );
+    }
     try {
       await apply({ repository, patchPath });
     } catch (error) {
       const reason = boundedCompletionReason(
-        `The patch could not be applied: ${errorMessage(error)}`,
+        `The patch could not be applied: ${errorMessage(error)} ` +
+          `The patch is still at ${patchPath} and the isolated workspace was ` +
+          `kept at ${workspace}. Nothing was staged or committed. Inspect the ` +
+          'checkout with `git status`, resolve what blocked the apply, then ' +
+          `retry with \`git apply ${patchPath}\`.`,
       );
       reporter.warning(reason);
       return { outcome: 'apply-failed', reason, patchPath, workspace };
     }
-    reporter.success('Applied the patch to the original checkout.');
+    reporter.success(
+      touched === undefined
+        ? 'Applied the patch to the original checkout.'
+        : `Applied the patch to the original checkout: ${touched} file${touched === 1 ? '' : 's'} changed. ` +
+            'They are unstaged, so `git diff` separates them from your own work.',
+    );
     return { outcome: 'applied', patchPath, workspace, applied: true };
   };
 
@@ -462,7 +533,13 @@ export async function finishIsolatedRun({
       await removeWorkspace({ repository, workspace });
     } catch (error) {
       const reason = boundedCompletionReason(
-        `The isolated workspace could not be removed: ${errorMessage(error)}`,
+        `The isolated workspace could not be removed: ${errorMessage(error)} ` +
+          `It is still at ${workspace} with its work intact` +
+          (plan.patchPath
+            ? `, and a complete patch is at ${plan.patchPath}`
+            : '') +
+          '. Close anything using that directory, then remove it with ' +
+          '`agent-bridge --discard-workspace <run-id>`.',
       );
       reporter.warning(reason);
       return {
@@ -480,7 +557,7 @@ export async function finishIsolatedRun({
     return { outcome: 'kept', patchPath, workspace };
   }
   if (instruction === 'apply') {
-    return applyToCheckout(false);
+    return applyToCheckout();
   }
   if (instruction === 'discard') {
     // The flag is itself the explicit instruction, so there is nothing left to
@@ -503,7 +580,18 @@ export async function finishIsolatedRun({
       return { outcome: 'declined', patchPath, workspace };
     }
     if (choice === '2') {
-      return await applyToCheckout(true);
+      return await applyToCheckout(async (disclosure) => {
+        const confirmed = await askForChoice(prompt, {
+          question: `${disclosure}\nApply the patch anyway? [y/N]: `,
+          retryQuestion: 'Apply the patch anyway? [y/N]: ',
+          choices: ['y', 'yes', 'n', 'no'],
+          defaultChoice: 'n',
+        });
+        if (confirmed === undefined) {
+          return 'unanswered';
+        }
+        return ['y', 'yes'].includes(confirmed) ? 'yes' : 'no';
+      });
     }
     if (choice === '3') {
       return await removeAfterConfirmation(async (plan) => {

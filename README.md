@@ -344,6 +344,17 @@ creates a binary-safe patch and offers to:
   and `git apply --check` succeeds; or
 - explicitly discard the registered isolated worktree.
 
+If the original checkout already holds uncommitted work, applying says so
+first — how many files are changed and how many are untracked — and asks
+before touching anything, because afterwards the agents' changes and yours are
+mixed together with no undo. A successful apply reports how many files it
+changed and leaves them unstaged, so `git diff` still separates them from your
+own work.
+
+When applying or removing fails, the message says where the patch and the
+workspace are, that nothing was staged or committed, and the command to try
+next.
+
 Agent Bridge never commits, stages, resets, or silently discards project
 changes.
 

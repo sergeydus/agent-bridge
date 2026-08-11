@@ -258,9 +258,10 @@ export async function currentCommit(cwd: string): Promise<string> {
 }
 
 /**
- * Fingerprints a workspace against a fixed baseline. Taken against the base
- * rather than the moving `HEAD`, the fingerprint changes when an agent commits,
- * which is exactly the change an implicit `HEAD` was hiding.
+ * Fingerprints a workspace against a fixed baseline. Against the moving `HEAD`,
+ * committing an edit returned the fingerprint to its clean value; against a
+ * fixed base it keeps the value the edit gave it, so committed and uncommitted
+ * work compare the same.
  */
 export async function workspaceFingerprint({
   workspace,
@@ -290,6 +291,24 @@ export async function canApplyPatch({
     { cwd: repository, allowedExitCodes: [0, 1] },
   );
   return result.exitCode === 0;
+}
+
+/**
+ * How many files a patch touches, without applying it. Reported after a
+ * successful apply so agent changes stay distinguishable from the user's own
+ * while the two are still separable in memory.
+ */
+export async function countPatchedFiles({
+  repository,
+  patchPath,
+}: {
+  repository: string;
+  patchPath: string;
+}): Promise<number> {
+  const result = await execute('git', ['apply', '--numstat', patchPath], {
+    cwd: repository,
+  });
+  return result.stdout.split('\n').filter((line) => line.trim() !== '').length;
 }
 
 export async function applyPatch({

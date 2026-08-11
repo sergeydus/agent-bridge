@@ -22,6 +22,7 @@ import {
   currentCommit,
   describeCommitsSinceBase,
   execute,
+  countPatchedFiles,
   isCommitAnchored,
   workspaceFingerprint,
   initializeRepository,
@@ -345,6 +346,37 @@ test('a workspace starts at the recorded revision, not at a moved HEAD', async (
     assert.equal(await currentCommit(workspace), recorded);
     await assert.rejects(
       () => readFile(join(workspace, 'later.txt'), 'utf8'),
+      /ENOENT/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a patch reports the number of files it touches without applying it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-numstat-'));
+  try {
+    const repository = await initializeFixtureRepository(root);
+    const baseRevision = await currentCommit(repository);
+    const workspace = await createIsolatedWorktree({
+      repository,
+      runsDirectory: join(root, 'runs'),
+      runId: 'numstat',
+      revision: baseRevision,
+    });
+    await writeFile(join(workspace, 'tracked.txt'), 'after\n');
+    await writeFile(join(workspace, 'added.txt'), 'new\n');
+    const patchPath = join(root, 'numstat.patch');
+    await createPatch({ workspace, destination: patchPath, baseRevision });
+
+    assert.equal(await countPatchedFiles({ repository, patchPath }), 2);
+    // Counting must not be an apply in disguise.
+    assert.equal(
+      await readFile(join(repository, 'tracked.txt'), 'utf8'),
+      'before\n',
+    );
+    await assert.rejects(
+      () => readFile(join(repository, 'added.txt'), 'utf8'),
       /ENOENT/,
     );
   } finally {

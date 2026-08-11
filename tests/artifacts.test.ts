@@ -1336,6 +1336,7 @@ test("unattended apply refuses a checkout holding the user's own work", async ()
 test('interactive apply into a dirty checkout remains available', async () => {
   await withFixture(async (fixture) => {
     await writeFile(join(fixture.repository, 'notes.md'), 'untracked\n');
+    const prompt = scriptedPrompt(['2', 'y']);
 
     const result = await finishIsolatedRun({
       repository: fixture.repository,
@@ -1343,12 +1344,21 @@ test('interactive apply into a dirty checkout remains available', async () => {
       patchPath: fixture.patchPath,
       baseRevision: fixture.baseRevision,
       reporter: fixture.reporter,
-      createPrompt: () => scriptedPrompt(['2']),
+      createPrompt: () => prompt,
     });
 
     // The user is present and answered; only unattended application refuses.
     assert.equal(result.outcome, 'applied');
     assert.equal(result.refusedInstruction, undefined);
+    // D3: the state being applied into is disclosed before the answer, not
+    // after it, and in counts rather than paths.
+    assert.match(prompt.questions[1] ?? '', /0 changed files? and 1 untracked/);
+    assert.match(prompt.questions[1] ?? '', /there is no undo/);
+    assert.equal((prompt.questions[1] ?? '').includes('notes.md'), false);
+    assert.match(
+      prompt.questions[1] ?? '',
+      /Apply the patch anyway\? \[y\/N\]: $/,
+    );
     assert.equal(
       await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'),
       'after\n',
@@ -1446,5 +1456,169 @@ test('an interactive apply still reports an overlapping conflict as one', async 
     // obstacle to the apply they asked for.
     assert.equal(result.outcome, 'apply-refused');
     assert.match(result.reason ?? '', /conflicts with the original checkout/);
+  });
+});
+
+test('a clean checkout is applied into without an extra question', async () => {
+  await withFixture(async (fixture) => {
+    const prompt = scriptedPrompt(['2']);
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      reporter: fixture.reporter,
+      createPrompt: () => prompt,
+    });
+
+    // There is nothing to disclose, so nothing extra is asked.
+    assert.equal(result.outcome, 'applied');
+    assert.equal(prompt.questions.length, 1);
+  });
+});
+
+test('declining the disclosure leaves the checkout untouched', async () => {
+  await withFixture(async (fixture) => {
+    await writeFile(join(fixture.repository, 'notes.md'), 'untracked\n');
+    const prompt = scriptedPrompt(['2', 'n']);
+
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      reporter: fixture.reporter,
+      createPrompt: () => prompt,
+    });
+
+    assert.equal(result.outcome, 'kept');
+    assert.equal(result.workspace, fixture.workspace);
+    assert.equal(
+      await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'),
+      'before\n',
+    );
+  });
+});
+
+test('an unanswered disclosure is declined rather than applied', async () => {
+  await withFixture(async (fixture) => {
+    await writeFile(join(fixture.repository, 'notes.md'), 'untracked\n');
+
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      reporter: fixture.reporter,
+      createPrompt: () => scriptedPrompt(['2', undefined]),
+    });
+
+    assert.equal(result.outcome, 'declined');
+    assert.equal(
+      await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'),
+      'before\n',
+    );
+  });
+});
+
+test('a successful apply reports how many files it touched', async () => {
+  await withFixture(async (fixture) => {
+    await writeFile(join(fixture.workspace, 'second.txt'), 'also new\n');
+    const messages: string[] = [];
+    const reporter = new ProgressReporter({ silent: true });
+    reporter.success = (message: string) => messages.push(message);
+
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'apply',
+      reporter,
+      createPrompt: () => undefined,
+    });
+
+    assert.equal(result.outcome, 'applied');
+    // Two files: the edited one and the new one.
+    assert.match(messages.at(-1) ?? '', /2 files changed/);
+    assert.match(messages.at(-1) ?? '', /git diff` separates them/);
+  });
+});
+
+test('a failed apply says where the patch is and how to retry', async () => {
+  await withFixture(async (fixture) => {
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'apply',
+      reporter: fixture.reporter,
+      createPrompt: () => undefined,
+      apply: () => Promise.reject(new Error('git apply exploded')),
+    });
+
+    // D4: the raw process error alone left the user with no next step.
+    const reason = result.reason ?? '';
+    assert.match(reason, /git apply exploded/);
+    assert.ok(reason.includes(`still at ${fixture.patchPath}`));
+    assert.ok(reason.includes(`kept at ${fixture.workspace}`));
+    assert.match(reason, /Nothing was staged or committed/);
+    assert.match(reason, /retry with/);
+    assert.equal(await exists(fixture.patchPath), true);
+  });
+});
+
+test('a failed removal says where the workspace and patch remain', async () => {
+  await withFixture(async (fixture) => {
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'discard',
+      reporter: fixture.reporter,
+      createPrompt: () => undefined,
+      removeWorkspace: () => Promise.reject(new Error('worktree is locked')),
+    });
+
+    const reason = result.reason ?? '';
+    assert.match(reason, /worktree is locked/);
+    assert.ok(reason.includes(`still at ${fixture.workspace}`));
+    assert.ok(reason.includes(`patch is at ${fixture.patchPath}`));
+    assert.match(reason, /--discard-workspace/);
+    assert.equal(await exists(fixture.workspace), true);
+  });
+});
+
+test('an unavailable file count is reported without blocking the apply', async () => {
+  await withFixture(async (fixture) => {
+    const warnings: string[] = [];
+    const reporter = new ProgressReporter({ silent: true });
+    reporter.warning = (message: string) => warnings.push(message);
+
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'apply',
+      reporter,
+      createPrompt: () => undefined,
+      countFiles: () => Promise.reject(new Error('unknown option')),
+    });
+
+    // The count is a convenience; the apply must still happen. Reporting the
+    // failure is what keeps a broken command from hiding behind a vaguer
+    // success message.
+    assert.equal(result.outcome, 'applied');
+    assert.match(
+      warnings.at(-1) ?? '',
+      /file count is unavailable: unknown option/,
+    );
+    assert.equal(
+      await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'),
+      'after\n',
+    );
   });
 });
