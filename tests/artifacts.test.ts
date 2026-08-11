@@ -1373,3 +1373,78 @@ test('an interactive refusal does not mark the run as an instruction failure', a
     assert.equal(result.refusedInstruction, undefined);
   });
 });
+
+test('overlapping dirty work is refused as dirty, not as a conflict', async () => {
+  await withFixture(async (fixture) => {
+    // The user edits the very file the agents changed. git apply --check would
+    // call this a conflict, which is true but sends them to fix the wrong
+    // thing: the actionable answer is that their own work is uncommitted.
+    await writeFile(join(fixture.repository, 'tracked.txt'), 'my own work\n');
+
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'apply',
+      reporter: fixture.reporter,
+      createPrompt: () => undefined,
+    });
+
+    assert.equal(result.outcome, 'apply-refused');
+    assert.match(
+      result.reason ?? '',
+      /uncommitted work \(1 changed, 0 untracked\)/,
+    );
+    assert.equal((result.reason ?? '').includes('conflicts with'), false);
+    assert.equal(result.refusedInstruction, true);
+    assert.equal(
+      await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'),
+      'my own work\n',
+    );
+  });
+});
+
+test('a file both staged and modified counts once', async () => {
+  await withFixture(async (fixture) => {
+    await writeFile(join(fixture.repository, 'mine.txt'), 'staged\n');
+    await execute('git', ['add', 'mine.txt'], { cwd: fixture.repository });
+    // Modified again after staging: two status flags, one file to reconcile.
+    await writeFile(join(fixture.repository, 'mine.txt'), 'and modified\n');
+
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'apply',
+      reporter: fixture.reporter,
+      createPrompt: () => undefined,
+    });
+
+    assert.match(
+      result.reason ?? '',
+      /uncommitted work \(1 changed, 0 untracked\)/,
+    );
+  });
+});
+
+test('an interactive apply still reports an overlapping conflict as one', async () => {
+  await withFixture(async (fixture) => {
+    await writeFile(join(fixture.repository, 'tracked.txt'), 'my own work\n');
+
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      reporter: fixture.reporter,
+      createPrompt: () => scriptedPrompt(['2']),
+    });
+
+    // The dirty refusal is unattended-only, so the user still learns the real
+    // obstacle to the apply they asked for.
+    assert.equal(result.outcome, 'apply-refused');
+    assert.match(result.reason ?? '', /conflicts with the original checkout/);
+  });
+});

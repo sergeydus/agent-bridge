@@ -360,13 +360,17 @@ agent-bridge --collaborative codex --task "…" --on-complete apply
 - `apply` runs the same base-revision and `git apply --check` gates. It also
   refuses a checkout that holds your own uncommitted work, because applied on
   top of it the agents' changes and yours become indistinguishable and there is
-  no undo. Commit or stash first, or apply interactively.
+  no undo. That refusal is checked before the conflict check, so overlapping
+  work is reported as uncommitted rather than as a patch conflict. Commit or
+  stash first, or apply interactively.
 - `discard` permanently removes the workspace once its work is captured to a
   patch. It skips the confirmation because the flag is itself the instruction,
   but every preservation check still applies.
 
 The flag is never saved. Resuming a run does not repeat an apply that an
-earlier invocation authorized. `apply` and `discard` are rejected before any
+earlier invocation authorized. It is rejected outright in modes that never
+reach a completion step, such as `chat` and the run-history commands, rather
+than accepted and ignored. `apply` and `discard` are rejected before any
 provider call when the run has no isolated workspace, so an impossible
 instruction costs nothing.
 

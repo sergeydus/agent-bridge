@@ -398,6 +398,35 @@ export function parseArgs(
       `--on-complete ${options.onComplete} needs an isolated workspace, and --no-isolation edits the project directly`,
     );
   }
+  // Modes that never reach a completion step would otherwise accept the flag
+  // and silently ignore it, which reads as authorization that was granted.
+  if (options.onComplete !== 'ask') {
+    const inertMode = options.chat
+      ? 'chat'
+      : options.doctor
+        ? '--doctor'
+        : options.listRuns
+          ? '--list-runs'
+          : options.listChats
+            ? '--list-chats'
+            : options.deleteRun
+              ? '--delete-run'
+              : options.deleteChat
+                ? '--delete-chat'
+                : options.discardWorkspace
+                  ? '--discard-workspace'
+                  : options.pruneRunsDays !== undefined
+                    ? '--prune-runs'
+                    : undefined;
+    if (inertMode) {
+      throw new Error(
+        `--on-complete has no effect with ${inertMode}, which never runs a completion step. ` +
+          (options.chat
+            ? 'Editing started from chat asks about its workspace when it finishes.'
+            : 'Remove --on-complete.'),
+      );
+    }
+  }
   if (
     options.implementer &&
     !['codex', 'claude'].includes(options.implementer)

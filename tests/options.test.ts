@@ -254,3 +254,25 @@ test('--on-complete is documented in help', () => {
   assert.match(HELP, /--on-complete <action>/);
   assert.match(HELP, /permanently removes/);
 });
+
+test('--on-complete is rejected in modes that never complete a run', () => {
+  assert.throws(
+    () => parseArgs(['chat', '--on-complete', 'discard']),
+    /no effect with chat/,
+  );
+  assert.throws(
+    () => parseArgs(['--doctor', '--on-complete', 'apply']),
+    /no effect with --doctor/,
+  );
+  assert.throws(
+    () => parseArgs(['--list-runs', '--on-complete', 'keep']),
+    /no effect with --list-runs/,
+  );
+  assert.throws(
+    () => parseArgs(['--prune-runs', '30', '--on-complete', 'discard']),
+    /no effect with --prune-runs/,
+  );
+  // The default is inert everywhere and must stay accepted.
+  assert.doesNotThrow(() => parseArgs(['chat']));
+  assert.doesNotThrow(() => parseArgs(['chat', '--on-complete', 'ask']));
+});

@@ -133,20 +133,35 @@ What should happen to the completed changes?
 
 ${COMPLETION_CHOICE}`;
 
+/**
+ * Why this patch may not be applied, in the order that produces the most
+ * actionable answer. The dirty-checkout refusal comes before
+ * `git apply --check`, because uncommitted work overlapping the patch would
+ * otherwise be reported as a conflict — true, but it sends the user to resolve
+ * the wrong problem.
+ */
 export async function patchApplicationRefusalReason({
   repository,
   patchPath,
   baseRevision,
+  unattended = false,
 }: {
   repository: string;
   patchPath: string;
   baseRevision?: string;
+  unattended?: boolean;
 }): Promise<string | undefined> {
   if (!baseRevision) {
     return 'This saved run predates base-revision tracking. The patch was not applied automatically.';
   }
   if ((await currentCommit(repository)) !== baseRevision) {
     return 'The original checkout moved to a different commit. The patch was not applied.';
+  }
+  if (unattended) {
+    const dirty = await dirtyCheckoutRefusalReason(repository);
+    if (dirty) {
+      return dirty;
+    }
   }
   if (!(await canApplyPatch({ repository, patchPath }))) {
     return 'The patch conflicts with the original checkout. It was not applied.';
@@ -294,7 +309,9 @@ async function dirtyCheckoutRefusalReason(
   const summary = summarizePorcelainStatus(
     await workingTreeStatus({ cwd: repository }),
   );
-  const dirty = summary.modifiedFiles + summary.stagedFiles;
+  // Unique tracked files, not status flags: one file that is both staged and
+  // modified is one file the user would have to reconcile.
+  const dirty = summary.files.length - summary.untrackedFiles;
   if (dirty === 0 && summary.untrackedFiles === 0) {
     return undefined;
   }
@@ -371,17 +388,14 @@ export async function finishIsolatedRun({
   ): Promise<CompletionResult> => {
     let refusalReason: string | undefined;
     try {
-      refusalReason =
-        (await patchApplicationRefusalReason({
-          repository,
-          patchPath,
-          baseRevision,
-        })) ??
-        // A disclosure printed to a process nobody is watching authorizes
-        // nothing, and the instruction may execute hours after it was typed.
-        (interactive
-          ? undefined
-          : await dirtyCheckoutRefusalReason(repository));
+      // A disclosure printed to a process nobody is watching authorizes
+      // nothing, and the instruction may execute hours after it was typed.
+      refusalReason = await patchApplicationRefusalReason({
+        repository,
+        patchPath,
+        baseRevision,
+        unattended: !interactive,
+      });
     } catch (error) {
       // The safety checks could not be evaluated, so nothing was applied.
       // This is reported as a failure rather than a refusal: a refusal is a
