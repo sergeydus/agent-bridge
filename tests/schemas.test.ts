@@ -4,6 +4,8 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { COMPLETION_OUTCOMES } from '../src/core.ts';
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const schemaNames = [
@@ -78,6 +80,29 @@ test('every local schema reference resolves to an existing definition', async ()
       }
     }
   }
+});
+
+test('run state schema exposes the version 3 completion record', async () => {
+  const schema = JSON.parse(
+    await readFile(resolve(root, 'schemas', 'run-state.schema.json'), 'utf8'),
+  ) as {
+    required: string[];
+    properties: Record<string, Record<string, unknown>>;
+    $defs: Record<string, Record<string, unknown>>;
+  };
+
+  assert.equal(schema.properties.version?.const, 3);
+  assert.equal(schema.properties.completion?.$ref, '#/$defs/completion');
+  assert.equal(schema.required.includes('completion'), false);
+  assert.deepEqual(schema.$defs.completion?.required, [
+    'outcome',
+    'recordedAt',
+  ]);
+  assert.deepEqual(
+    (schema.$defs.completion?.properties as Record<string, { enum?: string[] }>)
+      .outcome?.enum,
+    COMPLETION_OUTCOMES,
+  );
 });
 
 test('chat session schema exposes the version 4 exchange unions', async () => {

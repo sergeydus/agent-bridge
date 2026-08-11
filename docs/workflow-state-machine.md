@@ -64,9 +64,28 @@ created
       → roles alternate or repeat
   → synthesizing
   → completed
+  → completion step (keep, apply, or discard)
 ```
 
 Collaborative mode alternates writers. Fixed-role mode keeps one writer.
+
+`completed` is written before the completion step, and the transition is
+one-way. The completion step resolves to exactly one recorded outcome —
+`no-changes`, `kept`, `declined`, `applied`, `apply-refused`, `apply-failed`,
+`discarded`, `discard-failed`, or `patch-failed` — and none of them can move
+the run back to `failed` or `cancelled`. Declining the menu, including by
+ending input, is `declined` and is not a failure. `apply-failed`,
+`discard-failed`, and `patch-failed` set exit code `1`, which takes precedence
+over the `--require-agreement` code `2`, while the checkpoint stays
+`completed`. `apply-refused` also sets `1` when it refused an explicit
+`--on-complete apply`, because an unattended script asked for something that
+did not happen; the same refusal after an interactive answer leaves the exit
+code alone, since the user saw the reason.
+
+`--on-complete` selects the outcome directly and is validated against the
+resolved run state before any provider call, not at parse time: a resumed run
+takes its isolation from the checkpoint. It is never persisted, so resuming
+never repeats an apply authorized by an earlier invocation.
 
 ## Agreement rule
 

@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  boundedCompletionReason,
+  completionFailureReason,
+  completionOutcomeFailed,
+  completionOutcomeRequiresReason,
+  COMPLETION_OUTCOMES,
+  MAX_COMPLETION_REASON_CHARS,
   deriveCurrentPairedExchangeStatus,
   deriveHistoricalPairedExchangeStatus,
   editorForRound,
@@ -10,7 +16,6 @@ import {
   isSafeRunId,
   isTransientAgentFailure,
   otherAgent,
-  legacyDecision,
   summarizePorcelainStatus,
   type PairedExchangeMessage,
 } from '../src/core.ts';
@@ -113,19 +118,6 @@ test('separates current exchange state from historical paired evidence', () => {
   }
 });
 
-test('migrates only one unambiguous legacy status tag', () => {
-  assert.equal(legacyDecision('Looks done'), null);
-  assert.equal(legacyDecision('<status>CONTINUE</status>'), 'continue');
-  assert.equal(legacyDecision('Result\n<status>DONE</status>'), 'done');
-  assert.equal(
-    legacyDecision(
-      'Peer said <status>DONE</status>\n<status>CONTINUE</status>',
-    ),
-    null,
-  );
-  assert.equal(legacyDecision('Result\n<status>CONTINUE</status>'), 'continue');
-});
-
 test('estimates the maximum subscription calls', () => {
   assert.deepEqual(
     estimateCalls({
@@ -167,4 +159,69 @@ test('retries only failures that look transient', () => {
     isTransientAgentFailure(new Error('authentication failed')),
     false,
   );
+});
+
+test('only completion outcomes whose action failed change the exit code', () => {
+  const failed = COMPLETION_OUTCOMES.filter(completionOutcomeFailed);
+
+  assert.deepEqual(failed, ['apply-failed', 'discard-failed', 'patch-failed']);
+  // A refusal is a decision the user saw, not a failure of the tool.
+  assert.equal(completionOutcomeFailed('apply-refused'), false);
+  assert.equal(completionOutcomeFailed('declined'), false);
+  assert.equal(completionOutcomeFailed('no-changes'), false);
+});
+
+test('only refusals and failures may carry a reason', () => {
+  assert.deepEqual(
+    COMPLETION_OUTCOMES.filter(completionOutcomeRequiresReason),
+    ['apply-refused', 'apply-failed', 'discard-failed', 'patch-failed'],
+  );
+});
+
+test('completion reasons are bounded and safe to print', () => {
+  const reason = boundedCompletionReason(
+    `git said \u001B[31mred\u001B[0m ${'x'.repeat(5_000)}`,
+  );
+
+  assert.equal(reason.length, MAX_COMPLETION_REASON_CHARS);
+  assert.equal(reason.includes('\u001B'), false);
+  assert.match(reason, /^git said red /);
+});
+
+test('a failure reason truncates the error, never the guidance', () => {
+  const guidance =
+    'The patch is still at /tmp/run.patch. Retry with git apply.';
+  const reason = completionFailureReason({
+    summary: 'The patch could not be applied:',
+    error: 'x'.repeat(5_000),
+    guidance,
+  });
+
+  assert.equal(reason.length <= MAX_COMPLETION_REASON_CHARS, true);
+  assert.match(reason, /^The patch could not be applied:/);
+  assert.ok(reason.endsWith(guidance));
+  assert.match(reason, /…/);
+});
+
+test('a short failure reason keeps the error intact', () => {
+  const reason = completionFailureReason({
+    summary: 'It failed:',
+    error: 'permission denied',
+    guidance: 'Try again.',
+  });
+
+  assert.equal(reason, 'It failed: permission denied Try again.');
+});
+
+test('run ids accepted by isSafeRunId need no shell quoting', () => {
+  // Recovery messages print run ids inside a suggested command unquoted. That
+  // is only safe because the accepted character set contains nothing any shell
+  // splits or interprets, on POSIX or on Windows.
+  for (const id of ['run-20260811-abc123', 'r', 'A.b_c-1']) {
+    assert.ok(isSafeRunId(id));
+    assert.ok(/^[A-Za-z0-9._-]+$/.test(id));
+  }
+  for (const id of ['a b', 'a;b', 'a&b', 'a|b', 'a$b', 'a"b', "a'b", '-a']) {
+    assert.equal(isSafeRunId(id), false);
+  }
 });

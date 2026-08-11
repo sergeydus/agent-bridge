@@ -19,11 +19,29 @@ import {
   canApplyPatch,
   createIsolatedWorktree,
   createPatch,
+  currentCommit,
+  describeCommitsSinceBase,
   execute,
+  countPatchedFiles,
+  isCommitAnchored,
+  workspaceFingerprint,
   initializeRepository,
   removeIsolatedWorktree,
   repositoryHasHead,
 } from '../src/git.ts';
+
+// Windows does not implement POSIX permission bits and reports 0o666 for every
+// file. The guarantee is owner-only access "where supported", so the mode is
+// asserted only where the platform can enforce it; every other assertion about
+// the file still runs everywhere.
+const enforcesFileModes = process.platform !== 'win32';
+
+async function assertOwnerOnly(path: string): Promise<void> {
+  if (!enforcesFileModes) {
+    return;
+  }
+  assert.equal((await lstat(path)).mode & 0o777, 0o600);
+}
 
 test('initializes a repository without creating a commit', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-bridge-git-init-'));
@@ -69,6 +87,7 @@ test('isolates edits and exports tracked and untracked files as a patch', async 
       repository,
       runsDirectory,
       runId: 'test-run',
+      revision: await currentCommit(repository),
     });
     await writeFile(join(workspace, 'tracked.txt'), 'after\n');
     await writeFile(join(workspace, 'new.txt'), 'new file\n');
@@ -86,6 +105,7 @@ test('isolates edits and exports tracked and untracked files as a patch', async 
     const patchCreated = await createPatch({
       workspace,
       destination: patchPath,
+      baseRevision: await currentCommit(repository),
     });
     const patch = await readFile(patchPath, 'utf8');
     assert.equal(patchCreated, true);
@@ -124,6 +144,257 @@ test('isolates edits and exports tracked and untracked files as a patch', async 
     }
 
     await removeIsolatedWorktree({ repository, workspace });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function initializeFixtureRepository(root: string): Promise<string> {
+  const repository = join(root, 'repository');
+  await execute('git', ['init', repository], { cwd: root });
+  for (const [key, value] of [
+    ['user.name', 'Agent Bridge Test'],
+    ['user.email', 'test@example.com'],
+    ['commit.gpgsign', 'false'],
+    // Git for Windows rewrites LF to CRLF on checkout by default, which
+    // would make file contents differ from what the test wrote.
+    ['core.autocrlf', 'false'],
+  ] as [string, string][]) {
+    await execute('git', ['config', key, value], { cwd: repository });
+  }
+  await writeFile(join(repository, 'tracked.txt'), 'before\n');
+  await execute('git', ['add', 'tracked.txt'], { cwd: repository });
+  await execute('git', ['commit', '-m', 'initial'], { cwd: repository });
+  return repository;
+}
+
+test('a patch is published atomically or not at all', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-atomic-'));
+  try {
+    const repository = await initializeFixtureRepository(root);
+    const workspace = await createIsolatedWorktree({
+      repository,
+      runsDirectory: join(root, 'runs'),
+      runId: 'atomic',
+      revision: await currentCommit(repository),
+    });
+    await writeFile(join(workspace, 'tracked.txt'), 'after\n');
+    const destination = join(root, 'atomic.patch');
+
+    // An interrupted capture must leave nothing at the final path, because
+    // createPatch reports success by the file being non-empty and a truncated
+    // patch is indistinguishable from a complete one.
+    await assert.rejects(() =>
+      createPatch({
+        workspace,
+        destination,
+        baseRevision: 'not-a-revision',
+      }),
+    );
+    await assert.rejects(() => readFile(destination, 'utf8'), /ENOENT/);
+
+    assert.equal(
+      await createPatch({
+        workspace,
+        destination,
+        baseRevision: await currentCommit(repository),
+      }),
+      true,
+    );
+    await assertOwnerOnly(destination);
+    assert.match(await readFile(destination, 'utf8'), /tracked\.txt/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('an empty capture removes a stale patch instead of leaving it current', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-atomic-'));
+  try {
+    const repository = await initializeFixtureRepository(root);
+    const workspace = await createIsolatedWorktree({
+      repository,
+      runsDirectory: join(root, 'runs'),
+      runId: 'stale',
+      revision: await currentCommit(repository),
+    });
+    const destination = join(root, 'stale.patch');
+    const baseRevision = await currentCommit(repository);
+
+    await writeFile(join(workspace, 'tracked.txt'), 'after\n');
+    assert.equal(
+      await createPatch({ workspace, destination, baseRevision }),
+      true,
+    );
+
+    // The edit is reverted, so the earlier patch no longer describes anything.
+    await writeFile(join(workspace, 'tracked.txt'), 'before\n');
+    assert.equal(
+      await createPatch({ workspace, destination, baseRevision }),
+      false,
+    );
+    await assert.rejects(() => readFile(destination, 'utf8'), /ENOENT/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a workspace commit is unanchored until a branch or tag contains it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-anchor-'));
+  try {
+    const repository = await initializeFixtureRepository(root);
+    const baseRevision = await currentCommit(repository);
+    const workspace = await createIsolatedWorktree({
+      repository,
+      runsDirectory: join(root, 'runs'),
+      runId: 'anchor',
+      revision: await currentCommit(repository),
+    });
+    await writeFile(join(workspace, 'tracked.txt'), 'after\n');
+    await execute('git', ['commit', '--all', '-m', 'inside'], {
+      cwd: workspace,
+    });
+    const head = await currentCommit(workspace);
+
+    assert.equal(
+      await isCommitAnchored({ workspace, revision: head }),
+      false,
+      'a detached worktree commit is reachable from no ref',
+    );
+    assert.deepEqual(
+      await describeCommitsSinceBase({ workspace, baseRevision }),
+      { head, commits: 1, diverged: false },
+    );
+
+    await execute('git', ['branch', 'keep-my-work', head], { cwd: workspace });
+    assert.equal(await isCommitAnchored({ workspace, revision: head }), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a workspace that left its base behind is reported as diverged', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-diverge-'));
+  try {
+    const repository = await initializeFixtureRepository(root);
+    const baseRevision = await currentCommit(repository);
+    const workspace = await createIsolatedWorktree({
+      repository,
+      runsDirectory: join(root, 'runs'),
+      runId: 'diverge',
+      revision: await currentCommit(repository),
+    });
+
+    // An unrelated root commit: the base is not an ancestor of it.
+    await execute('git', ['checkout', '--orphan', 'unrelated'], {
+      cwd: workspace,
+    });
+    await writeFile(join(workspace, 'unrelated.txt'), 'elsewhere\n');
+    await execute('git', ['add', '--all'], { cwd: workspace });
+    await execute('git', ['commit', '-m', 'unrelated root'], {
+      cwd: workspace,
+    });
+
+    const described = await describeCommitsSinceBase({
+      workspace,
+      baseRevision,
+    });
+
+    assert.equal(described.diverged, true);
+    // No count, because "N commits ahead" would be a lie here.
+    assert.equal(described.commits, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a fingerprint against a fixed base survives an agent committing', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-fingerprint-'));
+  try {
+    const repository = await initializeFixtureRepository(root);
+    const baseRevision = await currentCommit(repository);
+    const workspace = await createIsolatedWorktree({
+      repository,
+      runsDirectory: join(root, 'runs'),
+      runId: 'fingerprint',
+      revision: await currentCommit(repository),
+    });
+
+    const clean = await workspaceFingerprint({ workspace, baseRevision });
+    await writeFile(join(workspace, 'tracked.txt'), 'after\n');
+    const edited = await workspaceFingerprint({ workspace, baseRevision });
+    assert.notEqual(edited, clean);
+
+    // D8: committing moved HEAD with the fingerprint, so the edit disappeared
+    // and the workspace looked identical to its clean state again. Against a
+    // fixed base the fingerprint stays at its edited value instead.
+    await execute('git', ['commit', '--all', '-m', 'inside'], {
+      cwd: workspace,
+    });
+    const committed = await workspaceFingerprint({ workspace, baseRevision });
+    assert.equal(committed, edited);
+    assert.notEqual(committed, clean);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a workspace starts at the recorded revision, not at a moved HEAD', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-revision-'));
+  try {
+    const repository = await initializeFixtureRepository(root);
+    const recorded = await currentCommit(repository);
+
+    // The source branch advances between recording the baseline and creating
+    // the workspace, which is exactly what symbolic HEAD would have followed.
+    await writeFile(join(repository, 'later.txt'), 'moved on\n');
+    await execute('git', ['add', '--all'], { cwd: repository });
+    await execute('git', ['commit', '-m', 'source moved'], { cwd: repository });
+    assert.notEqual(await currentCommit(repository), recorded);
+
+    const workspace = await createIsolatedWorktree({
+      repository,
+      runsDirectory: join(root, 'runs'),
+      runId: 'pinned',
+      revision: recorded,
+    });
+
+    assert.equal(await currentCommit(workspace), recorded);
+    await assert.rejects(
+      () => readFile(join(workspace, 'later.txt'), 'utf8'),
+      /ENOENT/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a patch reports the number of files it touches without applying it', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-numstat-'));
+  try {
+    const repository = await initializeFixtureRepository(root);
+    const baseRevision = await currentCommit(repository);
+    const workspace = await createIsolatedWorktree({
+      repository,
+      runsDirectory: join(root, 'runs'),
+      runId: 'numstat',
+      revision: baseRevision,
+    });
+    await writeFile(join(workspace, 'tracked.txt'), 'after\n');
+    await writeFile(join(workspace, 'added.txt'), 'new\n');
+    const patchPath = join(root, 'numstat.patch');
+    await createPatch({ workspace, destination: patchPath, baseRevision });
+
+    assert.equal(await countPatchedFiles({ repository, patchPath }), 2);
+    // Counting must not be an apply in disguise.
+    assert.equal(
+      await readFile(join(repository, 'tracked.txt'), 'utf8'),
+      'before\n',
+    );
+    await assert.rejects(
+      () => readFile(join(repository, 'added.txt'), 'utf8'),
+      /ENOENT/,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

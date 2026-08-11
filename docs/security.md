@@ -86,6 +86,75 @@ Interactive chat never gives providers write access. Its editing commands
 create an owner-only temporary task file and launch the existing isolated
 workflow without a shell. The task file is removed after the child exits.
 
+## Exclusive locks
+
+Run checkpoints and chat sessions share one lock primitive. A lock is a
+directory, and the record naming its owner is a file inside it. Creating that
+directory is what confers ownership; the record is written immediately afterwards
+and only says who won. A directory is used because creating one is atomic and
+never resolves a link at the name being created, on every platform and
+filesystem. Creating a file exclusively does not carry that guarantee everywhere:
+Windows resolves a link at the path first and creates its target. A lock is
+released by re-reading that record and comparing an ownership token, so a
+process whose lock was removed cannot later delete a successor's lock.
+
+A lock left behind by a process that is gone is taken over, never deleted and
+recreated. Takeover happens under a marker created inside the lock with the same
+exclusive semantics, so at most one process is ever inside it, and the stale
+record is overwritten in place, so the lock is never briefly free for a further
+process to claim. No process ever removes a lock it does not own. A marker left
+behind by a process interrupted mid-takeover is not removed automatically either;
+it disables automatic recovery for that one lock and is named in the message,
+which is the same manual recovery as any unattributable lock.
+
+A lock must be a plain directory whose record is a plain file with exactly one
+name. A symbolic link, a hard link, or any other special file in either position
+is never treated as a lock, and nothing already on disk is ever modified through
+one. For takeover, which rewrites an existing record, the check is made against
+the path and again against the opened handle, and the record is confirmed through
+that same handle before anything is written to it.
+
+The one exception is stated rather than implied, because the guarantee above is
+otherwise not exact. Creating the record inside a lock directory this process has
+just created uses an exclusive create, which cannot modify anything that exists —
+it fails when the resolved name is already there. Where no no-follow open exists,
+a link raced into that new directory could still redirect the _creation_ to a path
+that does not exist yet. Doing so requires write access to a directory created
+moments earlier inside the user's own application-data directory, which is
+owner-only where modes are enforced, so it requires the user's own privileges. It
+is detected immediately afterwards and refused rather than reported as a held
+lock, and no existing file can be affected. Giving the record an unpredictable
+name would close it entirely and is the recorded extension point if that residual
+ever matters.
+
+Rewriting an existing record needs an open that refuses to follow a link, which
+POSIX provides and Windows does not. Where it is unavailable, automatic takeover
+of a stale lock is refused outright rather than performed with a weaker check,
+because a path can turn into a link between being classified and being opened.
+Acquiring a free lock is unaffected and works everywhere. Recovery on those
+platforms is the same manual deletion as for any lock whose owner cannot be
+established, and the message says so. No platform trades the guarantee for
+convenience.
+
+A lock is eligible for takeover in exactly one case: it is a plain directory, its
+record is a plain file with one name, that record parses, names this host, and its
+process is gone. Every other state is left in place and reported — a lock naming
+no owner, a lock left by an older Agent Bridge version, which made the lock a file
+rather than a directory, content that does not parse, a record naming another
+host, or a live process. A lock naming no owner is the state left behind when an
+owner is interrupted between claiming the lock and recording itself; it cannot be
+told apart from a live owner, so it is never cleared automatically. Contention
+always names the lock and the recovery step. Deleting a lock by hand is safe only
+when no Agent Bridge process is using that run or chat.
+
+A process identifier is only meaningful on the machine that wrote it, so lock
+records carry a host name and a foreign host is never evaluated against the
+local process table. **All Agent Bridge installations that share a data
+directory must be upgraded together.** An older build reads the process
+identifier and ignores the host, so a lock written on one machine can be judged
+against another machine's processes and cleared while it is genuinely held.
+Mixed versions on a single host remain safe.
+
 Configured verification executables must be bare names without path
 separators. This prevents shell syntax injection, but an approved executable or
 package script can still run arbitrary project code. Trust configuration only

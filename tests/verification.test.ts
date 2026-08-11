@@ -6,6 +6,15 @@ import {
   runVerificationCommands,
 } from '../src/verification.ts';
 
+// Children spawned by this file must not write coverage. Under
+// `--experimental-test-coverage` a spawned Node process inherits
+// `NODE_V8_COVERAGE` and writes its own report into the same directory, and one
+// arriving while the reporter reads that directory failed the whole Windows run
+// with "Unexpected end of JSON input" even though every test passed. Removing the
+// variable here does not affect this process's own coverage, which V8 already
+// enabled at startup; it only stops what this file spawns from reporting.
+delete process.env.NODE_V8_COVERAGE;
+
 test('runs approved commands as executable and argument arrays', async () => {
   const results = await runVerificationCommands({
     commands: [

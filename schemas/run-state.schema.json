@@ -33,7 +33,7 @@
     "rounds"
   ],
   "properties": {
-    "version": { "const": 2 },
+    "version": { "const": 3 },
     "id": {
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
@@ -103,9 +103,33 @@
       "type": "array",
       "items": { "$ref": "#/$defs/round" }
     },
-    "error": { "type": "string" }
+    "error": { "type": "string" },
+    "completion": { "$ref": "#/$defs/completion" }
   },
   "$defs": {
+    "completion": {
+      "description": "How this run's own completion step resolved. Absent means the run predates completion recording. Cross-field rules the runtime validator enforces and this schema does not: present only when status is completed; a reason is required for apply-refused, apply-failed, discard-failed, and patch-failed and rejected for every other outcome; discarded requires an absent workspace and agentCwd equal to originalCwd; no-changes and patch-failed require a workspace.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "recordedAt"],
+      "properties": {
+        "outcome": {
+          "enum": [
+            "no-changes",
+            "kept",
+            "declined",
+            "applied",
+            "apply-refused",
+            "apply-failed",
+            "discarded",
+            "discard-failed",
+            "patch-failed"
+          ]
+        },
+        "recordedAt": { "type": "string", "format": "date-time" },
+        "reason": { "type": "string", "minLength": 1, "maxLength": 2000 }
+      }
+    },
     "pendingReview": {
       "type": "object",
       "additionalProperties": false,

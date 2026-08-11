@@ -59,6 +59,12 @@ const FIXTURE_PATH = join(
   'fixtures',
   'chat-terminal-pty-fixture.ts',
 );
+const COMPLETION_FIXTURE_PATH = join(
+  PROJECT_ROOT,
+  'tests',
+  'fixtures',
+  'completion-prompt-pty-fixture.ts',
+);
 
 test('PTY driver load failure becomes an explicit skip reason', async () => {
   const availability = await loadNodePty(() =>
@@ -85,6 +91,7 @@ test('required PTY mode rejects an unavailable native driver', () => {
 
 function startFixture(
   mode: 'between-prompts' | 'prompt' | 'signal' | 'supplemental-output',
+  fixturePath = FIXTURE_PATH,
 ): PtySession {
   if (!nodePty) {
     throw new Error(ptySkipReason ?? 'node-pty is unavailable');
@@ -93,7 +100,7 @@ function startFixture(
   let exitResult: { exitCode: number; signal?: number } | undefined;
   const child = nodePty.spawn(
     process.execPath,
-    ['--experimental-strip-types', FIXTURE_PATH, mode],
+    ['--experimental-strip-types', fixturePath, mode],
     {
       name: 'xterm-256color',
       cols: 80,
@@ -353,4 +360,34 @@ ptyTest(
     }
   },
   35_000,
+);
+
+ptyTest(
+  'real PTY treats Ctrl+D at the completion menu as declining',
+  async () => {
+    const session = startFixture('prompt', COMPLETION_FIXTURE_PATH);
+    try {
+      await waitForOutput(session, '__AB_TTY__true:true');
+      await waitForOutput(
+        session,
+        'What should happen to the completed changes?',
+      );
+      await waitForOutput(session, 'Choose 1, 2, or 3 [1]:');
+
+      // D1: this used to reject out of the completion step and mark a run
+      // that had already finished successfully as failed.
+      session.child.write('\u0004');
+
+      await waitForOutput(session, '__AB_OUTCOME__declined');
+      const exited = await session.exit;
+      assert.equal(exited.exitCode, 0);
+      assert.equal(
+        stripVTControlCharacters(session.output()).includes('AbortError'),
+        false,
+      );
+    } finally {
+      await stopSession(session);
+    }
+  },
+  30_000,
 );

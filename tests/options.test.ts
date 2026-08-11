@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 
-import { parseArgs } from '../src/options.ts';
+import { HELP, parseArgs } from '../src/options.ts';
 
 test('parses portable project and workflow options', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-options-'));
@@ -204,4 +204,75 @@ test('parses accessible presentation and validates model names', () => {
       }),
     /require chat mode/,
   );
+});
+
+test('--on-complete defaults to asking and accepts every action', () => {
+  assert.equal(parseArgs(['--task', 't']).onComplete, 'ask');
+  for (const action of ['ask', 'keep', 'apply', 'discard']) {
+    assert.equal(
+      parseArgs(['--task', 't', '--on-complete', action]).onComplete,
+      action,
+    );
+  }
+  assert.throws(
+    () => parseArgs(['--task', 't', '--on-complete', 'delete']),
+    /--on-complete must be ask, keep, apply, discard/,
+  );
+});
+
+test('--on-complete apply or discard is rejected beside --no-isolation', () => {
+  for (const action of ['apply', 'discard']) {
+    assert.throws(
+      () =>
+        parseArgs([
+          '--task',
+          't',
+          '--collaborative',
+          'codex',
+          '--no-isolation',
+          '--on-complete',
+          action,
+        ]),
+      /needs an isolated workspace/,
+    );
+  }
+  // Keeping is always possible, isolated or not.
+  assert.doesNotThrow(() =>
+    parseArgs([
+      '--task',
+      't',
+      '--collaborative',
+      'codex',
+      '--no-isolation',
+      '--on-complete',
+      'keep',
+    ]),
+  );
+});
+
+test('--on-complete is documented in help', () => {
+  assert.match(HELP, /--on-complete <action>/);
+  assert.match(HELP, /permanently removes/);
+});
+
+test('--on-complete is rejected in modes that never complete a run', () => {
+  assert.throws(
+    () => parseArgs(['chat', '--on-complete', 'discard']),
+    /no effect with chat/,
+  );
+  assert.throws(
+    () => parseArgs(['--doctor', '--on-complete', 'apply']),
+    /no effect with --doctor/,
+  );
+  assert.throws(
+    () => parseArgs(['--list-runs', '--on-complete', 'keep']),
+    /no effect with --list-runs/,
+  );
+  assert.throws(
+    () => parseArgs(['--prune-runs', '30', '--on-complete', 'discard']),
+    /no effect with --prune-runs/,
+  );
+  // The default is inert everywhere and must stay accepted.
+  assert.doesNotThrow(() => parseArgs(['chat']));
+  assert.doesNotThrow(() => parseArgs(['chat', '--on-complete', 'ask']));
 });

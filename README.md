@@ -344,8 +344,59 @@ creates a binary-safe patch and offers to:
   and `git apply --check` succeeds; or
 - explicitly discard the registered isolated worktree.
 
+If the original checkout already holds uncommitted work, applying says so
+first — how many files are changed and how many are untracked — and asks
+before touching anything, because afterwards the agents' changes and yours are
+mixed together with no undo. A successful apply reports how many files it
+changed and leaves them unstaged. Your own uncommitted work is unstaged too, so
+`git diff` shows the combined result; the saved patch remains the separate
+record of what the agents changed.
+
+When applying or removing fails, the message says where the patch and the
+workspace are, that nothing was staged or committed, and the command to try
+next.
+
 Agent Bridge never commits, stages, resets, or silently discards project
 changes.
+
+`--on-complete` chooses that outcome without a terminal, so a script or CI job
+can finish a run on its own:
+
+```sh
+agent-bridge --collaborative codex --task "…" --on-complete apply
+```
+
+- `ask` is the default and shows the menu above.
+- `keep` is the default when there is no terminal, and keeps the workspace and
+  its patch.
+- `apply` runs the same base-revision and `git apply --check` gates. It also
+  refuses a checkout that holds your own uncommitted work, because applied on
+  top of it the agents' changes and yours become indistinguishable and there is
+  no undo. That refusal is checked before the conflict check, so overlapping
+  work is reported as uncommitted rather than as a patch conflict. Commit or
+  stash first, or apply interactively.
+- `discard` permanently removes the workspace once its work is captured to a
+  patch. It skips the confirmation because the flag is itself the instruction,
+  but every preservation check still applies.
+
+The flag is never saved. Resuming a run does not repeat an apply that an
+earlier invocation authorized. It is rejected outright in modes that never
+reach a completion step, such as `chat` and the run-history commands, rather
+than accepted and ignored. `apply` and `discard` are rejected before any
+provider call when the run has no isolated workspace, so an impossible
+instruction costs nothing.
+
+Exit code `1` means a completion action you asked for did not happen: it failed,
+or an unattended `apply` was refused. It takes precedence over the
+`--require-agreement` code `2`, because an action that did not happen is the
+more actionable signal; the run itself is still recorded as completed.
+
+The completion step cannot fail a run that already succeeded. The run is
+recorded as completed before the menu appears, so declining it — including with
+Ctrl+D — keeps the workspace and leaves the run completed and discardable
+later. If applying the patch or removing the workspace fails, Agent Bridge says
+so, records what happened, exits `1`, and still leaves the run completed with
+its patch and workspace intact.
 
 If the selected checkout is dirty, an isolated workspace cannot include those
 changes. You must commit or stash them, or explicitly acknowledge a committed
@@ -417,6 +468,15 @@ Agent Bridge saves an atomic checkpoint around every workflow transition. A
 run lock prevents two processes from resuming the same run concurrently.
 `Ctrl+C` cancels safely and preserves an isolated workspace.
 
+If a run or chat reports that it is already active elsewhere, the message names
+the lock and what to do. A lock left behind by a process that no longer exists on
+this machine is taken over automatically on macOS and Linux; on Windows it is
+reported for you to delete, because taking it over safely needs a facility Windows
+does not provide. One that cannot be attributed — because it names no owner, is
+unreadable, or was written on another machine — is left alone deliberately, since
+a live owner looks the same from here; delete the named lock once you are sure no
+Agent Bridge process is using that run or chat.
+
 ```sh
 agent-bridge --resume latest
 agent-bridge --list-runs
@@ -430,7 +490,18 @@ protected paths, and workspace recorded in the checkpoint. It does not silently
 adopt a changed project configuration.
 
 Discarding a workspace validates and removes the exact Git-registered worktree
-while retaining run history. Deleting a run removes its checkpoint and
+while retaining run history. Nothing is removed until the work in it is
+preserved: a complete patch is rewritten from the workspace's current contents
+first, so edits made after the run finished are captured rather than lost. A
+workspace whose run recorded no base revision cannot be proven safe to remove
+and is kept. If commits were made inside the workspace and no branch or tag
+contains them, unattended removal is refused and the message explains how to
+anchor them with `git branch`; the interactive prompt lets you discard them
+anyway, after saying plainly that a patch preserves the resulting files but not
+commit messages, authorship, signatures, or topology. A workspace with no
+changes needs no patch and is always removable.
+
+Deleting a run removes its checkpoint and
 transcript artifacts but preserves an editable worktree. Pruning removes only
 completed or cancelled runs older than the requested age and skips every
 retained worktree.

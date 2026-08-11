@@ -1,11 +1,14 @@
 import { readdir, unlink } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 
 import {
+  completionOutcomeRequiresReason,
+  isCompletionOutcome,
   isSafeRunId,
-  legacyDecision,
+  MAX_COMPLETION_REASON_CHARS,
   type AgentDecision,
   type AgentName,
+  type CompletionOutcome,
   type ProjectKind,
   type ReasoningEffort,
   type RunStatus,
@@ -18,6 +21,7 @@ import {
   isVerificationCommand,
   type VerificationCommand,
 } from './project-config.ts';
+import { sanitizeTerminalText } from './terminal-text.ts';
 
 const MAX_RUN_STATE_BYTES = 50_000_000;
 
@@ -41,8 +45,19 @@ export interface PendingReview {
   verificationComplete: boolean;
 }
 
+/**
+ * How this run's own completion step resolved. Run management never writes it:
+ * a workspace removed later through `--discard-workspace` leaves whatever the
+ * run itself recorded.
+ */
+export interface SavedRunCompletion {
+  outcome: CompletionOutcome;
+  recordedAt: string;
+  reason?: string;
+}
+
 export interface SavedRun {
-  version: 2;
+  version: 3;
   id: string;
   createdAt: string;
   updatedAt: string;
@@ -82,29 +97,16 @@ export interface SavedRun {
   pendingReview?: PendingReview;
   rounds: SavedRound[];
   error?: string;
+  completion?: SavedRunCompletion;
 }
 
 export { FileLock as RunLock };
 
-interface SavedRunV1 {
-  version: 1;
-  id: string;
-  createdAt: string;
-  updatedAt: string;
-  status: RunStatus;
-  task: string;
-  originalCwd: string;
-  agentCwd: string;
-  workspace?: string;
-  workflow: SavedRun['workflow'];
-  completedImplementationRounds: number;
-  codexPrevious: string;
-  claudePrevious: string;
-  handoff: string;
-  converged: boolean;
-  rounds: Array<Omit<SavedRound, 'codexDecision' | 'claudeDecision'>>;
-  error?: string;
-}
+/**
+ * Version 3 is the compatibility baseline. No run-state migration ships, so an
+ * older checkpoint is reported and left alone rather than upgraded in place.
+ */
+export const RUN_STATE_VERSION = 3;
 
 function isString(value: unknown): value is string {
   return typeof value === 'string';
@@ -198,6 +200,62 @@ function isPendingReview(value: unknown): value is PendingReview {
   );
 }
 
+function isSavedRunCompletion(value: unknown): value is SavedRunCompletion {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (!hasOnlyKeys(value, ['outcome', 'recordedAt', 'reason'])) {
+    return false;
+  }
+  const completion = value as Partial<SavedRunCompletion>;
+  if (
+    !isCompletionOutcome(completion.outcome) ||
+    !isIsoDateTime(completion.recordedAt)
+  ) {
+    return false;
+  }
+  if (!completionOutcomeRequiresReason(completion.outcome)) {
+    // A succeeded action must not carry failure data.
+    return completion.reason === undefined;
+  }
+  return (
+    isString(completion.reason) &&
+    completion.reason.trim() !== '' &&
+    completion.reason.length <= MAX_COMPLETION_REASON_CHARS &&
+    // Persisted reasons are rendered later, so they are stored already
+    // sanitized rather than sanitized at every display site.
+    sanitizeTerminalText(completion.reason) === completion.reason
+  );
+}
+
+/**
+ * Rules that no single field can express. The JSON Schema documents the shape;
+ * these keep a checkpoint from describing a state that cannot have happened.
+ */
+function hasConsistentCompletion(run: Partial<SavedRun>): boolean {
+  const completion = run.completion;
+  if (completion === undefined) {
+    return true;
+  }
+  if (!isSavedRunCompletion(completion)) {
+    return false;
+  }
+  if (run.status !== 'completed') {
+    return false;
+  }
+  if (
+    completion.outcome === 'discarded' &&
+    !(run.workspace === undefined && run.agentCwd === run.originalCwd)
+  ) {
+    return false;
+  }
+  // Nothing was captured to a patch, so the workspace is the only copy.
+  return !(
+    ['no-changes', 'patch-failed'].includes(completion.outcome) &&
+    run.workspace === undefined
+  );
+}
+
 function hasValidWorkflow(
   workflow: Partial<SavedRun['workflow']> | undefined,
 ): boolean {
@@ -251,56 +309,55 @@ function hasValidBaseFields(run: Partial<SavedRun>): boolean {
   );
 }
 
+const RUN_KEYS = [
+  'version',
+  'id',
+  'createdAt',
+  'updatedAt',
+  'status',
+  'task',
+  'originalCwd',
+  'agentCwd',
+  'projectKind',
+  'outputDirectory',
+  'recoveryPatchPath',
+  'workspace',
+  'baseRevision',
+  'currentRevision',
+  'workflow',
+  'judge',
+  'codexModel',
+  'claudeModel',
+  'codexEffort',
+  'claudeEffort',
+  'retries',
+  'timeoutMinutes',
+  'untilAgreement',
+  'requireAgreement',
+  'noTranscript',
+  'verification',
+  'protectedPaths',
+  'protectedPathFingerprints',
+  'completedCycles',
+  'codexPrevious',
+  'claudePrevious',
+  'handoff',
+  'converged',
+  'pendingReview',
+  'rounds',
+  'error',
+  'completion',
+] as const;
+
 export function isSavedRun(value: unknown): value is SavedRun {
-  if (!isRecord(value)) {
-    return false;
-  }
-  if (
-    !hasOnlyKeys(value, [
-      'version',
-      'id',
-      'createdAt',
-      'updatedAt',
-      'status',
-      'task',
-      'originalCwd',
-      'agentCwd',
-      'projectKind',
-      'outputDirectory',
-      'recoveryPatchPath',
-      'workspace',
-      'baseRevision',
-      'currentRevision',
-      'workflow',
-      'judge',
-      'codexModel',
-      'claudeModel',
-      'codexEffort',
-      'claudeEffort',
-      'retries',
-      'timeoutMinutes',
-      'untilAgreement',
-      'requireAgreement',
-      'noTranscript',
-      'verification',
-      'protectedPaths',
-      'protectedPathFingerprints',
-      'completedCycles',
-      'codexPrevious',
-      'claudePrevious',
-      'handoff',
-      'converged',
-      'pendingReview',
-      'rounds',
-      'error',
-    ])
-  ) {
+  if (!isRecord(value) || !hasOnlyKeys(value, RUN_KEYS)) {
     return false;
   }
   const run = value as Partial<SavedRun>;
   return (
-    run.version === 2 &&
+    run.version === RUN_STATE_VERSION &&
     hasValidBaseFields(run) &&
+    hasConsistentCompletion(run) &&
     (run.projectKind === 'git' || run.projectKind === 'directory') &&
     isString(run.outputDirectory) &&
     (run.recoveryPatchPath === undefined || isString(run.recoveryPatchPath)) &&
@@ -336,53 +393,22 @@ export function isSavedRun(value: unknown): value is SavedRun {
   );
 }
 
-function isSavedRunV1(value: unknown): value is SavedRunV1 {
-  if (!value || typeof value !== 'object') {
-    return false;
+/**
+ * Recognizes a checkpoint written by an older build so it can be reported
+ * precisely instead of being called invalid. Nothing about it is trusted beyond
+ * the version number itself.
+ */
+function supersededRunStateVersion(value: unknown): number | undefined {
+  if (!isRecord(value)) {
+    return undefined;
   }
-  const run = value as Partial<SavedRunV1>;
-  return (
-    run.version === 1 &&
-    hasValidBaseFields(run as unknown as Partial<SavedRun>) &&
-    Number.isInteger(run.completedImplementationRounds)
-  );
-}
-
-function migrateV1(run: SavedRunV1, outputDirectory: string): SavedRun {
-  return {
-    version: 2,
-    id: run.id,
-    createdAt: run.createdAt,
-    updatedAt: run.updatedAt,
-    status: run.status,
-    task: run.task,
-    originalCwd: run.originalCwd,
-    agentCwd: run.agentCwd,
-    projectKind: 'git',
-    outputDirectory,
-    workspace: run.workspace,
-    workflow: run.workflow,
-    judge: 'codex',
-    retries: 1,
-    timeoutMinutes: 30,
-    untilAgreement: true,
-    requireAgreement: false,
-    noTranscript: false,
-    verification: [],
-    protectedPaths: [],
-    protectedPathFingerprints: {},
-    completedCycles: run.completedImplementationRounds,
-    codexPrevious: run.codexPrevious,
-    claudePrevious: run.claudePrevious,
-    handoff: run.handoff,
-    converged: run.converged,
-    rounds: run.rounds.map((round) => ({
-      ...round,
-      codexDecision: legacyDecision(round.codex) ?? undefined,
-      claudeDecision: legacyDecision(round.claude) ?? undefined,
-    })),
-    error: run.error,
-  };
+  const version = value.version;
+  return typeof version === 'number' &&
+    Number.isInteger(version) &&
+    version >= 1 &&
+    version < RUN_STATE_VERSION
+    ? version
+    : undefined;
 }
 
 export class RunStateStore {
@@ -452,8 +478,16 @@ export class RunStateStore {
     if (isSavedRun(parsed)) {
       return parsed;
     }
-    if (isSavedRunV1(parsed)) {
-      return migrateV1(parsed, dirname(this.#directory));
+    const olderVersion = supersededRunStateVersion(parsed);
+    if (olderVersion !== undefined) {
+      throw new Error(
+        `Saved run ${runId} uses checkpoint version ${olderVersion}, which this ` +
+          `version of Agent Bridge no longer reads (version ${RUN_STATE_VERSION} ` +
+          `is the supported baseline). Nothing was changed or deleted: the ` +
+          `checkpoint is still at ${this.pathFor(runId)} and any isolated ` +
+          `workspace it created is untouched. Inspect that workspace directly, ` +
+          `or remove the checkpoint once you no longer need it.`,
+      );
     }
     throw new Error(`Invalid saved run: ${runId}`);
   }
@@ -473,7 +507,7 @@ export class RunStateStore {
             return await this.load(name.slice(0, -5));
           } catch (error) {
             this.#onWarning(
-              `Ignoring invalid saved run ${name}: ${
+              `Ignoring unreadable saved run ${name}: ${
                 error instanceof Error ? error.message : String(error)
               }`,
             );

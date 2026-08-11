@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
+import { sanitizeTerminalText } from './terminal-text.ts';
+
 export type AgentName = 'codex' | 'claude';
 export type WorkflowKind = 'review' | 'fixed' | 'collaborative';
 export type AgentDecision = 'done' | 'continue';
@@ -29,6 +31,120 @@ export type RunStatus =
   | 'completed'
   | 'failed'
   | 'cancelled';
+
+/** How a run's own completion step resolved. */
+export type CompletionOutcome =
+  | 'no-changes'
+  | 'kept'
+  | 'declined'
+  | 'applied'
+  | 'apply-refused'
+  | 'apply-failed'
+  | 'discarded'
+  | 'discard-failed'
+  | 'patch-failed';
+
+export const COMPLETION_OUTCOMES: readonly CompletionOutcome[] = [
+  'no-changes',
+  'kept',
+  'declined',
+  'applied',
+  'apply-refused',
+  'apply-failed',
+  'discarded',
+  'discard-failed',
+  'patch-failed',
+];
+
+/**
+ * Refusals and failures must say why. The remaining outcomes describe an action
+ * that succeeded, so a reason on one of them would be contradictory data.
+ */
+const OUTCOMES_REQUIRING_REASON: readonly CompletionOutcome[] = [
+  'apply-refused',
+  'apply-failed',
+  'discard-failed',
+  'patch-failed',
+];
+
+export function isCompletionOutcome(
+  value: unknown,
+): value is CompletionOutcome {
+  return COMPLETION_OUTCOMES.includes(value as CompletionOutcome);
+}
+
+export function completionOutcomeRequiresReason(
+  outcome: CompletionOutcome,
+): boolean {
+  return OUTCOMES_REQUIRING_REASON.includes(outcome);
+}
+
+/**
+ * Outcomes where the action the user asked for did not happen. They set exit
+ * code 1 while leaving the checkpoint `completed`: the run succeeded, and only
+ * its completion step failed.
+ */
+const FAILED_COMPLETION_OUTCOMES: readonly CompletionOutcome[] = [
+  'apply-failed',
+  'discard-failed',
+  'patch-failed',
+];
+
+export function completionOutcomeFailed(outcome: CompletionOutcome): boolean {
+  return FAILED_COMPLETION_OUTCOMES.includes(outcome);
+}
+
+/** What the user asked to happen to a completed isolated workspace. */
+export type CompletionInstruction = 'ask' | 'keep' | 'apply' | 'discard';
+
+export const COMPLETION_INSTRUCTIONS: readonly CompletionInstruction[] = [
+  'ask',
+  'keep',
+  'apply',
+  'discard',
+];
+
+export const MAX_COMPLETION_REASON_CHARS = 2_000;
+
+/**
+ * Completion reasons quote provider and Git output, so they are sanitized and
+ * bounded where they are built. A checkpoint stores what a terminal can print.
+ */
+export function boundedCompletionReason(text: string): string {
+  return sanitizeTerminalText(text).slice(0, MAX_COMPLETION_REASON_CHARS);
+}
+
+/**
+ * Composes a failure reason that keeps its guidance. Only the quoted command
+ * output is truncated: appending recovery steps after an unbounded error meant
+ * a long Git failure pushed the artifact locations and the next command past
+ * the bound, leaving the user with a wall of output and no way forward.
+ */
+export function completionFailureReason({
+  summary,
+  error,
+  guidance,
+}: {
+  summary: string;
+  error: string;
+  guidance: string;
+}): string {
+  const framing = boundedCompletionReason(`${summary} ${guidance}`);
+  const room = MAX_COMPLETION_REASON_CHARS - framing.length - 1;
+  if (room <= 0) {
+    return framing;
+  }
+  const detail = sanitizeTerminalText(error);
+  const trimmed =
+    detail.length > room
+      ? `${detail.slice(0, Math.max(0, room - 1))}…`
+      : detail;
+  return boundedCompletionReason(`${summary} ${trimmed} ${guidance}`);
+}
+
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
 
 export interface WorkflowSelection {
   kind: WorkflowKind;
@@ -173,28 +289,6 @@ export function editorForRound(
     throw new Error('round must be a positive integer');
   }
   return round % 2 === 1 ? firstAgent : otherAgent(firstAgent);
-}
-
-/**
- * Compatibility parser for older providers. New providers use JSON Schema.
- * A legacy status is accepted only when it is the one final tag in the answer.
- */
-export function legacyDecision(answer: string): AgentDecision | null {
-  const matches = [
-    ...answer.matchAll(/<status>\s*(DONE|CONTINUE)\s*<\/status>/gi),
-  ];
-  if (matches.length !== 1) {
-    return null;
-  }
-  const match = matches[0];
-  if (!match || match.index === undefined) {
-    return null;
-  }
-  const trailing = answer.slice(match.index + match[0].length).trim();
-  if (trailing) {
-    return null;
-  }
-  return match[1]?.toUpperCase() === 'DONE' ? 'done' : 'continue';
 }
 
 export function isTransientAgentFailure(error: unknown): boolean {

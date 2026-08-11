@@ -52,7 +52,17 @@ subsystem. `terminal-text.ts` is the only sanitizer for untrusted text reaching
 a terminal. `filesystem.ts` is the only writer of persisted state, so every
 format gets the same atomic rename and owner-only mode. `file-lock.ts` is the
 only exclusive lock, so run checkpoints and chat sessions share one definition
-of ownership and one stale-owner check.
+of ownership and one stale-owner check. A lock is a directory holding its owner
+record, because creating a directory is atomic and never resolves a link at the
+name being created. Ownership comes from winning that create, and the record
+written afterwards carries a host and an ownership token: a lock that cannot be attributed to a dead local process is
+never taken over, and a lock is released only by the holder whose token still
+matches. Taking over a dead process's lock happens under an exclusively created
+marker and overwrites the record in place, so the lock is never free mid-takeover
+and no process removes a lock it does not own. Rewriting an existing record
+requires an open that refuses to follow a link; where the platform has none,
+takeover is refused rather than weakened, while acquiring a free lock works
+everywhere.
 
 The CLI composes modules but does not decide turn order. The orchestrator does
 not know Codex or Claude command-line syntax. Provider adapters do not decide
@@ -142,19 +152,38 @@ run-data directory from the source repository's committed `HEAD`. Agent edits,
 snapshots, verification, and reviews all use that isolated path. Completion
 produces a portable binary patch using an alternate Git index, which includes
 tracked changes, deletions, executable-bit changes, symlinks, binaries, and
-ordinary untracked files without mutating the real index.
+ordinary untracked files without mutating the real index. Patch creation and
+workspace fingerprinting both take that baseline as a required argument rather
+than implying it from the workspace's `HEAD`, so a commit made inside the
+workspace stays inside the patch and changes the fingerprint.
+
+Every artifact a subprocess produces is published atomically through
+`filesystem.ts`: Git writes into a private temporary file that is renamed into
+place only once complete, so an interrupted capture leaves no file that would
+read as a whole one.
 
 Direct editing is an explicit advanced mode. When accepted beside existing
 changes, those paths are fingerprinted before the first agent call and checked
 after every writer.
 
+The completion step reads its input through a `CompletionPrompt` rather than
+`process.stdin`, so every keep, apply, and discard path is exercised by
+deterministic tests against temporary repositories. The terminal implementation
+is constructed only when both streams are terminals; otherwise no prompt exists
+and the workspace is kept.
+
 ## Persistence
 
-`RunStateStore` validates versioned checkpoints at runtime, migrates supported
-legacy state, writes through a unique temporary file and atomic rename, and
-uses an exclusive run lock for resume. State is saved before and after
-important external work so an interrupted process has a conservative recovery
-point.
+`RunStateStore` validates versioned checkpoints at runtime, writes through a
+unique temporary file and atomic rename, and uses an exclusive run lock for
+resume. State is saved before and after important external work so an
+interrupted process has a conservative recovery point.
+
+Run checkpoints are at version 3, which is the compatibility baseline: no
+run-state migration ships. A checkpoint written by an older build is recognized
+by its version number and refused with a message naming the file, and neither it
+nor the isolated workspace it created is modified. Chat sessions are separate
+and retain their supported migration chain.
 
 Successful runs create Markdown and JSON transcripts plus a small context
 manifest. `--no-transcript` still uses an active checkpoint for recovery and

@@ -9,6 +9,7 @@ import {
   discardRunWorkspace,
   pruneCompletedRuns,
 } from '../src/runs.ts';
+import { createIsolatedWorktree, currentCommit, execute } from '../src/git.ts';
 import { RunStateStore, type SavedRun } from '../src/state.ts';
 
 function runFixture(
@@ -18,7 +19,7 @@ function runFixture(
   workspace?: string,
 ): SavedRun {
   return {
-    version: 2,
+    version: 3,
     id,
     createdAt: updatedAt,
     updatedAt,
@@ -121,6 +122,7 @@ test('discards only terminal registered workspaces and updates saved state', asy
       removeWorkspace: async (options) => {
         removals.push(options);
       },
+      plan: () => Promise.resolve({ removable: true }),
     });
 
     assert.equal(removed, '/safe/workspace');
@@ -138,6 +140,173 @@ test('discards only terminal registered workspaces and updates saved state', asy
         }),
       /Only completed or cancelled/,
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a run whose completion was declined can still be discarded', async () => {
+  // The durable consequence of D1: pressing Ctrl+D at the completion menu used
+  // to leave a failed checkpoint, and discardRunWorkspace refuses those.
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-runs-'));
+  const stateDirectory = join(root, 'state');
+  try {
+    const store = new RunStateStore(stateDirectory);
+    const run: SavedRun = {
+      ...runFixture(
+        'declined-run',
+        root,
+        '2026-08-11T00:00:00.000Z',
+        '/workspaces/declined-run',
+      ),
+      completion: {
+        outcome: 'declined',
+        recordedAt: '2026-08-11T00:00:00.000Z',
+      },
+    };
+    await store.save(run);
+
+    const removed: { repository: string; workspace: string }[] = [];
+    const discarded = await discardRunWorkspace({
+      run: await store.load('declined-run'),
+      store,
+      removeWorkspace: (request) => {
+        removed.push(request);
+        return Promise.resolve();
+      },
+      plan: () => Promise.resolve({ removable: true }),
+    });
+
+    assert.equal(discarded, '/workspaces/declined-run');
+    assert.deepEqual(removed, [
+      { repository: '/project', workspace: '/workspaces/declined-run' },
+    ]);
+    const reloaded = await store.load('declined-run');
+    assert.equal(reloaded.workspace, undefined);
+    assert.equal(reloaded.agentCwd, '/project');
+    // Run management never rewrites how the run's own completion resolved.
+    assert.deepEqual(reloaded.completion, run.completion);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('run management refuses to remove a workspace holding unanchored commits', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-runs-gate-'));
+  const repository = join(root, 'repository');
+  try {
+    await execute('git', ['init', repository], { cwd: root });
+    for (const [key, value] of [
+      ['user.name', 'Agent Bridge Test'],
+      ['user.email', 'test@example.com'],
+      ['commit.gpgsign', 'false'],
+      // Git for Windows rewrites LF to CRLF on checkout by default, which
+      // would make file contents differ from what the test wrote.
+      ['core.autocrlf', 'false'],
+    ] as [string, string][]) {
+      await execute('git', ['config', key, value], { cwd: repository });
+    }
+    await writeFile(join(repository, 'tracked.txt'), 'before\n');
+    await execute('git', ['add', 'tracked.txt'], { cwd: repository });
+    await execute('git', ['commit', '-m', 'initial'], { cwd: repository });
+    const baseRevision = await currentCommit(repository);
+    const workspace = await createIsolatedWorktree({
+      repository,
+      runsDirectory: join(root, 'runs'),
+      runId: 'gate-run',
+      revision: await currentCommit(repository),
+    });
+    await writeFile(join(workspace, 'tracked.txt'), 'after\n');
+    await execute('git', ['commit', '--all', '-m', 'inside'], {
+      cwd: workspace,
+    });
+
+    const store = new RunStateStore(join(root, 'state'));
+    const run: SavedRun = {
+      ...runFixture('gate-run', root, '2026-08-11T00:00:00.000Z', workspace),
+      originalCwd: repository,
+      agentCwd: workspace,
+      baseRevision,
+    };
+    await store.save(run);
+
+    let removed = 0;
+    await assert.rejects(
+      () =>
+        discardRunWorkspace({
+          run,
+          store,
+          removeWorkspace: () => {
+            removed += 1;
+            return Promise.resolve();
+          },
+        }),
+      /no branch or tag contains those commits/,
+    );
+
+    assert.equal(removed, 0);
+    assert.equal((await store.load('gate-run')).workspace, workspace);
+    // The refusal still leaves a complete patch behind.
+    assert.match(
+      await readFile(join(root, 'gate-run.patch'), 'utf8'),
+      /tracked\.txt/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('run management removes a workspace once its history is anchored', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-runs-gate-'));
+  const repository = join(root, 'repository');
+  try {
+    await execute('git', ['init', repository], { cwd: root });
+    for (const [key, value] of [
+      ['user.name', 'Agent Bridge Test'],
+      ['user.email', 'test@example.com'],
+      ['commit.gpgsign', 'false'],
+      // Git for Windows rewrites LF to CRLF on checkout by default, which
+      // would make file contents differ from what the test wrote.
+      ['core.autocrlf', 'false'],
+    ] as [string, string][]) {
+      await execute('git', ['config', key, value], { cwd: repository });
+    }
+    await writeFile(join(repository, 'tracked.txt'), 'before\n');
+    await execute('git', ['add', 'tracked.txt'], { cwd: repository });
+    await execute('git', ['commit', '-m', 'initial'], { cwd: repository });
+    const baseRevision = await currentCommit(repository);
+    const workspace = await createIsolatedWorktree({
+      repository,
+      runsDirectory: join(root, 'runs'),
+      runId: 'anchored-run',
+      revision: await currentCommit(repository),
+    });
+    await writeFile(join(workspace, 'tracked.txt'), 'after\n');
+    await execute('git', ['commit', '--all', '-m', 'inside'], {
+      cwd: workspace,
+    });
+    await execute('git', ['branch', 'keep-my-work'], { cwd: workspace });
+
+    const store = new RunStateStore(join(root, 'state'));
+    const run: SavedRun = {
+      ...runFixture(
+        'anchored-run',
+        root,
+        '2026-08-11T00:00:00.000Z',
+        workspace,
+      ),
+      originalCwd: repository,
+      agentCwd: workspace,
+      baseRevision,
+    };
+    await store.save(run);
+
+    const removed = await discardRunWorkspace({ run, store });
+
+    assert.equal(removed, workspace);
+    const reloaded = await store.load('anchored-run');
+    assert.equal(reloaded.workspace, undefined);
+    assert.equal(reloaded.agentCwd, repository);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

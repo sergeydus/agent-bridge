@@ -1,13 +1,15 @@
 #!/usr/bin/env -S node --experimental-strip-types
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { finishIsolatedRun } from './artifacts.ts';
+import { finishIsolatedRun, recordRunCompletion } from './artifacts.ts';
 import { runInteractiveChat } from './chat.ts';
 import {
+  completionOutcomeFailed,
+  errorMessage,
   makeRunId,
   summarizePorcelainStatus,
   type AgentName,
@@ -23,6 +25,7 @@ import {
   repositoryRoot,
   workspaceFingerprint,
 } from './git.ts';
+import { writePrivateFileAtomic } from './filesystem.ts';
 import { loadInstructionContext } from './instructions.ts';
 import { runOrchestration } from './orchestrator.ts';
 import { HELP, parseArgs } from './options.ts';
@@ -43,7 +46,12 @@ import {
   workingTreeSnapshot,
   workingTreeStatus,
 } from './snapshot.ts';
-import { RunStateStore, type RunLock, type SavedRun } from './state.ts';
+import {
+  RunStateStore,
+  type RunLock,
+  type SavedRun,
+  type SavedRunCompletion,
+} from './state.ts';
 import { appendGitDiff, resolveTask } from './task.ts';
 import {
   formatMarkdownTranscript,
@@ -60,10 +68,6 @@ import { sanitizeTerminalText } from './terminal-text.ts';
 const APP_PATHS = getAppPaths();
 const PROVIDERS = createDefaultProviders();
 const INSTALL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
@@ -151,6 +155,24 @@ async function main(): Promise<void> {
     console.log(`Continuing run ${resumedRun.id}…`);
   }
 
+  // Runtime validation, as early as the information exists. A resumed run
+  // takes its isolation from the checkpoint, so the current flags alone cannot
+  // tell whether an isolated workspace exists — and this must be answered
+  // before any provider call is paid for.
+  if (
+    ['apply', 'discard'].includes(options.onComplete) &&
+    !(
+      options.isolation && Boolean(options.implementer || options.collaborative)
+    )
+  ) {
+    throw new Error(
+      `--on-complete ${options.onComplete} needs an editing run with an isolated workspace. ` +
+        (resumedRun
+          ? `Run ${resumedRun.id} has none, so there is no patch or workspace to act on.`
+          : 'Use --implementer or --collaborate without --no-isolation.'),
+    );
+  }
+
   if (!options.dryRun && !resumedRun) {
     await assertProvidersAvailable(PROVIDERS);
   }
@@ -211,7 +233,18 @@ async function main(): Promise<void> {
 
   let repository: string | undefined;
   let workspace = resumedRun?.workspace;
+  /**
+   * The authoritative baseline: observed by the run that created this
+   * workspace. Only this value may authorize applying a patch or removing a
+   * workspace.
+   */
   let baseRevision = resumedRun?.baseRevision;
+  /**
+   * A fallback for a resumed run that recorded no baseline. It supports
+   * reporting and comparisons whose failure mode is a message, and is never
+   * persisted, so "the original baseline is unknown" survives every resume.
+   */
+  let derivedBaseRevision: string | undefined;
   let recoveryPatchPath = resumedRun?.recoveryPatchPath;
   let needsDirectDirtyRecoveryPatch = false;
   if (projectKind === 'git') {
@@ -225,9 +258,17 @@ async function main(): Promise<void> {
       );
     }
     if (hasHead) {
-      baseRevision ??= options.dryRun
+      const observed = options.dryRun
         ? 'dry-run-head'
         : await currentCommit(repository);
+      if (resumedRun) {
+        derivedBaseRevision = baseRevision ?? observed;
+      } else {
+        // A fresh run observed the commit its workspace is built from, so this
+        // is a recorded baseline rather than a guess.
+        baseRevision = observed;
+        derivedBaseRevision = observed;
+      }
     }
   }
 
@@ -259,6 +300,7 @@ async function main(): Promise<void> {
   const runId = resumedRun?.id ?? makeRunId(new Date(startedAt));
   let runLock: RunLock | undefined;
   let ownsRunState = options.dryRun;
+  let completionRecorded = false;
   const reporter = new ProgressReporter({
     verbose: options.verbose,
     screenReader: options.screenReader,
@@ -302,12 +344,13 @@ continue from its actual state instead of repeating changes blindly.`;
   const saveState = async (
     status: RunStatus,
     error?: string,
+    completion?: SavedRunCompletion,
   ): Promise<void> => {
     if (options.dryRun) {
       return;
     }
     await stateStore.save({
-      version: 2,
+      version: 3,
       id: runId,
       createdAt: startedAt,
       updatedAt: new Date().toISOString(),
@@ -349,6 +392,7 @@ continue from its actual state instead of repeating changes blindly.`;
       pendingReview: runtime.pendingReview,
       rounds: runtime.rounds,
       error,
+      completion,
     });
   };
 
@@ -365,6 +409,9 @@ continue from its actual state instead of repeating changes blindly.`;
       const recoveryPatch = await createPatch({
         workspace: originalCwd,
         destination: recoveryPatchPath,
+        // Direct dirty editing captures the user's own work against the
+        // commit it sits on, which is the checkout's own HEAD.
+        baseRevision: await currentCommit(originalCwd),
       });
       if (!recoveryPatch) {
         throw new Error(
@@ -384,11 +431,19 @@ continue from its actual state instead of repeating changes blindly.`;
       !options.dryRun &&
       repository
     ) {
+      if (!baseRevision) {
+        throw new Error(
+          'An isolated workspace needs a recorded base revision and none was captured.',
+        );
+      }
       reporter.phase('Creating an isolated Git workspace');
       workspace = await createIsolatedWorktree({
         repository,
         runsDirectory: options.output,
         runId,
+        // The recorded baseline, not symbolic HEAD: the workspace must start
+        // at the exact commit every later decision is measured against.
+        revision: baseRevision,
       });
       options.cwd = workspace;
       task +=
@@ -496,7 +551,8 @@ continue from its actual state instead of repeating changes blindly.`;
       reporter,
       runAgent: callAgent,
       captureWorkspace: async () => {
-        if (projectKind !== 'git' || !baseRevision) {
+        const fingerprintBase = baseRevision ?? derivedBaseRevision;
+        if (projectKind !== 'git' || !fingerprintBase) {
           return {
             snapshot:
               '[read-only project review: inspect project files directly]',
@@ -505,7 +561,13 @@ continue from its actual state instead of repeating changes blindly.`;
         const [snapshot, status, revision] = await Promise.all([
           workingTreeSnapshot(options),
           workingTreeStatus(options),
-          workspaceFingerprint(options.cwd),
+          // Cycle-to-cycle comparison only needs a baseline that is stable
+          // across the run, so a derived one is safe here: its failure mode is
+          // a revision string, never a deletion.
+          workspaceFingerprint({
+            workspace: options.cwd,
+            baseRevision: fingerprintBase,
+          }),
         ]);
         for (const [path, expected] of Object.entries(
           protectedPathFingerprints,
@@ -584,15 +646,15 @@ continue from its actual state instead of repeating changes blindly.`;
         synthesis: result.synthesis,
       };
       await Promise.all([
-        writeFile(transcriptPath, formatMarkdownTranscript(transcript), {
-          mode: 0o600,
-        }),
-        writeFile(
+        writePrivateFileAtomic(
+          transcriptPath,
+          formatMarkdownTranscript(transcript),
+        ),
+        writePrivateFileAtomic(
           join(options.output, `${runId}.json`),
           `${JSON.stringify(transcript, null, 2)}\n`,
-          { mode: 0o600 },
         ),
-        writeFile(
+        writePrivateFileAtomic(
           join(options.output, `${runId}.context.json`),
           `${JSON.stringify(
             {
@@ -611,7 +673,6 @@ continue from its actual state instead of repeating changes blindly.`;
             null,
             2,
           )}\n`,
-          { mode: 0o600 },
         ),
       ]);
       reporter.success(`Saved the transcript to ${transcriptPath}`);
@@ -619,20 +680,50 @@ continue from its actual state instead of repeating changes blindly.`;
 
     let patchPath: string | undefined;
     let isolatedSummary;
-    if (workspace && repository) {
+    const isolatedWorkspace = workspace;
+    if (isolatedWorkspace && repository) {
       isolatedSummary = summarizePorcelainStatus(
-        await workingTreeStatus({ cwd: workspace }),
+        await workingTreeStatus({ cwd: isolatedWorkspace }),
       );
-      const finished = await finishIsolatedRun({
-        repository,
-        workspace,
-        patchPath: join(options.output, `${runId}.patch`),
-        baseRevision,
-        reporter,
-      });
-      patchPath = finished.patchPath;
-      workspace = finished.workspace;
     }
+    // The agents' work is finished and durable from here on. Everything below
+    // may report a failure, but none of it may mark the run failed.
+    const finished = await recordRunCompletion({
+      markCompleted: async () => {
+        await saveState('completed');
+        completionRecorded = true;
+      },
+      finish:
+        isolatedWorkspace && repository
+          ? () =>
+              finishIsolatedRun({
+                repository,
+                workspace: isolatedWorkspace,
+                patchPath: join(options.output, `${runId}.patch`),
+                baseRevision,
+                derivedBaseRevision,
+                instruction: options.onComplete,
+                runId,
+                reporter,
+              })
+          : undefined,
+      recordOutcome: async (result) => {
+        patchPath = result.patchPath;
+        workspace = result.workspace;
+        if (result.outcome === 'discarded') {
+          // The workspace no longer exists, so the run's directory is the
+          // project again. Version 3 refuses a `discarded` record that says
+          // otherwise.
+          options.cwd = originalCwd;
+        }
+        await saveState('completed', undefined, {
+          outcome: result.outcome,
+          recordedAt: new Date().toISOString(),
+          reason: result.reason,
+        });
+      },
+      reporter,
+    });
     if (editingWorkflow) {
       printChangeSummary(
         isolatedSummary ??
@@ -659,7 +750,6 @@ continue from its actual state instead of repeating changes blindly.`;
       recoveryPatch: options.noTranscript ? undefined : recoveryPatchPath,
       screenReader: options.screenReader,
     });
-    await saveState('completed');
     if (options.noTranscript) {
       if (recoveryPatchPath) {
         await rm(recoveryPatchPath, { force: true });
@@ -669,7 +759,24 @@ continue from its actual state instead of repeating changes blindly.`;
     if (options.requireAgreement && !result.converged) {
       process.exitCode = 2;
     }
+    // A completion action that did not happen is the more actionable signal,
+    // so it outranks the agreement-cap code.
+    if (
+      finished &&
+      (completionOutcomeFailed(finished.outcome) || finished.refusedInstruction)
+    ) {
+      process.exitCode = 1;
+    }
   } catch (error) {
+    if (completionRecorded) {
+      // Past the boundary: the run is durably complete, and this failure
+      // belongs to the completion step rather than to the run.
+      reporter.warning(
+        `The run finished, but completing it failed: ${errorMessage(error)}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
     if (abortController.signal.aborted || error instanceof ProcessAbortError) {
       if (ownsRunState) {
         await saveState('cancelled', 'Cancelled by user');
