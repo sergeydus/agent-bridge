@@ -14,7 +14,11 @@ import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
-import { acquireFileLock, removeStaleLock } from '../src/file-lock.ts';
+import {
+  acquireFileLock,
+  takeOverStaleLock,
+  type FileLock,
+} from '../src/file-lock.ts';
 
 // Removing a file needs write permission on its directory, not on the file. A
 // read-only parent is the portable way to make `unlink` fail without racing
@@ -253,10 +257,37 @@ test('release does not unlink a successor’s lock', async () => {
   });
 });
 
-// The same ABA case one step earlier: a lock judged stale is re-taken between
-// the judgement and the removal. `acquireFileLock` cannot be interleaved from a
-// single process, so the re-check is driven directly.
-test('stale removal refuses a lock that was re-taken in the meantime', async () => {
+// The takeover happens in place under an exclusive marker, so the lock path is
+// never briefly free. Same inode, new owner.
+test('taking over a stale lock never leaves the path free', async () => {
+  await withDirectory(async (directory) => {
+    const path = join(directory, 'r.lock');
+    await writeRecord(path, {
+      pid: 999_999,
+      host: hostname(),
+      token: 'departed',
+      createdAt: new Date().toISOString(),
+    });
+    const before = (await stat(path)).ino;
+
+    const result = await takeOverStaleLock({
+      path,
+      judged: { token: 'departed' },
+      token: 'mine',
+    });
+
+    assert.deepEqual(result, { kind: 'owned' });
+    assert.equal((await stat(path)).ino, before);
+    assert.equal((await record(path)).token, 'mine');
+    assert.equal((await record(path)).pid, process.pid);
+    assert.equal(await exists(`${path}.takeover`), false);
+  });
+});
+
+// The ABA case one step earlier: the lock judged stale was already taken over
+// while this contender was deciding. It must report the current owner and touch
+// nothing.
+test('a takeover of a lock that was already re-taken is lost, not forced', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'r.lock');
     await writeRecord(path, {
@@ -266,32 +297,136 @@ test('stale removal refuses a lock that was re-taken in the meantime', async () 
       createdAt: new Date().toISOString(),
     });
 
-    assert.equal(await removeStaleLock(path, { token: 'departed' }), false);
+    const result = await takeOverStaleLock({
+      path,
+      judged: { token: 'departed' },
+      token: 'mine',
+    });
+
+    assert.equal(result.kind, 'lost');
     assert.equal((await record(path)).token, 'successor');
   });
 });
 
-test('stale removal refuses a lock whose record no longer parses', async () => {
+test('a takeover of a lock that vanished reports that, and claims nothing', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'r.lock');
-    await writeFile(path, 'corrupted', { mode: 0o600 });
 
-    assert.equal(await removeStaleLock(path, { token: 'departed' }), false);
-    assert.equal(await exists(path), true);
+    const result = await takeOverStaleLock({
+      path,
+      judged: { token: 'departed' },
+      token: 'mine',
+    });
+
+    assert.deepEqual(result, { kind: 'vanished' });
+    assert.equal(await exists(path), false);
   });
 });
 
-test('stale removal treats an already-gone lock as removed', async () => {
+test('a takeover blocked by another takeover in progress claims nothing', async () => {
   await withDirectory(async (directory) => {
+    const path = join(directory, 'r.lock');
+    await writeRecord(path, {
+      pid: 999_999,
+      host: hostname(),
+      token: 'departed',
+      createdAt: new Date().toISOString(),
+    });
+    const marker = await open(`${path}.takeover`, 'wx', 0o600);
+    try {
+      const result = await takeOverStaleLock({
+        path,
+        judged: { token: 'departed' },
+        token: 'mine',
+      });
+
+      assert.deepEqual(result, { kind: 'blocked' });
+      // Untouched: the process inside the section is the one entitled to it.
+      assert.equal((await record(path)).token, 'departed');
+    } finally {
+      await marker.close();
+    }
+  });
+});
+
+test('a blocked takeover names the lock file and the takeover marker', async () => {
+  await withDirectory(async (directory) => {
+    const path = join(directory, 'r.lock');
+    await writeRecord(path, {
+      pid: 999_999,
+      host: hostname(),
+      token: 'departed',
+      createdAt: new Date().toISOString(),
+    });
+    const marker = await open(`${path}.takeover`, 'wx', 0o600);
+    try {
+      await assert.rejects(
+        acquireFileLock({ path, activeMessage: ACTIVE }),
+        (error: Error) => {
+          assert.ok(error.message.startsWith(ACTIVE));
+          assert.ok(error.message.includes(path));
+          assert.ok(error.message.includes(`${path}.takeover`));
+          assert.match(error.message, /Try again/);
+          return true;
+        },
+      );
+    } finally {
+      await marker.close();
+    }
+  });
+});
+
+// D6 under concurrency, which is what the first implementation of this slice
+// got wrong. Comparing the ownership token and then unlinking let several
+// contenders authorize their own removal from the same observation: the first
+// unlinked the stale lock and claimed a new one, and the next deleted that new
+// lock. Thirty-two contenders produced four to six winners. Exactly one may win.
+test('many contenders against one stale lock produce exactly one holder', async () => {
+  await withDirectory(async (directory) => {
+    const path = join(directory, 'r.lock');
+    await writeRecord(path, {
+      pid: 999_999,
+      host: hostname(),
+      token: 'departed',
+      createdAt: new Date().toISOString(),
+    });
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 32 }, () =>
+        acquireFileLock({ path, activeMessage: ACTIVE }),
+      ),
+    );
+
+    const winners = results.filter((result) => result.status === 'fulfilled');
+    assert.equal(winners.length, 1);
+    // The surviving record belongs to the winner, and no marker is left behind.
+    assert.equal((await record(path)).pid, process.pid);
+    assert.equal(await exists(`${path}.takeover`), false);
+
+    await (winners[0] as PromiseFulfilledResult<FileLock>).value.release();
+    assert.equal(await exists(path), false);
+  });
+});
+
+test('many contenders for a free lock path produce exactly one holder', async () => {
+  await withDirectory(async (directory) => {
+    const path = join(directory, 'r.lock');
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 32 }, () =>
+        acquireFileLock({ path, activeMessage: ACTIVE }),
+      ),
+    );
+
     assert.equal(
-      await removeStaleLock(join(directory, 'gone.lock'), { token: 'x' }),
-      true,
+      results.filter((result) => result.status === 'fulfilled').length,
+      1,
     );
   });
 });
 
 test(
-  'an unremovable stale lock is reported as still held',
+  'a takeover that cannot even be attempted surfaces the reason',
   { skip: !canObserveUnlinkFailure },
   async () => {
     await withDirectory(async (directory) => {
@@ -302,12 +437,15 @@ test(
         token: 'departed',
         createdAt: new Date().toISOString(),
       });
+      // A lock directory that cannot be written to cannot hold the takeover
+      // marker either. That is an environment fault, not contention, and it is
+      // reported as itself rather than as a held lock.
       await chmod(directory, 0o500);
       try {
-        // Judged stale but not removable: reporting success here would let the
-        // caller retry the claim forever against a lock that is still there.
-        assert.equal(await removeStaleLock(path, { token: 'departed' }), false);
-        await assert.rejects(acquireFileLock({ path, activeMessage: ACTIVE }));
+        await assert.rejects(acquireFileLock({ path, activeMessage: ACTIVE }), {
+          code: 'EACCES',
+        });
+        assert.equal((await record(path)).token, 'departed');
       } finally {
         await chmod(directory, 0o700);
       }
@@ -316,18 +454,25 @@ test(
 );
 
 test(
-  'a release that cannot unlink reports the failure rather than hiding it',
+  'a failed release can be retried once its cause is fixed',
   { skip: !canObserveUnlinkFailure },
   async () => {
     await withDirectory(async (directory) => {
       const path = join(directory, 'r.lock');
       const lock = await acquireFileLock({ path, activeMessage: ACTIVE });
+
       await chmod(directory, 0o500);
       try {
         await assert.rejects(lock.release(), { code: 'EACCES' });
       } finally {
         await chmod(directory, 0o700);
       }
+      // Marking the lock released before the unlink succeeded made this second
+      // call a no-op, which left the lock file behind for good.
+      assert.equal(await exists(path), true);
+
+      await lock.release();
+      assert.equal(await exists(path), false);
     });
   },
 );

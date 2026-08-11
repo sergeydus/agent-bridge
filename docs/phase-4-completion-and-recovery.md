@@ -1,6 +1,6 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 10, approved; slices 1 to 7 implemented
+Status: Contract revision 11, approved; slices 1 to 7 implemented
 
 Target release: 0.7.0
 
@@ -745,9 +745,26 @@ process observing it now backs off instead of unlinking a live lock.
 `FileLock.release` re-reads the record and unlinks only when the ownership
 token still matches, closing Codex's ABA case.
 
-`removeStaleLock` removes a lock only when the record parses, its host matches
-the current host, and its PID is gone. A record from a different host is not
-stale. A missing, malformed, or unparseable record is unknown, never stale.
+A lock is eligible for takeover only when the record parses, its host matches the
+current host, and its PID is gone. A record from a different host is not stale. A
+missing, malformed, or unparseable record is unknown, never stale.
+
+**Takeover must be atomic, not merely token-checked.** Revision 10's slice 7
+compared the ownership token and then unlinked, which is not a fix: two
+contenders can both read the same stale token, the first unlinks and claims a new
+lock, and the second performs its already-authorized unlink and deletes the new
+holder's lock. Codex found this under stress and it reproduces at 4 to 6 winners
+out of 32 concurrent acquirers. The window is between two syscalls and cannot be
+narrowed away.
+
+Takeover therefore happens under a marker at `<lock>.takeover`, created with the
+same exclusive open, so at most one process is inside it; and the stale record is
+overwritten **in place** rather than removed and recreated, so the lock path is
+never briefly free for a further process to claim. No process unlinks a lock file
+it does not own. A marker left by a process interrupted inside the section is
+never removed automatically either: it disables automatic takeover for that one
+lock and is named in the message, degrading to the same manual recovery as any
+unattributable lock rather than to a shared lock.
 
 **Residual failure mode, accepted knowingly.** A process killed between steps 1
 and 2 leaves a 0-byte lock that no longer self-heals; today's code would clear
@@ -897,9 +914,18 @@ lock file too large to parse is unidentified rather than assumed dead, and a
 The host string is untrusted file content and is sanitized before it reaches a
 message.
 
-`removeStaleLock` is exported so its ownership re-check can be tested against a
-record that no longer matches. The window it guards lies between two syscalls
-inside `acquireFileLock`, which a single-process test cannot interleave.
+`takeOverStaleLock` is exported so each of its outcomes — owned, lost, vanished,
+blocked — can be driven directly, and the concurrency test asserts that 32
+contenders against one stale record yield exactly one holder, no surviving
+takeover marker, and the winner's record on disk. `release` marks itself released
+only after the lock is gone or provably no longer this holder's, so a release that
+fails on a read-only directory can be retried once the cause is fixed.
+
+Leaked takeover markers are deliberately not cleaned up by chat or run deletion.
+Chat deletion holds the lock, so a concurrent takeover of it cannot be in
+progress by the classification rules — but adding an unlink path for a file
+another process may be holding trades a bounded piece of litter for a new way to
+break mutual exclusion, which is the wrong direction for this slice.
 
 Slices 1 through 6 are ordered by dependency. Slice 7 is independent of all of
 them and may be reviewed or dropped separately.
@@ -1222,6 +1248,30 @@ quoting rule can be correct. Guidance now states paths exactly and names a
 shell-neutral command, prints run ids unquoted under the `isSafeRunId` character
 set, and the `shellQuote` helper is removed rather than kept as a
 platform-specific trap.
+
+**Revision 11** replaces token-checked stale removal with an atomic takeover.
+
+Codex's stress finding is correct and was reproduced here before changing
+anything: 32 concurrent acquirers against one stale record produced 4 to 6
+winners across five iterations. The first slice 7 implementation authorized a
+removal from an observation and then acted on it, so several contenders each held
+a valid authorization to unlink — and the later ones deleted the lock the earlier
+winner had just created. My own test for that case replaced the record before the
+re-check rather than between the re-check and the unlink, so it proved the wrong
+property, and both the design note and this contract described a narrowed window
+as a closed one.
+
+Removal is gone entirely. Takeover runs under an exclusively created
+`<lock>.takeover` marker and overwrites the stale record in place; the same
+stress now yields exactly one winner in 180 rounds at 2, 32, and 64 contenders,
+with no surviving markers and the winner's record on disk. The residual
+empty-lock case recorded in revision 2 is unchanged, and the leaked-marker case
+is its exact analogue: no automatic recovery, named in the message.
+
+Codex's second finding is also correct. `release` set its released flag before
+unlinking, so a release that failed on a read-only directory could not be
+retried; a second call returned without removing anything. The flag now moves
+only after the lock is gone or is provably no longer this holder's.
 
 ## Questions for review
 

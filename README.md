@@ -470,7 +470,8 @@ run lock prevents two processes from resuming the same run concurrently.
 
 If a run or chat reports that it is already active elsewhere, the message names
 the lock file and what to do. A lock left behind by a process that no longer
-exists on this machine is cleared automatically. One that cannot be attributed —
+exists on this machine is taken over automatically. One that cannot be
+attributed —
 because it is empty, unreadable, or was written on another machine — is left
 alone deliberately, since a live owner looks the same from here; delete the named
 lock file once you are sure no Agent Bridge process is using that run or chat.

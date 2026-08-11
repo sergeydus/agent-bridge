@@ -94,7 +94,16 @@ owner is written immediately afterwards and only says who won. A lock is
 released by re-reading that record and comparing an ownership token, so a
 process whose lock was removed cannot later delete a successor's lock.
 
-A lock is removed automatically in exactly one case: its record parses, names
+A lock left behind by a process that is gone is taken over, never deleted and
+recreated. Takeover happens under a separate marker created with the same
+exclusive open, so at most one process is ever inside it, and the stale record is
+overwritten in place, so the lock path is never briefly free for a further
+process to claim. No process ever unlinks a lock file it does not own. A marker
+left behind by a process interrupted mid-takeover is not removed automatically
+either; it disables automatic recovery for that one lock and is named in the
+message, which is the same manual recovery as any unattributable lock.
+
+A lock is eligible for takeover in exactly one case: its record parses, names
 this host, and its process is gone. Every other state is left in place and
 reported — an empty file, a record from an older Agent Bridge version, content
 that does not parse, a record naming another host, or a live process. An empty

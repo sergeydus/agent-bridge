@@ -55,8 +55,10 @@ only exclusive lock, so run checkpoints and chat sessions share one definition
 of ownership and one stale-owner check. Ownership comes from winning an
 exclusive create, and the record written afterwards carries a host and an
 ownership token: a lock that cannot be attributed to a dead local process is
-never removed automatically, and a lock is released only by the holder whose
-token still matches.
+never taken over, and a lock is released only by the holder whose token still
+matches. Taking over a dead process's lock happens under an exclusively created
+marker and overwrites the record in place, so the path is never free mid-takeover
+and no process unlinks a lock file it does not own.
 
 The CLI composes modules but does not decide turn order. The orchestrator does
 not know Codex or Claude command-line syntax. Provider adapters do not decide

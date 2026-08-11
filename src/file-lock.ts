@@ -138,31 +138,106 @@ async function inspectLock(path: string): Promise<LockState> {
   return { kind: 'stale', record };
 }
 
+/** Where the exclusive right to take over a stale lock is claimed. */
+function takeoverPathFor(path: string): string {
+  return `${path}.takeover`;
+}
+
 /**
- * Removes a lock only if it is still the same lock that was judged stale. The
- * token is re-read because another process may have taken the path in between,
- * and unlinking then would hand the same lock to two holders.
+ * What happened when a lock judged stale was taken over.
  *
- * Exported so that re-check can be tested against a record that no longer
- * matches. The window it guards is between two syscalls, so a single-process
- * test cannot interleave a successor into `acquireFileLock` itself.
+ * `blocked` means another process is inside the takeover, or a previous one was
+ * killed inside it. That marker is never removed automatically either, so the
+ * worst case degrades to the same manual recovery as any unattributable lock
+ * rather than to a shared lock.
  */
-export async function removeStaleLock(
-  path: string,
-  record: { token: string },
-): Promise<boolean> {
-  const current = await readLockRecord(path);
-  if (current.kind === 'absent') {
-    return true;
-  }
-  if (current.kind !== 'record' || current.record.token !== record.token) {
-    return false;
+type TakeoverResult =
+  | { kind: 'owned' }
+  | { kind: 'vanished' }
+  | { kind: 'lost'; state: LockState }
+  | { kind: 'blocked' };
+
+/**
+ * Takes over a lock judged stale, without ever unlinking it.
+ *
+ * Comparing the ownership token and then unlinking is not enough, and this is
+ * the correction to the first implementation of this slice: two contenders can
+ * both read the same stale token, the first unlinks it and claims a new lock,
+ * and the second then performs its already-authorized unlink and deletes the new
+ * holder's lock. Thirty-two concurrent acquirers against one stale record
+ * produced four to six winners that way. Narrowing the window is not a fix,
+ * because the window is between two syscalls that cannot be fused.
+ *
+ * Two changes close it. Takeover happens under an exclusively created marker, so
+ * at most one process is ever inside it, and the stale record is overwritten in
+ * place rather than removed and recreated, so the lock path is never briefly
+ * free for a fourth process to claim. No foreign lock file is ever unlinked.
+ */
+export async function takeOverStaleLock({
+  path,
+  judged,
+  token,
+}: {
+  path: string;
+  judged: { token: string };
+  token: string;
+}): Promise<TakeoverResult> {
+  const takeoverPath = takeoverPathFor(path);
+  let marker;
+  try {
+    marker = await open(takeoverPath, 'wx', 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+      return { kind: 'blocked' };
+    }
+    throw error;
   }
   try {
-    await unlink(path);
-    return true;
+    await marker.writeFile(
+      `${JSON.stringify({
+        pid: process.pid,
+        host: hostname(),
+        token,
+        createdAt: new Date().toISOString(),
+      })}\n`,
+    );
+    // Re-judged inside the exclusive section: a previous takeover may have
+    // already handed this lock to a live process.
+    const state = await inspectLock(path);
+    if (state.kind === 'absent') {
+      return { kind: 'vanished' };
+    }
+    if (state.kind !== 'stale' || state.record.token !== judged.token) {
+      return { kind: 'lost', state };
+    }
+    const handle = await open(path, 'r+');
+    try {
+      await handle.truncate(0);
+      await handle.write(
+        `${JSON.stringify({
+          pid: process.pid,
+          host: hostname(),
+          token,
+          createdAt: new Date().toISOString(),
+        })}\n`,
+        0,
+      );
+    } finally {
+      await handle.close();
+    }
+    return { kind: 'owned' };
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT';
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // The stale lock disappeared between the re-judgement and the overwrite.
+      return { kind: 'vanished' };
+    }
+    throw error;
+  } finally {
+    await marker.close().catch(() => {});
+    // Safe to unlink by path: nothing else can have replaced this marker while
+    // this process held it, because creating it requires an exclusive create
+    // that fails for as long as it exists.
+    await unlink(takeoverPath).catch(() => {});
   }
 }
 
@@ -223,24 +298,34 @@ export class FileLock {
 
   /**
    * Releases only this holder's lock. The record is re-read and the ownership
-   * token compared first: a lock that was removed as stale and re-taken by
-   * another process must not be unlinked here, which would leave that process
-   * believing it still holds a lock that no longer exists.
+   * token compared first: a lock that was taken over as stale by another
+   * process must not be unlinked here, which would leave that process believing
+   * it still holds a lock that no longer exists.
+   *
+   * The released flag is set only once the lock is actually gone or provably not
+   * this holder's any more. Setting it up front made a failed release
+   * unretryable: a release that hit `EACCES` returned, and the next call
+   * returned immediately without removing anything.
    */
   async release(): Promise<void> {
     if (this.#released) {
       return;
     }
-    this.#released = true;
     const current = await readLockRecord(this.#path);
     if (current.kind !== 'record' || current.record.token !== this.#token) {
+      // Absent, or no longer this holder's: there is nothing left to release,
+      // and nothing a retry could achieve.
+      this.#released = true;
       return;
     }
     await unlink(this.#path).catch((error: NodeJS.ErrnoException) => {
       if (error.code !== 'ENOENT') {
+        // Left unreleased on purpose, so a caller that can fix the cause — a
+        // read-only parent directory, say — can call release again.
         throw error;
       }
     });
+    this.#released = true;
   }
 }
 
@@ -281,16 +366,39 @@ export async function acquireFileLock({
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         throw error;
       }
-      const state = await inspectLock(path);
+      let state = await inspectLock(path);
       if (attempt === 0) {
         if (state.kind === 'absent') {
           continue;
         }
-        if (
-          state.kind === 'stale' &&
-          (await removeStaleLock(path, state.record))
-        ) {
-          continue;
+        if (state.kind === 'stale') {
+          const takeover = await takeOverStaleLock({
+            path,
+            judged: state.record,
+            token,
+          });
+          if (takeover.kind === 'owned') {
+            // Taken over in place: this process's record is now the one at the
+            // path, so it holds the lock without the path ever being free.
+            return new FileLock(path, token);
+          }
+          if (takeover.kind === 'vanished') {
+            continue;
+          }
+          if (takeover.kind === 'blocked') {
+            throw new Error(
+              `${activeMessage} A lock left behind by a process that is no ` +
+                `longer running is being taken over by another Agent Bridge ` +
+                `process, or by one that was interrupted while doing so. The ` +
+                `lock file is ${path} and the takeover marker is ` +
+                `${takeoverPathFor(path)}. Try again, and if this persists ` +
+                `with no Agent Bridge process running, delete both files.`,
+              { cause: error },
+            );
+          }
+          // Lost the takeover: another process owns the lock now, so report
+          // that owner rather than the record this attempt judged stale.
+          state = takeover.state;
         }
       }
       throw new Error(`${activeMessage} ${describeOwner(state, path)}`, {
