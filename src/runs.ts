@@ -1,6 +1,7 @@
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import { planWorkspaceRemoval } from './artifacts.ts';
 import { removeIsolatedWorktree } from './git.ts';
 import type { SavedRun } from './state.ts';
 import { RunStateStore } from './state.ts';
@@ -55,10 +56,12 @@ export async function discardRunWorkspace({
   run,
   store,
   removeWorkspace = removeIsolatedWorktree,
+  plan = planWorkspaceRemoval,
 }: {
   run: SavedRun;
   store: RunStateStore;
   removeWorkspace?: typeof removeIsolatedWorktree;
+  plan?: typeof planWorkspaceRemoval;
 }): Promise<string> {
   if (!run.workspace) {
     throw new Error(`Run ${run.id} has no retained workspace.`);
@@ -69,6 +72,19 @@ export async function discardRunWorkspace({
     );
   }
   const workspace = run.workspace;
+  // The workspace may have been edited since the run wrote its patch, so the
+  // same preservation gate the completion step uses runs again here. This path
+  // is never interactive, so unanchored history is refused rather than
+  // confirmed.
+  const removal = await plan({
+    workspace,
+    patchPath: join(run.outputDirectory, `${run.id}.patch`),
+    baseRevision: run.baseRevision,
+    interactive: false,
+  });
+  if (!removal.removable) {
+    throw new Error(sanitizeTerminalText(removal.reason));
+  }
   await removeWorkspace({
     repository: run.originalCwd,
     workspace,

@@ -1157,5 +1157,3 @@ guaranteed mutual exclusion and mitigated by naming that case in the recovery
 message; scoping `completion` to the run's own completion step, which follows
 from the version 3 cross-field invariants; and the committed-history safeguard,
 now keyed on anchoring per this review.
-
-Ready for slice 1 on approval.

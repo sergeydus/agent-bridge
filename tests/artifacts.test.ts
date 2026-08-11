@@ -10,6 +10,7 @@ import {
   createTerminalCompletionPrompt,
   finishIsolatedRun,
   patchApplicationRefusalReason,
+  planWorkspaceRemoval,
   recordRunCompletion,
   type CompletionPrompt,
   type CompletionResult,
@@ -237,28 +238,34 @@ test('applies the patch to the original checkout when asked', async () => {
 });
 
 test('refuses to apply a patch for a run that recorded no base revision', async () => {
-  await withFixture(async ({ repository, workspace, patchPath, reporter }) => {
-    const prompt = scriptedPrompt(['2']);
-    const result = await finishIsolatedRun({
-      repository,
-      workspace,
-      patchPath,
-      baseRevision: undefined,
-      reporter,
-      createPrompt: () => prompt,
-    });
+  await withFixture(
+    async ({ repository, workspace, patchPath, baseRevision, reporter }) => {
+      const prompt = scriptedPrompt(['2']);
+      const result = await finishIsolatedRun({
+        repository,
+        workspace,
+        patchPath,
+        // A resumed legacy run: a patch can still be captured against a
+        // derived baseline, but nothing may be applied on its authority.
+        baseRevision: undefined,
+        derivedBaseRevision: baseRevision,
+        reporter,
+        createPrompt: () => prompt,
+      });
 
-    assert.equal(result.outcome, 'apply-refused');
-    assert.match(result.reason ?? '', /predates base-revision tracking/);
-    assert.deepEqual(
-      { patchPath: result.patchPath, workspace: result.workspace },
-      { patchPath, workspace },
-    );
-    assert.equal(
-      await readFile(join(repository, 'tracked.txt'), 'utf8'),
-      'before\n',
-    );
-  });
+      assert.equal(result.outcome, 'apply-refused');
+      assert.match(result.reason ?? '', /predates base-revision tracking/);
+      assert.deepEqual(
+        { patchPath: result.patchPath, workspace: result.workspace },
+        { patchPath, workspace },
+      );
+      assert.equal(await exists(patchPath), true);
+      assert.equal(
+        await readFile(join(repository, 'tracked.txt'), 'utf8'),
+        'before\n',
+      );
+    },
+  );
 });
 
 test('refuses to apply when the original checkout moved to another commit', async () => {
@@ -824,5 +831,290 @@ test('a declined completion leaves a reloaded checkpoint completed', async () =>
     assert.equal(reloaded.status, 'completed');
     assert.equal(reloaded.completion?.outcome, 'declined');
     assert.equal(reloaded.completion?.reason, undefined);
+  });
+});
+
+test('a workspace edited after its patch was written is re-patched before removal', async () => {
+  await withFixture(async (fixture) => {
+    // The patch the run wrote at completion time.
+    await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      reporter: fixture.reporter,
+      createPrompt: () => undefined,
+    });
+    const stale = await readFile(fixture.patchPath, 'utf8');
+
+    // Work done in the workspace afterwards, which the stale patch cannot know.
+    await writeFile(join(fixture.workspace, 'later.txt'), 'added later\n');
+    const plan = await planWorkspaceRemoval({
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      interactive: false,
+    });
+
+    assert.equal(plan.removable, true);
+    const refreshed = await readFile(fixture.patchPath, 'utf8');
+    assert.notEqual(refreshed, stale);
+    assert.match(refreshed, /later\.txt/);
+  });
+});
+
+test('a workspace holding a commit produces a patch containing it', async () => {
+  await withFixture(async (fixture) => {
+    await execute('git', ['add', '--all'], { cwd: fixture.workspace });
+    await execute('git', ['commit', '-m', 'work committed inside'], {
+      cwd: fixture.workspace,
+    });
+
+    const plan = await planWorkspaceRemoval({
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      interactive: true,
+    });
+
+    assert.equal(plan.removable, true);
+    // D8: an implied HEAD baseline produced an empty patch here, silently
+    // dropping every committed change.
+    assert.equal(plan.removable && plan.patchPath, fixture.patchPath);
+    assert.match(await readFile(fixture.patchPath, 'utf8'), /after/);
+  });
+});
+
+test('a workspace with no changes is removable and needs no patch', async () => {
+  await withFixture(
+    async (fixture) => {
+      const plan = await planWorkspaceRemoval({
+        workspace: fixture.workspace,
+        patchPath: fixture.patchPath,
+        baseRevision: fixture.baseRevision,
+        interactive: false,
+      });
+
+      // Nothing to lose, so a missing patch must not block removal forever.
+      assert.equal(plan.removable, true);
+      assert.equal(plan.removable && plan.patchPath, undefined);
+      assert.equal(await exists(fixture.patchPath), false);
+    },
+    { edit: false },
+  );
+});
+
+test('removal is refused for a run that recorded no base revision', async () => {
+  await withFixture(async (fixture) => {
+    const plan = await planWorkspaceRemoval({
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: undefined,
+      interactive: true,
+    });
+
+    assert.equal(plan.removable, false);
+    assert.equal(plan.removable === false && plan.outcome, 'discard-failed');
+    assert.match(
+      plan.removable === false ? plan.reason : '',
+      /recorded no base revision/,
+    );
+    assert.equal(await exists(fixture.workspace), true);
+  });
+});
+
+test('unattended removal is refused while workspace commits are unanchored', async () => {
+  await withFixture(async (fixture) => {
+    await execute('git', ['add', '--all'], { cwd: fixture.workspace });
+    await execute('git', ['commit', '-m', 'unanchored work'], {
+      cwd: fixture.workspace,
+    });
+
+    const refused = await planWorkspaceRemoval({
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      interactive: false,
+    });
+    assert.equal(refused.removable, false);
+    assert.match(
+      refused.removable === false ? refused.reason : '',
+      /1 commit ahead .*no branch or tag contains those commits/s,
+    );
+    assert.match(
+      refused.removable === false ? refused.reason : '',
+      /git branch <name>/,
+    );
+
+    // Following the advice must actually clear the refusal.
+    await execute('git', ['branch', 'keep-my-work'], {
+      cwd: fixture.workspace,
+    });
+    const allowed = await planWorkspaceRemoval({
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      interactive: false,
+    });
+    assert.equal(allowed.removable, true);
+    assert.equal(allowed.removable && allowed.unanchoredHistory, undefined);
+  });
+});
+
+test('interactive removal of unanchored history states what a patch cannot carry', async () => {
+  await withFixture(async (fixture) => {
+    await execute('git', ['add', '--all'], { cwd: fixture.workspace });
+    await execute('git', ['commit', '-m', 'unanchored work'], {
+      cwd: fixture.workspace,
+    });
+
+    const prompt = scriptedPrompt(['3', 'y']);
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      reporter: fixture.reporter,
+      createPrompt: () => prompt,
+    });
+
+    assert.equal(result.outcome, 'discarded');
+    assert.match(
+      prompt.questions[1] ?? '',
+      /commit messages, authorship, signatures, or topology/,
+    );
+    assert.equal(await exists(fixture.workspace), false);
+    assert.match(await readFile(fixture.patchPath, 'utf8'), /after/);
+  });
+});
+
+test('a resumed run with no recorded baseline never gains one', async () => {
+  await withFixture(async (fixture) => {
+    const stateDirectory = join(fixture.root, 'state');
+    const store = new RunStateStore(stateDirectory);
+    // A legacy checkpoint: it predates base-revision tracking.
+    const legacy = savedRunFixture({
+      originalCwd: fixture.repository,
+      agentCwd: fixture.workspace,
+      workspace: fixture.workspace,
+      outputDirectory: fixture.root,
+    });
+    assert.equal(legacy.baseRevision, undefined);
+
+    const result = await recordRunCompletion({
+      markCompleted: () => store.save(legacy).then(() => undefined),
+      finish: () =>
+        finishIsolatedRun({
+          repository: fixture.repository,
+          workspace: fixture.workspace,
+          patchPath: fixture.patchPath,
+          baseRevision: legacy.baseRevision,
+          // Derived at startup by the resuming process.
+          derivedBaseRevision: fixture.baseRevision,
+          reporter: fixture.reporter,
+          createPrompt: () => scriptedPrompt(['2']),
+        }),
+      recordOutcome: async (finished) => {
+        await store.save({
+          ...legacy,
+          // cli.ts persists the recorded baseline, which is still absent.
+          baseRevision: legacy.baseRevision,
+          completion: {
+            outcome: finished.outcome,
+            recordedAt: '2026-08-11T00:00:01.000Z',
+            reason: finished.reason,
+          },
+        });
+      },
+      reporter: fixture.reporter,
+    });
+
+    // Apply is refused for the recorded-baseline reason, not silently allowed
+    // against the revision derived at startup.
+    assert.equal(result?.outcome, 'apply-refused');
+    assert.match(result?.reason ?? '', /predates base-revision tracking/);
+    assert.equal(
+      await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'),
+      'before\n',
+    );
+
+    // Discard is refused for the same reason.
+    const removal = await planWorkspaceRemoval({
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: legacy.baseRevision,
+      interactive: true,
+    });
+    assert.equal(removal.removable, false);
+
+    const reloaded = await store.load(legacy.id);
+    assert.equal(reloaded.status, 'completed');
+    assert.equal(reloaded.baseRevision, undefined);
+    assert.equal(reloaded.completion?.outcome, 'apply-refused');
+  });
+});
+
+test('removal is refused when a complete patch cannot be created', async () => {
+  await withFixture(async (fixture) => {
+    const plan = await planWorkspaceRemoval({
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      // Nothing can be diffed against a revision that does not exist.
+      baseRevision: 'not-a-revision',
+      interactive: true,
+    });
+
+    assert.equal(plan.removable, false);
+    assert.equal(plan.removable === false && plan.outcome, 'patch-failed');
+    assert.match(
+      plan.removable === false ? plan.reason : '',
+      /kept because a complete patch could not be created/,
+    );
+    assert.equal(await exists(fixture.workspace), true);
+  });
+});
+
+test('the completion step keeps a workspace it cannot capture at all', async () => {
+  await withFixture(async (fixture) => {
+    const prompt = scriptedPrompt([]);
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: undefined,
+      derivedBaseRevision: undefined,
+      reporter: fixture.reporter,
+      createPrompt: () => prompt,
+    });
+
+    assert.equal(result.outcome, 'patch-failed');
+    assert.match(result.reason ?? '', /No base revision is available/);
+    assert.equal(result.workspace, fixture.workspace);
+    assert.deepEqual(prompt.questions, []);
+    assert.equal(await exists(fixture.workspace), true);
+  });
+});
+
+test('a legacy run is refused a discard without being asked to confirm it', async () => {
+  await withFixture(async (fixture) => {
+    const prompt = scriptedPrompt(['3']);
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      // Recorded nothing, so removal cannot be proven safe at all.
+      baseRevision: undefined,
+      derivedBaseRevision: fixture.baseRevision,
+      reporter: fixture.reporter,
+      createPrompt: () => prompt,
+      removeWorkspace: () => Promise.reject(new Error('must not be reached')),
+    });
+
+    assert.equal(result.outcome, 'discard-failed');
+    assert.match(result.reason ?? '', /recorded no base revision/);
+    assert.equal(result.workspace, fixture.workspace);
+    // Asking to confirm a removal that will not happen would be misleading.
+    assert.equal(prompt.questions.length, 1);
+    assert.equal(await exists(fixture.workspace), true);
   });
 });

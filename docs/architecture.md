@@ -142,7 +142,15 @@ run-data directory from the source repository's committed `HEAD`. Agent edits,
 snapshots, verification, and reviews all use that isolated path. Completion
 produces a portable binary patch using an alternate Git index, which includes
 tracked changes, deletions, executable-bit changes, symlinks, binaries, and
-ordinary untracked files without mutating the real index.
+ordinary untracked files without mutating the real index. Patch creation and
+workspace fingerprinting both take that baseline as a required argument rather
+than implying it from the workspace's `HEAD`, so a commit made inside the
+workspace stays inside the patch and changes the fingerprint.
+
+Every artifact a subprocess produces is published atomically through
+`filesystem.ts`: Git writes into a private temporary file that is renamed into
+place only once complete, so an interrupted capture leaves no file that would
+read as a whole one.
 
 Direct editing is an explicit advanced mode. When accepted beside existing
 changes, those paths are fingerprinted before the first agent call and checked

@@ -1,6 +1,6 @@
 #!/usr/bin/env -S node --experimental-strip-types
 
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,7 @@ import {
   repositoryRoot,
   workspaceFingerprint,
 } from './git.ts';
+import { writePrivateFileAtomic } from './filesystem.ts';
 import { loadInstructionContext } from './instructions.ts';
 import { runOrchestration } from './orchestrator.ts';
 import { HELP, parseArgs } from './options.ts';
@@ -214,7 +215,18 @@ async function main(): Promise<void> {
 
   let repository: string | undefined;
   let workspace = resumedRun?.workspace;
+  /**
+   * The authoritative baseline: observed by the run that created this
+   * workspace. Only this value may authorize applying a patch or removing a
+   * workspace.
+   */
   let baseRevision = resumedRun?.baseRevision;
+  /**
+   * A fallback for a resumed run that recorded no baseline. It supports
+   * reporting and comparisons whose failure mode is a message, and is never
+   * persisted, so "the original baseline is unknown" survives every resume.
+   */
+  let derivedBaseRevision: string | undefined;
   let recoveryPatchPath = resumedRun?.recoveryPatchPath;
   let needsDirectDirtyRecoveryPatch = false;
   if (projectKind === 'git') {
@@ -228,9 +240,17 @@ async function main(): Promise<void> {
       );
     }
     if (hasHead) {
-      baseRevision ??= options.dryRun
+      const observed = options.dryRun
         ? 'dry-run-head'
         : await currentCommit(repository);
+      if (resumedRun) {
+        derivedBaseRevision = baseRevision ?? observed;
+      } else {
+        // A fresh run observed the commit its workspace is built from, so this
+        // is a recorded baseline rather than a guess.
+        baseRevision = observed;
+        derivedBaseRevision = observed;
+      }
     }
   }
 
@@ -371,6 +391,9 @@ continue from its actual state instead of repeating changes blindly.`;
       const recoveryPatch = await createPatch({
         workspace: originalCwd,
         destination: recoveryPatchPath,
+        // Direct dirty editing captures the user's own work against the
+        // commit it sits on, which is the checkout's own HEAD.
+        baseRevision: await currentCommit(originalCwd),
       });
       if (!recoveryPatch) {
         throw new Error(
@@ -502,7 +525,8 @@ continue from its actual state instead of repeating changes blindly.`;
       reporter,
       runAgent: callAgent,
       captureWorkspace: async () => {
-        if (projectKind !== 'git' || !baseRevision) {
+        const fingerprintBase = baseRevision ?? derivedBaseRevision;
+        if (projectKind !== 'git' || !fingerprintBase) {
           return {
             snapshot:
               '[read-only project review: inspect project files directly]',
@@ -511,7 +535,13 @@ continue from its actual state instead of repeating changes blindly.`;
         const [snapshot, status, revision] = await Promise.all([
           workingTreeSnapshot(options),
           workingTreeStatus(options),
-          workspaceFingerprint(options.cwd),
+          // Cycle-to-cycle comparison only needs a baseline that is stable
+          // across the run, so a derived one is safe here: its failure mode is
+          // a revision string, never a deletion.
+          workspaceFingerprint({
+            workspace: options.cwd,
+            baseRevision: fingerprintBase,
+          }),
         ]);
         for (const [path, expected] of Object.entries(
           protectedPathFingerprints,
@@ -590,15 +620,15 @@ continue from its actual state instead of repeating changes blindly.`;
         synthesis: result.synthesis,
       };
       await Promise.all([
-        writeFile(transcriptPath, formatMarkdownTranscript(transcript), {
-          mode: 0o600,
-        }),
-        writeFile(
+        writePrivateFileAtomic(
+          transcriptPath,
+          formatMarkdownTranscript(transcript),
+        ),
+        writePrivateFileAtomic(
           join(options.output, `${runId}.json`),
           `${JSON.stringify(transcript, null, 2)}\n`,
-          { mode: 0o600 },
         ),
-        writeFile(
+        writePrivateFileAtomic(
           join(options.output, `${runId}.context.json`),
           `${JSON.stringify(
             {
@@ -617,7 +647,6 @@ continue from its actual state instead of repeating changes blindly.`;
             null,
             2,
           )}\n`,
-          { mode: 0o600 },
         ),
       ]);
       reporter.success(`Saved the transcript to ${transcriptPath}`);
@@ -646,6 +675,7 @@ continue from its actual state instead of repeating changes blindly.`;
                 workspace: isolatedWorkspace,
                 patchPath: join(options.output, `${runId}.patch`),
                 baseRevision,
+                derivedBaseRevision,
                 reporter,
               })
           : undefined,

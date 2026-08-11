@@ -5,6 +5,8 @@ import {
   canApplyPatch,
   createPatch,
   currentCommit,
+  describeCommitsSinceBase,
+  isCommitAnchored,
   removeIsolatedWorktree,
 } from './git.ts';
 import {
@@ -157,6 +159,101 @@ export interface CompletionResult {
   applied?: boolean;
 }
 
+export type WorkspaceRemovalPlan =
+  | {
+      removable: false;
+      outcome: 'patch-failed' | 'discard-failed';
+      reason: string;
+    }
+  | {
+      removable: true;
+      patchPath?: string;
+      unanchoredHistory?: { commits?: number; diverged: boolean };
+    };
+
+function describeUnanchoredHistory(history: {
+  commits?: number;
+  diverged: boolean;
+}): string {
+  return history.diverged
+    ? 'has diverged from the revision it started at'
+    : `is ${history.commits} commit${history.commits === 1 ? '' : 's'} ahead of the revision it started at`;
+}
+
+/**
+ * Decides whether a workspace can be removed without losing work, and is the
+ * single gate for both the completion step and run management. Removal is
+ * permanent, so every question is answered from the workspace's current
+ * contents rather than from an artifact written earlier.
+ */
+export async function planWorkspaceRemoval({
+  workspace,
+  patchPath,
+  baseRevision,
+  interactive,
+}: {
+  workspace: string;
+  patchPath: string;
+  baseRevision?: string;
+  interactive: boolean;
+}): Promise<WorkspaceRemovalPlan> {
+  if (!baseRevision) {
+    return {
+      removable: false,
+      outcome: 'discard-failed',
+      reason: boundedCompletionReason(
+        'This run recorded no base revision, so the workspace cannot be ' +
+          `proven safe to remove. It was kept: ${workspace}`,
+      ),
+    };
+  }
+
+  // A retained workspace may have been edited since its patch was written, so
+  // the patch is rewritten from the current contents before anything is lost.
+  let patchCreated: boolean;
+  try {
+    patchCreated = await createPatch({
+      workspace,
+      destination: patchPath,
+      baseRevision,
+    });
+  } catch (error) {
+    return {
+      removable: false,
+      outcome: 'patch-failed',
+      reason: boundedCompletionReason(
+        `The workspace was kept because a complete patch could not be created: ${errorMessage(error)}`,
+      ),
+    };
+  }
+
+  const history = await describeCommitsSinceBase({ workspace, baseRevision });
+  // Only commits made inside the workspace are at stake; on the normal path
+  // HEAD still equals the base and none of this engages.
+  const anchored =
+    history.head === baseRevision ||
+    (await isCommitAnchored({ workspace, revision: history.head }));
+  if (!anchored && !interactive) {
+    return {
+      removable: false,
+      outcome: 'discard-failed',
+      reason: boundedCompletionReason(
+        `The workspace ${describeUnanchoredHistory(history)}, and no branch or ` +
+          'tag contains those commits. A patch preserves the resulting files ' +
+          'but not commit messages, authorship, signatures, or topology. Run ' +
+          `\`git branch <name> ${history.head}\` from inside the workspace to ` +
+          `keep that history, then remove it again. Workspace: ${workspace}`,
+      ),
+    };
+  }
+
+  return {
+    removable: true,
+    patchPath: patchCreated ? patchPath : undefined,
+    ...(anchored ? {} : { unanchoredHistory: history }),
+  };
+}
+
 /**
  * Resolves the end of an editing run to exactly one outcome. Every failure here
  * is reported as an outcome rather than thrown, because the agents' work is
@@ -167,6 +264,7 @@ export async function finishIsolatedRun({
   workspace,
   patchPath,
   baseRevision,
+  derivedBaseRevision,
   reporter,
   createPrompt = createTerminalCompletionPrompt,
   apply = applyPatch,
@@ -176,14 +274,31 @@ export async function finishIsolatedRun({
   workspace: string;
   patchPath: string;
   baseRevision?: string;
+  derivedBaseRevision?: string;
   reporter: ProgressReporter;
   createPrompt?: () => CompletionPrompt | undefined;
   apply?: typeof applyPatch;
   removeWorkspace?: typeof removeIsolatedWorktree;
 }): Promise<CompletionResult> {
+  // Capturing a patch is non-destructive, so a derived baseline may serve a
+  // resumed run that recorded none. Applying and removing may not: those read
+  // `baseRevision` and refuse when it is absent.
+  const patchBaseRevision = baseRevision ?? derivedBaseRevision;
+  if (!patchBaseRevision) {
+    const reason = boundedCompletionReason(
+      'No base revision is available, so no patch could be captured. ' +
+        `The workspace was kept: ${workspace}`,
+    );
+    reporter.warning(reason);
+    return { outcome: 'patch-failed', reason, workspace };
+  }
   let patchCreated: boolean;
   try {
-    patchCreated = await createPatch({ workspace, destination: patchPath });
+    patchCreated = await createPatch({
+      workspace,
+      destination: patchPath,
+      baseRevision: patchBaseRevision,
+    });
   } catch (error) {
     const reason = boundedCompletionReason(
       `The patch could not be created: ${errorMessage(error)}`,
@@ -251,13 +366,35 @@ export async function finishIsolatedRun({
       return { outcome: 'applied', patchPath, workspace, applied: true };
     }
     if (choice === '3') {
+      const plan = await planWorkspaceRemoval({
+        workspace,
+        patchPath,
+        baseRevision,
+        interactive: true,
+      });
+      if (!plan.removable) {
+        reporter.warning(plan.reason);
+        return {
+          outcome: plan.outcome,
+          reason: plan.reason,
+          patchPath,
+          workspace,
+        };
+      }
       const confirmed = await askForChoice(prompt, {
-        question: 'Discard this isolated workspace permanently? [y/N]: ',
+        question: plan.unanchoredHistory
+          ? `This workspace ${describeUnanchoredHistory(plan.unanchoredHistory)}, ` +
+            'and no branch or tag contains those commits. The patch preserves ' +
+            'the resulting files, but not commit messages, authorship, ' +
+            'signatures, or topology.\n' +
+            'Discard this isolated workspace permanently? [y/N]: '
+          : 'Discard this isolated workspace permanently? [y/N]: ',
+        retryQuestion: 'Discard this isolated workspace permanently? [y/N]: ',
         choices: ['y', 'yes', 'n', 'no'],
         defaultChoice: 'n',
       });
       if (confirmed === undefined) {
-        return { outcome: 'declined', patchPath, workspace };
+        return { outcome: 'declined', patchPath: plan.patchPath, workspace };
       }
       if (['y', 'yes'].includes(confirmed)) {
         try {
@@ -267,11 +404,17 @@ export async function finishIsolatedRun({
             `The isolated workspace could not be removed: ${errorMessage(error)}`,
           );
           reporter.warning(reason);
-          return { outcome: 'discard-failed', reason, patchPath, workspace };
+          return {
+            outcome: 'discard-failed',
+            reason,
+            patchPath: plan.patchPath,
+            workspace,
+          };
         }
         reporter.success('Discarded the isolated workspace.');
-        return { outcome: 'discarded', patchPath };
+        return { outcome: 'discarded', patchPath: plan.patchPath };
       }
+      return { outcome: 'kept', patchPath: plan.patchPath, workspace };
     }
     return { outcome: 'kept', patchPath, workspace };
   } finally {

@@ -437,7 +437,18 @@ protected paths, and workspace recorded in the checkpoint. It does not silently
 adopt a changed project configuration.
 
 Discarding a workspace validates and removes the exact Git-registered worktree
-while retaining run history. Deleting a run removes its checkpoint and
+while retaining run history. Nothing is removed until the work in it is
+preserved: a complete patch is rewritten from the workspace's current contents
+first, so edits made after the run finished are captured rather than lost. A
+workspace whose run recorded no base revision cannot be proven safe to remove
+and is kept. If commits were made inside the workspace and no branch or tag
+contains them, unattended removal is refused and the message explains how to
+anchor them with `git branch`; the interactive prompt lets you discard them
+anyway, after saying plainly that a patch preserves the resulting files but not
+commit messages, authorship, signatures, or topology. A workspace with no
+changes needs no patch and is always removable.
+
+Deleting a run removes its checkpoint and
 transcript artifacts but preserves an editable worktree. Pruning removes only
 completed or cancelled runs older than the requested age and skips every
 retained worktree.

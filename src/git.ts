@@ -1,16 +1,9 @@
 import { createHash } from 'node:crypto';
-import {
-  chmod,
-  mkdir,
-  mkdtemp,
-  realpath,
-  rm,
-  stat,
-  writeFile,
-} from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 
+import { producePrivateFileAtomic } from './filesystem.ts';
 import { runProcess } from './process.ts';
 
 export interface CommandResult {
@@ -120,30 +113,29 @@ export async function removeIsolatedWorktree({
   });
 }
 
+/**
+ * Captures a workspace against an explicit baseline. The baseline is required
+ * rather than implied from `HEAD`, because a workspace whose `HEAD` has moved
+ * would otherwise produce a patch that silently omits every committed change.
+ */
 export async function createPatch({
   workspace,
   destination,
+  baseRevision,
 }: {
   workspace: string;
   destination: string;
+  baseRevision: string;
 }): Promise<boolean> {
-  await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
-  const absoluteDestination = resolve(destination);
-  await writeFile(absoluteDestination, '', { mode: 0o600 });
-  try {
-    await runCompleteWorkspaceDiff(workspace, {
-      outputPath: absoluteDestination,
-    });
-    if ((await stat(absoluteDestination)).size === 0) {
-      await rm(absoluteDestination, { force: true });
-      return false;
-    }
-    await chmod(absoluteDestination, 0o600);
-    return true;
-  } catch (error) {
-    await rm(absoluteDestination, { force: true }).catch(() => {});
-    throw error;
-  }
+  return producePrivateFileAtomic({
+    destination: resolve(destination),
+    produce: (temporaryPath) =>
+      runCompleteWorkspaceDiff(workspace, {
+        baseRevision,
+        outputPath: temporaryPath,
+      }),
+    keep: async (temporaryPath) => (await stat(temporaryPath)).size > 0,
+  });
 }
 
 /**
@@ -153,9 +145,11 @@ export async function createPatch({
 async function runCompleteWorkspaceDiff(
   workspace: string,
   {
+    baseRevision,
     outputPath,
     onStdoutChunk,
   }: {
+    baseRevision: string;
     outputPath?: string;
     onStdoutChunk?: (chunk: string) => void;
   },
@@ -166,7 +160,7 @@ async function runCompleteWorkspaceDiff(
   const temporaryIndex = join(temporaryDirectory, 'index');
   const env = { ...process.env, GIT_INDEX_FILE: temporaryIndex };
   try {
-    await execute('git', ['read-tree', 'HEAD'], { cwd: workspace, env });
+    await execute('git', ['read-tree', baseRevision], { cwd: workspace, env });
     await execute('git', ['add', '--all', '--', '.'], { cwd: workspace, env });
     await execute(
       'git',
@@ -176,7 +170,7 @@ async function runCompleteWorkspaceDiff(
         '--binary',
         '--no-ext-diff',
         ...(outputPath ? [`--output=${outputPath}`] : []),
-        'HEAD',
+        baseRevision,
       ],
       {
         cwd: workspace,
@@ -190,14 +184,85 @@ async function runCompleteWorkspaceDiff(
   }
 }
 
+/**
+ * Reports whether any branch or tag contains the commit, which is what decides
+ * whether removing a worktree drops the last reference to its history. Refs are
+ * shared across worktrees, so this is correct from inside the workspace.
+ */
+export async function isCommitAnchored({
+  workspace,
+  revision,
+}: {
+  workspace: string;
+  revision: string;
+}): Promise<boolean> {
+  const result = await execute(
+    'git',
+    [
+      'for-each-ref',
+      `--contains=${revision}`,
+      '--count=1',
+      '--format=%(refname)',
+      'refs/heads',
+      'refs/tags',
+    ],
+    { cwd: workspace },
+  );
+  return result.stdout.trim() !== '';
+}
+
+/**
+ * Describes how far a workspace has moved from its baseline. `baseRevision` is
+ * not necessarily an ancestor of `HEAD` — a reset or rebase inside the
+ * workspace breaks that — so a commit count is reported only when it is.
+ */
+export async function describeCommitsSinceBase({
+  workspace,
+  baseRevision,
+}: {
+  workspace: string;
+  baseRevision: string;
+}): Promise<{ head: string; commits?: number; diverged: boolean }> {
+  const head = await currentCommit(workspace);
+  if (head === baseRevision) {
+    return { head, commits: 0, diverged: false };
+  }
+  const ancestry = await execute(
+    'git',
+    ['merge-base', '--is-ancestor', baseRevision, head],
+    { cwd: workspace, allowedExitCodes: [0, 1] },
+  );
+  if (ancestry.exitCode !== 0) {
+    return { head, diverged: true };
+  }
+  const counted = await execute(
+    'git',
+    ['rev-list', '--count', `${baseRevision}..${head}`],
+    { cwd: workspace },
+  );
+  return { head, commits: Number(counted.stdout.trim()), diverged: false };
+}
+
 export async function currentCommit(cwd: string): Promise<string> {
   const result = await execute('git', ['rev-parse', 'HEAD'], { cwd });
   return result.stdout.trim();
 }
 
-export async function workspaceFingerprint(workspace: string): Promise<string> {
+/**
+ * Fingerprints a workspace against a fixed baseline. Taken against the base
+ * rather than the moving `HEAD`, the fingerprint changes when an agent commits,
+ * which is exactly the change an implicit `HEAD` was hiding.
+ */
+export async function workspaceFingerprint({
+  workspace,
+  baseRevision,
+}: {
+  workspace: string;
+  baseRevision: string;
+}): Promise<string> {
   const hash = createHash('sha256');
   await runCompleteWorkspaceDiff(workspace, {
+    baseRevision,
     onStdoutChunk: (chunk) => hash.update(chunk),
   });
   return hash.digest('hex');
