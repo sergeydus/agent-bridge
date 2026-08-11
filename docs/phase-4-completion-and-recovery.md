@@ -1,6 +1,6 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 7, approved; slices 1 and 2 implemented
+Status: Contract revision 8, approved; slices 1 to 3 implemented
 
 Target release: 0.7.0
 
@@ -321,10 +321,23 @@ code is conditional, which Codex is right to require:
   because an unattended script asked for an application that did not happen and
   would otherwise read the run as a success.
 
-`apply-failed` means `git apply` itself failed after both gates passed. `git
-apply` without `--3way` validates before writing, so the expected state is an
-untouched checkout, but the contract does not promise that — the message must
-tell the user to inspect the checkout and points at the retained patch.
+`apply-failed` means the requested apply did not happen and the checkout's
+state is not known to be clean. It covers two cases:
+
+- `git apply` itself failed after both gates passed. `git apply` without
+  `--3way` validates before writing, so the expected state is an untouched
+  checkout, but the contract does not promise that — the message must tell the
+  user to inspect the checkout and points at the retained patch.
+- **the gates could not be evaluated at all.** Codex found this reachable in
+  slice 3: `patchApplicationRefusalReason` runs `git rev-parse` and
+  `git apply --check` against the original checkout, and either can throw if
+  that checkout has become unreadable. Nothing is applied in this case, so
+  `apply-refused` looks tempting — but a refusal is a known answer, and here
+  the answer is unknown. It is recorded as a failure, which exits `1` and tells
+  the user to look, rather than as a refusal that a script would read as a
+  deliberate decision.
+
+Both cases keep the workspace and the patch.
 
 `patch-failed` means `createPatch` threw. Under invariant 6 the workspace is
 always retained in this case, and no discard is offered.
@@ -779,7 +792,14 @@ invariants is rejected by a dedicated case.
 ### Slice 3 — completion cannot fail a finished run
 
 The one-way boundary flag, `declined`, the failure outcomes, outcome recording,
-`printCompletion` on every path, and the exit-code rules.
+`printCompletion` on every completion-outcome path, and the exit-code rules.
+
+"Every completion-outcome path" is the precise claim: the completion step is
+total over the failures it can cause, so each of the nine outcomes reaches the
+final summary. An unexpected throw from somewhere else past the boundary is
+still possible; it is reported, exits `1`, and leaves the checkpoint
+`completed`, but it produces no outcome record and no summary. That is the
+boundary's floor, not its guarantee.
 
 Acceptance: D1 no longer reproduces, in a deterministic test and in the PTY
 harness; injected apply and removal failures leave a reloaded checkpoint whose
@@ -845,7 +865,10 @@ repository.
   checkpoint status is `completed`;
 - injected apply failure and injected removal failure each leave a reloaded
   checkpoint status of `completed` with the matching failure outcome and exit
-  code `1`;
+  code `1`, asserted against a real `RunStateStore` rather than a returned
+  value;
+- an unreadable original checkout makes the apply gates unevaluable and is
+  recorded as `apply-failed` rather than escaping the completion step;
 - interactive `apply-refused` leaves the exit code unchanged while
   non-interactive `apply-refused` exits `1`, and exit code `1` wins over the
   `--require-agreement` code `2`;
@@ -1099,6 +1122,16 @@ left untouched.
 Chat migrations are deliberately untouched, and the reason is the same evidence
 read the other way: the maintainer's saved chats are at version 2 against a
 current format of version 4. Removing those would strand real data.
+
+**Revision 8** widens `apply-failed` and states what the summary guarantee is.
+
+Codex found during slice 3 review that `patchApplicationRefusalReason` can
+throw — it shells out to `git rev-parse` and `git apply --check` against the
+original checkout — so a completion could still escape without an outcome or a
+final summary. `apply-failed` now covers gates that could not be evaluated, and
+"`printCompletion` on every path" is stated precisely as every
+completion-outcome path, with the residual unexpected-throw behavior named
+rather than implied.
 
 ## Questions for review
 

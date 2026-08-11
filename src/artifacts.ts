@@ -212,11 +212,23 @@ export async function finishIsolatedRun({
       return { outcome: 'declined', patchPath, workspace };
     }
     if (choice === '2') {
-      const refusalReason = await patchApplicationRefusalReason({
-        repository,
-        patchPath,
-        baseRevision,
-      });
+      let refusalReason: string | undefined;
+      try {
+        refusalReason = await patchApplicationRefusalReason({
+          repository,
+          patchPath,
+          baseRevision,
+        });
+      } catch (error) {
+        // The safety checks could not be evaluated, so nothing was applied.
+        // This is reported as a failure rather than a refusal: a refusal is a
+        // known answer, and here the state of the checkout is unknown.
+        const reason = boundedCompletionReason(
+          `The patch was not applied because the original checkout could not be checked: ${errorMessage(error)}`,
+        );
+        reporter.warning(reason);
+        return { outcome: 'apply-failed', reason, patchPath, workspace };
+      }
       if (refusalReason) {
         reporter.warning(refusalReason);
         return {

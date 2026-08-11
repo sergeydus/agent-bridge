@@ -22,6 +22,7 @@
     "tests",
     "!tests/chat-terminal-pty.pty.ts",
     "!tests/fixtures/chat-terminal-pty-fixture.ts",
+    "!tests/fixtures/completion-prompt-pty-fixture.ts",
     ".editorconfig",
     "eslint.config.mjs",
     "tsconfig.json",

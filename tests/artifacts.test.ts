@@ -15,6 +15,7 @@ import {
   type CompletionResult,
 } from '../src/artifacts.ts';
 import { createIsolatedWorktree, currentCommit, execute } from '../src/git.ts';
+import { RunStateStore, type SavedRun } from '../src/state.ts';
 import { ProgressReporter } from '../src/ui.ts';
 
 /**
@@ -414,21 +415,24 @@ test('keeps the workspace when the discard confirmation goes unanswered', async 
   );
 });
 
-test('closes the prompt when a completion action throws', async () => {
+test('an unreadable checkout fails the apply instead of escaping the run', async () => {
   await withFixture(
     async ({ root, workspace, patchPath, baseRevision, reporter }) => {
       const prompt = scriptedPrompt(['2']);
-      await assert.rejects(() =>
-        finishIsolatedRun({
-          repository: join(root, 'not-a-repository'),
-          workspace,
-          patchPath,
-          baseRevision,
-          reporter,
-          createPrompt: () => prompt,
-        }),
-      );
+      const result = await finishIsolatedRun({
+        // The gates themselves cannot run against this path.
+        repository: join(root, 'not-a-repository'),
+        workspace,
+        patchPath,
+        baseRevision,
+        reporter,
+        createPrompt: () => prompt,
+      });
 
+      assert.equal(result.outcome, 'apply-failed');
+      assert.match(result.reason ?? '', /could not be checked/);
+      assert.equal(result.workspace, workspace);
+      assert.equal(result.patchPath, patchPath);
       assert.equal(prompt.closed, 1);
     },
   );
@@ -674,4 +678,151 @@ test('a prompt failure that is not end of input still propagates', async () => {
   // Not a declined answer: asking a closed interface is a programming error,
   // and swallowing it would hide the question that never reached the user.
   await assert.rejects(() => prompt.ask('Choose 1, 2, or 3 [1]: '));
+});
+
+function savedRunFixture(overrides: Partial<SavedRun> = {}): SavedRun {
+  const now = '2026-08-11T00:00:00.000Z';
+  return {
+    version: 3,
+    id: 'boundary-run',
+    createdAt: now,
+    updatedAt: now,
+    status: 'completed',
+    task: 'task',
+    originalCwd: '/project',
+    agentCwd: '/project',
+    projectKind: 'git',
+    outputDirectory: '/runs',
+    workflow: { kind: 'collaborative', firstAgent: 'codex', maxRounds: 2 },
+    judge: 'codex',
+    retries: 1,
+    timeoutMinutes: 30,
+    untilAgreement: true,
+    requireAgreement: false,
+    noTranscript: false,
+    verification: [],
+    protectedPaths: [],
+    protectedPathFingerprints: {},
+    completedCycles: 1,
+    codexPrevious: '',
+    claudePrevious: '',
+    handoff: '',
+    converged: true,
+    rounds: [],
+    ...overrides,
+  };
+}
+
+/**
+ * Drives the boundary the way cli.ts does, against a real store, so the
+ * assertion is about what is on disk afterwards rather than what was returned.
+ */
+async function completeThroughStore({
+  fixture,
+  finish,
+}: {
+  fixture: Fixture;
+  finish: () => Promise<CompletionResult>;
+}): Promise<SavedRun> {
+  const stateDirectory = join(fixture.root, 'state');
+  const store = new RunStateStore(stateDirectory);
+  const base = savedRunFixture({
+    originalCwd: fixture.repository,
+    agentCwd: fixture.workspace,
+    workspace: fixture.workspace,
+    outputDirectory: fixture.root,
+  });
+
+  await recordRunCompletion({
+    markCompleted: async () => {
+      await store.save(base);
+    },
+    finish,
+    recordOutcome: async (result) => {
+      await store.save({
+        ...base,
+        workspace: result.workspace,
+        agentCwd: result.workspace ?? base.originalCwd,
+        completion: {
+          outcome: result.outcome,
+          recordedAt: '2026-08-11T00:00:01.000Z',
+          reason: result.reason,
+        },
+      });
+    },
+    reporter: fixture.reporter,
+  });
+
+  return store.load(base.id);
+}
+
+test('an injected apply failure leaves a reloaded checkpoint completed', async () => {
+  await withFixture(async (fixture) => {
+    const reloaded = await completeThroughStore({
+      fixture,
+      finish: () =>
+        finishIsolatedRun({
+          repository: fixture.repository,
+          workspace: fixture.workspace,
+          patchPath: fixture.patchPath,
+          baseRevision: fixture.baseRevision,
+          reporter: fixture.reporter,
+          createPrompt: () => scriptedPrompt(['2']),
+          apply: () => Promise.reject(new Error('git apply exploded')),
+        }),
+    });
+
+    assert.equal(reloaded.status, 'completed');
+    assert.equal(reloaded.completion?.outcome, 'apply-failed');
+    assert.match(reloaded.completion?.reason ?? '', /git apply exploded/);
+    assert.equal(reloaded.workspace, fixture.workspace);
+    assert.equal(await exists(fixture.patchPath), true);
+  });
+});
+
+test('an injected removal failure leaves a reloaded checkpoint completed', async () => {
+  await withFixture(async (fixture) => {
+    const reloaded = await completeThroughStore({
+      fixture,
+      finish: () =>
+        finishIsolatedRun({
+          repository: fixture.repository,
+          workspace: fixture.workspace,
+          patchPath: fixture.patchPath,
+          baseRevision: fixture.baseRevision,
+          reporter: fixture.reporter,
+          createPrompt: () => scriptedPrompt(['3', 'y']),
+          removeWorkspace: () =>
+            Promise.reject(new Error('worktree is locked')),
+        }),
+    });
+
+    assert.equal(reloaded.status, 'completed');
+    assert.equal(reloaded.completion?.outcome, 'discard-failed');
+    assert.match(reloaded.completion?.reason ?? '', /worktree is locked/);
+    assert.equal(reloaded.workspace, fixture.workspace);
+    assert.equal(await exists(fixture.workspace), true);
+  });
+});
+
+test('a declined completion leaves a reloaded checkpoint completed', async () => {
+  await withFixture(async (fixture) => {
+    const reloaded = await completeThroughStore({
+      fixture,
+      finish: () =>
+        finishIsolatedRun({
+          repository: fixture.repository,
+          workspace: fixture.workspace,
+          patchPath: fixture.patchPath,
+          baseRevision: fixture.baseRevision,
+          reporter: fixture.reporter,
+          createPrompt: () => scriptedPrompt([undefined]),
+        }),
+    });
+
+    // D1 end to end: the run that was marked failed now stays completed.
+    assert.equal(reloaded.status, 'completed');
+    assert.equal(reloaded.completion?.outcome, 'declined');
+    assert.equal(reloaded.completion?.reason, undefined);
+  });
 });
