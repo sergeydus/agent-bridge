@@ -1,6 +1,6 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 11, approved; slices 1 to 7 implemented
+Status: Contract revision 12, approved; slices 1 to 7 implemented
 
 Target release: 0.7.0
 
@@ -745,8 +745,10 @@ process observing it now backs off instead of unlinking a live lock.
 `FileLock.release` re-reads the record and unlinks only when the ownership
 token still matches, closing Codex's ABA case.
 
-A lock is eligible for takeover only when the record parses, its host matches the
-current host, and its PID is gone. A record from a different host is not stale. A
+A lock is eligible for takeover only when the path is a plain file with exactly
+one name, the record parses, its host matches the current host, and its PID is
+gone. A symbolic link, a hard link, or any other special file at the lock path is
+never treated as a lock and never written to. A record from a different host is not stale. A
 missing, malformed, or unparseable record is unknown, never stale.
 
 **Takeover must be atomic, not merely token-checked.** Revision 10's slice 7
@@ -1272,6 +1274,36 @@ Codex's second finding is also correct. `release` set its released flag before
 unlinking, so a release that failed on a read-only directory could not be
 retried; a second call returned without removing anything. The flag now moves
 only after the lock is gone or is provably no longer this holder's.
+
+**Revision 12** refuses lock paths that are not plain files.
+
+Codex's finding, reproduced before changing anything: the in-place overwrite
+opened the lock path with `r+`, which follows a symbolic link. A link pointing at
+any file whose contents happen to parse as a stale record made acquisition
+succeed and rewrote that file. This is the cost of moving from unlink to
+overwrite, and revision 11 did not account for it — the existing symlink test
+covered only a dangling link, which fails to resolve for an unrelated reason.
+
+A lock path must now be a plain file with exactly one name. Classification
+`lstat`s the path, so a link is seen as a link rather than as its target, and a
+hard-linked file is refused too. The takeover additionally opens with
+`O_NOFOLLOW`, checks the opened handle with `fstat`, and re-reads the record
+through that same handle before writing to it, so the object verified is the
+object overwritten. On Windows `O_NOFOLLOW` does not exist and resolves to zero,
+so there the path classification is the only protection and the window between
+classifying and opening stays open; this is recorded rather than claimed closed.
+
+Record writes now account for `bytesWritten` in a loop. Ignoring a short write
+could have left a truncated record at a path this process then reported as owned —
+an unreadable lock presented as a held one. The loop is tested against a writer
+that reports one byte at a time and against one that never progresses.
+
+The handle-level guards inside the takeover are deliberately unreachable from the
+tests: path classification rejects a link before the takeover starts, so `fstat`,
+the through-the-handle record confirmation, and the `O_NOFOLLOW` error mapping can
+only fire if the path changes between classifying and opening it. They are the
+defense for that race and are reported as uncovered rather than presented as
+proven.
 
 ## Questions for review
 

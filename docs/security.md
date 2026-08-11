@@ -103,9 +103,15 @@ left behind by a process interrupted mid-takeover is not removed automatically
 either; it disables automatic recovery for that one lock and is named in the
 message, which is the same manual recovery as any unattributable lock.
 
-A lock is eligible for takeover in exactly one case: its record parses, names
-this host, and its process is gone. Every other state is left in place and
-reported — an empty file, a record from an older Agent Bridge version, content
+A lock path must be a plain file with exactly one name. A symbolic link, a hard
+link, or any other special file in its place is never treated as a lock and never
+written to, because writing through it would modify whatever it refers to. The
+check is made against the path and again against the opened handle, and the record
+is confirmed through that same handle before anything is written to it.
+
+A lock is eligible for takeover in exactly one case: it is a plain file, its
+record parses, names this host, and its process is gone. Every other state is left
+in place and reported — an empty file, a record from an older Agent Bridge version, content
 that does not parse, a record naming another host, or a live process. An empty
 lock file is the state left behind when an owner is interrupted between claiming
 the lock and recording itself; it cannot be told apart from a live owner, so it

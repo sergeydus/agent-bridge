@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {
   chmod,
+  link,
   lstat,
   mkdtemp,
   open,
@@ -17,6 +18,7 @@ import test from 'node:test';
 import {
   acquireFileLock,
   takeOverStaleLock,
+  writeWholeRecord,
   type FileLock,
 } from '../src/file-lock.ts';
 
@@ -425,6 +427,114 @@ test('many contenders for a free lock path produce exactly one holder', async ()
   });
 });
 
+// A lock path that is a symbolic link is not a lock. Opening it with `r+`
+// followed the link and overwrote whatever it pointed at with a fresh ownership
+// record — a stale-looking target file was rewritten and acquisition succeeded.
+test('a symlinked lock path is refused and its target is untouched', async () => {
+  await withDirectory(async (directory) => {
+    const target = join(directory, 'victim');
+    const path = join(directory, 'r.lock');
+    // Contents that would classify as a stale lock if read through the link.
+    const original = `${JSON.stringify({
+      pid: 999_999,
+      host: hostname(),
+      token: 'departed',
+      createdAt: '2026-08-11T00:00:00.000Z',
+    })}\n`;
+    await writeFile(target, original, { mode: 0o600 });
+    await symlink(target, path);
+
+    await assert.rejects(
+      acquireFileLock({ path, activeMessage: ACTIVE }),
+      (error: Error) => {
+        assert.match(error.message, /not a plain file/);
+        assert.ok(error.message.includes(path));
+        return true;
+      },
+    );
+
+    assert.equal(await readFile(target, 'utf8'), original);
+    assert.equal((await lstat(path)).isSymbolicLink(), true);
+  });
+});
+
+test(
+  'a lock file that cannot be read is never treated as absent',
+  { skip: !canObserveUnlinkFailure },
+  async () => {
+    await withDirectory(async (directory) => {
+      const path = join(directory, 'r.lock');
+      await writeRecord(path, {
+        pid: 999_999,
+        host: hostname(),
+        token: 'departed',
+        createdAt: new Date().toISOString(),
+      });
+      // A lock file owned by another user reads as a permission error. Treating
+      // that as "no lock" would hand out a lock someone else is holding.
+      await chmod(path, 0o000);
+
+      await assert.rejects(acquireFileLock({ path, activeMessage: ACTIVE }), {
+        message: /cannot be read as an Agent Bridge lock/,
+      });
+      assert.equal(await exists(path), true);
+    });
+  },
+);
+
+test('a hard-linked lock path is refused and neither name is rewritten', async () => {
+  await withDirectory(async (directory) => {
+    const other = join(directory, 'also-here');
+    const path = join(directory, 'r.lock');
+    const original = `${JSON.stringify({
+      pid: 999_999,
+      host: hostname(),
+      token: 'departed',
+      createdAt: '2026-08-11T00:00:00.000Z',
+    })}\n`;
+    await writeFile(path, original, { mode: 0o600 });
+    await link(path, other);
+
+    await assert.rejects(acquireFileLock({ path, activeMessage: ACTIVE }), {
+      message: /not a plain file/,
+    });
+
+    assert.equal(await readFile(path, 'utf8'), original);
+    assert.equal(await readFile(other, 'utf8'), original);
+  });
+});
+
+test('a record write that reports partial progress still writes every byte', async () => {
+  const chunks: Array<{ offset: number; length: number; position: number }> =
+    [];
+  const collected = Buffer.alloc(64);
+  await writeWholeRecord(
+    {
+      write: (buffer, offset, length, position) => {
+        // One byte at a time, which is what a short write looks like.
+        chunks.push({ offset, length, position });
+        collected[position] = buffer[offset] as number;
+        return Promise.resolve({ bytesWritten: 1 });
+      },
+    },
+    'record',
+  );
+
+  assert.equal(collected.subarray(0, 6).toString('utf8'), 'record');
+  assert.equal(chunks.length, 6);
+  assert.deepEqual(chunks[5], { offset: 5, length: 1, position: 5 });
+});
+
+test('a record write that never progresses fails instead of claiming success', async () => {
+  await assert.rejects(
+    writeWholeRecord(
+      { write: () => Promise.resolve({ bytesWritten: 0 }) },
+      'r',
+    ),
+    /Wrote no bytes/,
+  );
+});
+
 test(
   'a takeover that cannot even be attempted surfaces the reason',
   { skip: !canObserveUnlinkFailure },
@@ -553,11 +663,10 @@ test('terminal escapes in a foreign host record cannot reach the message', async
   });
 });
 
-// A dangling symlink at the lock path is the one deterministic way to reach the
-// "occupied but reads as absent" state: `open(path, 'wx')` on it fails with
-// EEXIST while reading it fails with ENOENT. It must not be mistaken for a free
-// path, and the retry must not spin.
-test('a lock path that is occupied but reads as absent is refused, not spun on', async () => {
+// A dangling symlink occupies the path without resolving to anything:
+// `open(path, 'wx')` on it fails with EEXIST while its target does not exist. It
+// must not be mistaken for a free path, and the retry must not spin.
+test('a lock path that is occupied but resolves to nothing is refused, not spun on', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'r.lock');
     await symlink(join(directory, 'no-such-target'), path);
@@ -566,6 +675,7 @@ test('a lock path that is occupied but reads as absent is refused, not spun on',
       acquireFileLock({ path, activeMessage: ACTIVE }),
       (error: Error) => {
         assert.ok(error.message.startsWith(ACTIVE));
+        assert.match(error.message, /not a plain file/);
         assert.ok(error.message.includes(path));
         return true;
       },

@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, open, unlink } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { lstat, mkdir, open, unlink } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { dirname } from 'node:path';
 
@@ -28,18 +30,73 @@ const MAX_LOCK_HOST_CHARS = 256;
 /**
  * How a lock file was read.
  *
- * `stale` is the only removable state, and it is deliberately narrow: the record
- * parsed, it names this host, and its process is gone. Everything else — an
- * empty file, an older build's record, unparseable content, a record from
- * another machine, a live process — is a lock that is left alone. The empty case
- * is the whole of D6: the owner wins `open(path, 'wx')` before it writes its
- * record, so a reader inside that window sees a live lock as a 0-byte file.
+ * `stale` is the only state eligible for takeover, and it is deliberately narrow:
+ * the path is a plain file, the record parsed, it names this host, and its
+ * process is gone. Everything else — an empty file, an older build's record,
+ * unparseable content, a record from another machine, a live process, anything
+ * that is not a regular file — is a lock that is left alone. The empty case is
+ * the whole of D6: the owner wins `open(path, 'wx')` before it writes its record,
+ * so a reader inside that window sees a live lock as a 0-byte file.
  */
 type LockState =
   | { kind: 'absent' }
   | { kind: 'stale'; record: LockRecord }
   | { kind: 'held'; record: LockRecord; foreignHost: boolean }
-  | { kind: 'unidentified'; reason: 'empty' | 'legacy' | 'unreadable' };
+  | { kind: 'unidentified'; reason: LockUnidentifiedReason };
+
+type LockUnidentifiedReason = 'empty' | 'legacy' | 'unreadable' | 'irregular';
+
+/**
+ * `O_NOFOLLOW` makes opening fail rather than traverse a symbolic link at the
+ * final path component. It does not exist on Windows, where the flag resolves to
+ * zero: there the `lstat` classification is the only protection, so the window
+ * between classifying a path and opening it stays open on that platform.
+ */
+const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+/** The part of a `FileHandle` a record write needs, so tests can supply one. */
+export interface LockRecordWriter {
+  write(
+    buffer: Buffer,
+    offset: number,
+    length: number,
+    position: number,
+  ): Promise<{ bytesWritten: number }>;
+}
+
+/**
+ * Writes a record and accounts for every byte. `write` may report a short write,
+ * and ignoring `bytesWritten` would leave a truncated record at a path this
+ * process then claims to own — an unreadable lock reported as a held one.
+ */
+export async function writeWholeRecord(
+  handle: LockRecordWriter,
+  text: string,
+): Promise<void> {
+  const buffer = Buffer.from(text, 'utf8');
+  let written = 0;
+  while (written < buffer.length) {
+    const result = await handle.write(
+      buffer,
+      written,
+      buffer.length - written,
+      written,
+    );
+    if (result.bytesWritten === 0) {
+      throw new Error(`Wrote no bytes of a ${buffer.length}-byte lock record.`);
+    }
+    written += result.bytesWritten;
+  }
+}
+
+function lockRecordText(token: string): string {
+  return `${JSON.stringify({
+    pid: process.pid,
+    host: hostname(),
+    token,
+    createdAt: new Date().toISOString(),
+  })}\n`;
+}
 
 function isLockRecord(value: unknown): value is LockRecord {
   if (!value || typeof value !== 'object') {
@@ -58,27 +115,13 @@ function isLockRecord(value: unknown): value is LockRecord {
   );
 }
 
-async function readLockRecord(
-  path: string,
-): Promise<
+type LockRead =
   | { kind: 'absent' }
   | { kind: 'record'; record: LockRecord }
-  | { kind: 'unidentified'; reason: 'empty' | 'legacy' | 'unreadable' }
-> {
-  let text: string;
-  try {
-    text = await readTextFilePrefix({
-      path,
-      maxCharacters: MAX_LOCK_RECORD_CHARS,
-    });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { kind: 'absent' };
-    }
-    // An unreadable lock file is not an absent one. Treating a permission error
-    // as "no lock" would hand out a lock another user is holding.
-    return { kind: 'unidentified', reason: 'unreadable' };
-  }
+  | { kind: 'unidentified'; reason: LockUnidentifiedReason };
+
+/** Classifies the bytes of a lock file, wherever they were read from. */
+function classifyLockText(text: string): LockRead {
   if (text.trim() === '') {
     return { kind: 'unidentified', reason: 'empty' };
   }
@@ -106,6 +149,62 @@ async function readLockRecord(
     kind: 'unidentified',
     reason: legacy ? 'legacy' : 'unreadable',
   };
+}
+
+/**
+ * Reads the record from an already-open handle, so the bytes classified belong
+ * to the object that handle refers to and not to whatever the path resolves to
+ * at some later moment.
+ */
+async function readLockRecordFrom(handle: FileHandle): Promise<LockRead> {
+  const buffer = Buffer.alloc(MAX_LOCK_RECORD_CHARS);
+  let filled = 0;
+  while (filled < buffer.length) {
+    const result = await handle.read(
+      buffer,
+      filled,
+      buffer.length - filled,
+      filled,
+    );
+    if (result.bytesRead === 0) {
+      break;
+    }
+    filled += result.bytesRead;
+  }
+  return classifyLockText(buffer.subarray(0, filled).toString('utf8'));
+}
+
+async function readLockRecord(path: string): Promise<LockRead> {
+  // `lstat` describes the path itself, so a symbolic link is seen as a link
+  // rather than as whatever it points at. A lock path that is not a plain file
+  // with exactly one name cannot be attributed to an owner, and reading through
+  // it would report someone else's file as a lock record.
+  try {
+    const link = await lstat(path);
+    if (!link.isFile() || link.nlink !== 1) {
+      return { kind: 'unidentified', reason: 'irregular' };
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { kind: 'absent' };
+    }
+    return { kind: 'unidentified', reason: 'unreadable' };
+  }
+  let text: string;
+  try {
+    text = await readTextFilePrefix({
+      path,
+      maxCharacters: MAX_LOCK_RECORD_CHARS,
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { kind: 'absent' };
+    }
+    // An unreadable lock file is not an absent one. Treating a permission error
+    // as "no lock" would hand out a lock another user is holding.
+    return { kind: 'unidentified', reason: 'unreadable' };
+  }
+  return classifyLockText(text);
 }
 
 /** Whether a PID is running. `EPERM` means running under another user. */
@@ -155,7 +254,8 @@ type TakeoverResult =
   | { kind: 'owned' }
   | { kind: 'vanished' }
   | { kind: 'lost'; state: LockState }
-  | { kind: 'blocked' };
+  | { kind: 'blocked' }
+  | { kind: 'irregular' };
 
 /**
  * Takes over a lock judged stale, without ever unlinking it.
@@ -193,14 +293,7 @@ export async function takeOverStaleLock({
     throw error;
   }
   try {
-    await marker.writeFile(
-      `${JSON.stringify({
-        pid: process.pid,
-        host: hostname(),
-        token,
-        createdAt: new Date().toISOString(),
-      })}\n`,
-    );
+    await writeWholeRecord(marker, lockRecordText(token));
     // Re-judged inside the exclusive section: a previous takeover may have
     // already handed this lock to a live process.
     const state = await inspectLock(path);
@@ -210,23 +303,42 @@ export async function takeOverStaleLock({
     if (state.kind !== 'stale' || state.record.token !== judged.token) {
       return { kind: 'lost', state };
     }
-    const handle = await open(path, 'r+');
+    // `O_NOFOLLOW` refuses to traverse a symbolic link at the final component.
+    // Without it, a lock path pointing at any file whose contents happen to
+    // parse as a stale record made takeover overwrite that file instead.
+    const handle = await open(path, constants.O_RDWR | NOFOLLOW);
     try {
+      // Verified through the handle, so the object checked is exactly the object
+      // about to be written: a path check alone could describe a different file
+      // by the time the write lands. A plain file with one name, holding the
+      // same record judged stale — read from this handle, not from the path.
+      const opened = await handle.stat();
+      if (!opened.isFile() || opened.nlink !== 1) {
+        return { kind: 'irregular' };
+      }
+      const confirmed = await readLockRecordFrom(handle);
+      if (
+        confirmed.kind !== 'record' ||
+        confirmed.record.token !== judged.token
+      ) {
+        return { kind: 'lost', state: await inspectLock(path) };
+      }
       await handle.truncate(0);
-      await handle.write(
-        `${JSON.stringify({
-          pid: process.pid,
-          host: hostname(),
-          token,
-          createdAt: new Date().toISOString(),
-        })}\n`,
-        0,
-      );
+      await writeWholeRecord(handle, lockRecordText(token));
     } finally {
       await handle.close();
     }
     return { kind: 'owned' };
   } catch (error) {
+    if (
+      (error as NodeJS.ErrnoException).code === 'ELOOP' ||
+      (error as NodeJS.ErrnoException).code === 'EMLINK' ||
+      (error as NodeJS.ErrnoException).code === 'EFTYPE'
+    ) {
+      // What `O_NOFOLLOW` reports for a symbolic link, spelled differently by
+      // platform.
+      return { kind: 'irregular' };
+    }
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       // The stale lock disappeared between the re-judgement and the overwrite.
       return { kind: 'vanished' };
@@ -269,6 +381,14 @@ function describeOwner(state: LockState, path: string): string {
       `The lock file is empty, which happens when its owner was interrupted ` +
       `between claiming the lock and recording who it is. A live owner looks ` +
       `the same from here, so the lock is never removed automatically. ` +
+      `${where} If no other Agent Bridge process is running, ${remove}`
+    );
+  }
+  if (state.kind === 'unidentified' && state.reason === 'irregular') {
+    return (
+      `The lock path is not a plain file — a symbolic link or another special ` +
+      `file is in its place — so it cannot be attributed to an owner and is ` +
+      `left untouched. Writing through it would modify whatever it points at. ` +
       `${where} If no other Agent Bridge process is running, ${remove}`
     );
   }
@@ -345,16 +465,11 @@ export async function acquireFileLock({
     try {
       // Winning this call is what confers ownership; the record that follows
       // only says who won.
+      // `wx` is `O_CREAT | O_EXCL`, which POSIX requires to fail on a symbolic
+      // link at the final component, so creation cannot be redirected either.
       const handle = await open(path, 'wx', 0o600);
       try {
-        await handle.writeFile(
-          `${JSON.stringify({
-            pid: process.pid,
-            host: hostname(),
-            token,
-            createdAt: new Date().toISOString(),
-          })}\n`,
-        );
+        await writeWholeRecord(handle, lockRecordText(token));
         await handle.close();
       } catch (error) {
         await handle.close().catch(() => {});
@@ -396,9 +511,13 @@ export async function acquireFileLock({
               { cause: error },
             );
           }
-          // Lost the takeover: another process owns the lock now, so report
-          // that owner rather than the record this attempt judged stale.
-          state = takeover.state;
+          // Either the path turned out not to be a plain file, or another
+          // process owns the lock now. Both report the state found rather than
+          // the record this attempt judged stale.
+          state =
+            takeover.kind === 'irregular'
+              ? { kind: 'unidentified', reason: 'irregular' }
+              : takeover.state;
         }
       }
       throw new Error(`${activeMessage} ${describeOwner(state, path)}`, {
