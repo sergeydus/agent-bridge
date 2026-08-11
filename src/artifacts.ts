@@ -7,13 +7,17 @@ import {
   currentCommit,
   removeIsolatedWorktree,
 } from './git.ts';
+import {
+  boundedCompletionReason,
+  errorMessage,
+  type CompletionOutcome,
+} from './core.ts';
 import type { ProgressReporter } from './ui.ts';
 
 /**
  * The completion step's only input source. `ask` reports a declined question as
- * `undefined` rather than as a rejection, so callers must handle "no answer"
- * explicitly. The terminal implementation does not yet normalize end of input;
- * until it does, a real Ctrl+D still rejects.
+ * `undefined` rather than as a rejection, so no completion question can end a
+ * run that has already finished successfully.
  */
 export interface CompletionPrompt {
   ask(question: string): Promise<string | undefined>;
@@ -22,6 +26,14 @@ export interface CompletionPrompt {
 
 type TerminalInput = NodeJS.ReadableStream & { isTTY?: boolean };
 type TerminalOutput = NodeJS.WritableStream & { isTTY?: boolean };
+
+function isEndOfInput(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    ((error as NodeJS.ErrnoException).code === 'ABORT_ERR' ||
+      error.name === 'AbortError')
+  );
+}
 
 export function createReadlineCompletionPrompt({
   input,
@@ -32,7 +44,32 @@ export function createReadlineCompletionPrompt({
 }): CompletionPrompt {
   const interface_ = createInterface({ input, output });
   return {
-    ask: (question) => interface_.question(question),
+    /**
+     * Ctrl+D rejects readline's question with `ABORT_ERR`, and a closed stream
+     * never settles it at all. Both are the same answer — none — so both
+     * resolve `undefined` instead of escaping as a failure.
+     */
+    ask: (question) =>
+      new Promise<string | undefined>((resolve, reject) => {
+        const onClose = () => {
+          resolve(undefined);
+        };
+        interface_.once('close', onClose);
+        interface_.question(question).then(
+          (answer) => {
+            interface_.off('close', onClose);
+            resolve(answer);
+          },
+          (error: unknown) => {
+            interface_.off('close', onClose);
+            if (isEndOfInput(error)) {
+              resolve(undefined);
+              return;
+            }
+            reject(error instanceof Error ? error : new Error(String(error)));
+          },
+        );
+      }),
     close: () => interface_.close(),
   };
 }
@@ -112,6 +149,19 @@ export async function patchApplicationRefusalReason({
   return undefined;
 }
 
+export interface CompletionResult {
+  outcome: CompletionOutcome;
+  reason?: string;
+  patchPath?: string;
+  workspace?: string;
+  applied?: boolean;
+}
+
+/**
+ * Resolves the end of an editing run to exactly one outcome. Every failure here
+ * is reported as an outcome rather than thrown, because the agents' work is
+ * already finished and complete by the time this runs.
+ */
 export async function finishIsolatedRun({
   repository,
   workspace,
@@ -119,6 +169,8 @@ export async function finishIsolatedRun({
   baseRevision,
   reporter,
   createPrompt = createTerminalCompletionPrompt,
+  apply = applyPatch,
+  removeWorkspace = removeIsolatedWorktree,
 }: {
   repository: string;
   workspace: string;
@@ -126,19 +178,27 @@ export async function finishIsolatedRun({
   baseRevision?: string;
   reporter: ProgressReporter;
   createPrompt?: () => CompletionPrompt | undefined;
-}): Promise<{ patchPath?: string; workspace?: string; applied?: boolean }> {
-  const patchCreated = await createPatch({
-    workspace,
-    destination: patchPath,
-  });
+  apply?: typeof applyPatch;
+  removeWorkspace?: typeof removeIsolatedWorktree;
+}): Promise<CompletionResult> {
+  let patchCreated: boolean;
+  try {
+    patchCreated = await createPatch({ workspace, destination: patchPath });
+  } catch (error) {
+    const reason = boundedCompletionReason(
+      `The patch could not be created: ${errorMessage(error)}`,
+    );
+    reporter.warning(reason);
+    return { outcome: 'patch-failed', reason, workspace };
+  }
   if (!patchCreated) {
     reporter.warning('The agents produced no file changes.');
-    return { workspace };
+    return { outcome: 'no-changes', workspace };
   }
   reporter.success(`Saved a portable patch to ${patchPath}`);
   const prompt = createPrompt();
   if (!prompt) {
-    return { patchPath, workspace };
+    return { outcome: 'kept', patchPath, workspace };
   }
 
   try {
@@ -148,6 +208,9 @@ export async function finishIsolatedRun({
       choices: ['1', '2', '3'],
       defaultChoice: '1',
     });
+    if (choice === undefined) {
+      return { outcome: 'declined', patchPath, workspace };
+    }
     if (choice === '2') {
       const refusalReason = await patchApplicationRefusalReason({
         repository,
@@ -156,11 +219,24 @@ export async function finishIsolatedRun({
       });
       if (refusalReason) {
         reporter.warning(refusalReason);
-        return { patchPath, workspace };
+        return {
+          outcome: 'apply-refused',
+          reason: refusalReason,
+          patchPath,
+          workspace,
+        };
       }
-      await applyPatch({ repository, patchPath });
+      try {
+        await apply({ repository, patchPath });
+      } catch (error) {
+        const reason = boundedCompletionReason(
+          `The patch could not be applied: ${errorMessage(error)}`,
+        );
+        reporter.warning(reason);
+        return { outcome: 'apply-failed', reason, patchPath, workspace };
+      }
       reporter.success('Applied the patch to the original checkout.');
-      return { patchPath, workspace, applied: true };
+      return { outcome: 'applied', patchPath, workspace, applied: true };
     }
     if (choice === '3') {
       const confirmed = await askForChoice(prompt, {
@@ -168,14 +244,57 @@ export async function finishIsolatedRun({
         choices: ['y', 'yes', 'n', 'no'],
         defaultChoice: 'n',
       });
-      if (confirmed !== undefined && ['y', 'yes'].includes(confirmed)) {
-        await removeIsolatedWorktree({ repository, workspace });
+      if (confirmed === undefined) {
+        return { outcome: 'declined', patchPath, workspace };
+      }
+      if (['y', 'yes'].includes(confirmed)) {
+        try {
+          await removeWorkspace({ repository, workspace });
+        } catch (error) {
+          const reason = boundedCompletionReason(
+            `The isolated workspace could not be removed: ${errorMessage(error)}`,
+          );
+          reporter.warning(reason);
+          return { outcome: 'discard-failed', reason, patchPath, workspace };
+        }
         reporter.success('Discarded the isolated workspace.');
-        return { patchPath };
+        return { outcome: 'discarded', patchPath };
       }
     }
-    return { patchPath, workspace };
+    return { outcome: 'kept', patchPath, workspace };
   } finally {
     prompt.close();
   }
+}
+
+/**
+ * The one-way completion boundary. The run is marked complete *before* the
+ * completion step runs, and failing to record the outcome leaves that durable
+ * `completed` checkpoint standing rather than replacing it with a failure.
+ * Nothing here may reopen a run whose work is already finished.
+ */
+export async function recordRunCompletion({
+  markCompleted,
+  finish,
+  recordOutcome,
+  reporter,
+}: {
+  markCompleted: () => Promise<void>;
+  finish?: () => Promise<CompletionResult>;
+  recordOutcome: (result: CompletionResult) => Promise<void>;
+  reporter: ProgressReporter;
+}): Promise<CompletionResult | undefined> {
+  await markCompleted();
+  if (!finish) {
+    return undefined;
+  }
+  const result = await finish();
+  try {
+    await recordOutcome(result);
+  } catch (error) {
+    reporter.warning(
+      `The run finished, but its completion outcome could not be recorded: ${errorMessage(error)}`,
+    );
+  }
+  return result;
 }

@@ -5,9 +5,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { finishIsolatedRun } from './artifacts.ts';
+import { finishIsolatedRun, recordRunCompletion } from './artifacts.ts';
 import { runInteractiveChat } from './chat.ts';
 import {
+  completionOutcomeFailed,
+  errorMessage,
   makeRunId,
   summarizePorcelainStatus,
   type AgentName,
@@ -43,7 +45,12 @@ import {
   workingTreeSnapshot,
   workingTreeStatus,
 } from './snapshot.ts';
-import { RunStateStore, type RunLock, type SavedRun } from './state.ts';
+import {
+  RunStateStore,
+  type RunLock,
+  type SavedRun,
+  type SavedRunCompletion,
+} from './state.ts';
 import { appendGitDiff, resolveTask } from './task.ts';
 import {
   formatMarkdownTranscript,
@@ -60,10 +67,6 @@ import { sanitizeTerminalText } from './terminal-text.ts';
 const APP_PATHS = getAppPaths();
 const PROVIDERS = createDefaultProviders();
 const INSTALL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
@@ -259,6 +262,7 @@ async function main(): Promise<void> {
   const runId = resumedRun?.id ?? makeRunId(new Date(startedAt));
   let runLock: RunLock | undefined;
   let ownsRunState = options.dryRun;
+  let completionRecorded = false;
   const reporter = new ProgressReporter({
     verbose: options.verbose,
     screenReader: options.screenReader,
@@ -302,6 +306,7 @@ continue from its actual state instead of repeating changes blindly.`;
   const saveState = async (
     status: RunStatus,
     error?: string,
+    completion?: SavedRunCompletion,
   ): Promise<void> => {
     if (options.dryRun) {
       return;
@@ -349,6 +354,7 @@ continue from its actual state instead of repeating changes blindly.`;
       pendingReview: runtime.pendingReview,
       rounds: runtime.rounds,
       error,
+      completion,
     });
   };
 
@@ -619,20 +625,47 @@ continue from its actual state instead of repeating changes blindly.`;
 
     let patchPath: string | undefined;
     let isolatedSummary;
-    if (workspace && repository) {
+    const isolatedWorkspace = workspace;
+    if (isolatedWorkspace && repository) {
       isolatedSummary = summarizePorcelainStatus(
-        await workingTreeStatus({ cwd: workspace }),
+        await workingTreeStatus({ cwd: isolatedWorkspace }),
       );
-      const finished = await finishIsolatedRun({
-        repository,
-        workspace,
-        patchPath: join(options.output, `${runId}.patch`),
-        baseRevision,
-        reporter,
-      });
-      patchPath = finished.patchPath;
-      workspace = finished.workspace;
     }
+    // The agents' work is finished and durable from here on. Everything below
+    // may report a failure, but none of it may mark the run failed.
+    const finished = await recordRunCompletion({
+      markCompleted: async () => {
+        await saveState('completed');
+        completionRecorded = true;
+      },
+      finish:
+        isolatedWorkspace && repository
+          ? () =>
+              finishIsolatedRun({
+                repository,
+                workspace: isolatedWorkspace,
+                patchPath: join(options.output, `${runId}.patch`),
+                baseRevision,
+                reporter,
+              })
+          : undefined,
+      recordOutcome: async (result) => {
+        patchPath = result.patchPath;
+        workspace = result.workspace;
+        if (result.outcome === 'discarded') {
+          // The workspace no longer exists, so the run's directory is the
+          // project again. Version 3 refuses a `discarded` record that says
+          // otherwise.
+          options.cwd = originalCwd;
+        }
+        await saveState('completed', undefined, {
+          outcome: result.outcome,
+          recordedAt: new Date().toISOString(),
+          reason: result.reason,
+        });
+      },
+      reporter,
+    });
     if (editingWorkflow) {
       printChangeSummary(
         isolatedSummary ??
@@ -659,7 +692,6 @@ continue from its actual state instead of repeating changes blindly.`;
       recoveryPatch: options.noTranscript ? undefined : recoveryPatchPath,
       screenReader: options.screenReader,
     });
-    await saveState('completed');
     if (options.noTranscript) {
       if (recoveryPatchPath) {
         await rm(recoveryPatchPath, { force: true });
@@ -669,7 +701,21 @@ continue from its actual state instead of repeating changes blindly.`;
     if (options.requireAgreement && !result.converged) {
       process.exitCode = 2;
     }
+    // A completion action that did not happen is the more actionable signal,
+    // so it outranks the agreement-cap code.
+    if (finished && completionOutcomeFailed(finished.outcome)) {
+      process.exitCode = 1;
+    }
   } catch (error) {
+    if (completionRecorded) {
+      // Past the boundary: the run is durably complete, and this failure
+      // belongs to the completion step rather than to the run.
+      reporter.warning(
+        `The run finished, but completing it failed: ${errorMessage(error)}`,
+      );
+      process.exitCode = 1;
+      return;
+    }
     if (abortController.signal.aborted || error instanceof ProcessAbortError) {
       if (ownsRunState) {
         await saveState('cancelled', 'Cancelled by user');

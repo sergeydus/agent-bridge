@@ -142,3 +142,48 @@ test('discards only terminal registered workspaces and updates saved state', asy
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('a run whose completion was declined can still be discarded', async () => {
+  // The durable consequence of D1: pressing Ctrl+D at the completion menu used
+  // to leave a failed checkpoint, and discardRunWorkspace refuses those.
+  const root = await mkdtemp(join(tmpdir(), 'agent-bridge-runs-'));
+  const stateDirectory = join(root, 'state');
+  try {
+    const store = new RunStateStore(stateDirectory);
+    const run: SavedRun = {
+      ...runFixture(
+        'declined-run',
+        root,
+        '2026-08-11T00:00:00.000Z',
+        '/workspaces/declined-run',
+      ),
+      completion: {
+        outcome: 'declined',
+        recordedAt: '2026-08-11T00:00:00.000Z',
+      },
+    };
+    await store.save(run);
+
+    const removed: { repository: string; workspace: string }[] = [];
+    const discarded = await discardRunWorkspace({
+      run: await store.load('declined-run'),
+      store,
+      removeWorkspace: (request) => {
+        removed.push(request);
+        return Promise.resolve();
+      },
+    });
+
+    assert.equal(discarded, '/workspaces/declined-run');
+    assert.deepEqual(removed, [
+      { repository: '/project', workspace: '/workspaces/declined-run' },
+    ]);
+    const reloaded = await store.load('declined-run');
+    assert.equal(reloaded.workspace, undefined);
+    assert.equal(reloaded.agentCwd, '/project');
+    // Run management never rewrites how the run's own completion resolved.
+    assert.deepEqual(reloaded.completion, run.completion);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

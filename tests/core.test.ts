@@ -2,6 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  boundedCompletionReason,
+  completionOutcomeFailed,
+  completionOutcomeRequiresReason,
+  COMPLETION_OUTCOMES,
+  MAX_COMPLETION_REASON_CHARS,
   deriveCurrentPairedExchangeStatus,
   deriveHistoricalPairedExchangeStatus,
   editorForRound,
@@ -153,4 +158,31 @@ test('retries only failures that look transient', () => {
     isTransientAgentFailure(new Error('authentication failed')),
     false,
   );
+});
+
+test('only completion outcomes whose action failed change the exit code', () => {
+  const failed = COMPLETION_OUTCOMES.filter(completionOutcomeFailed);
+
+  assert.deepEqual(failed, ['apply-failed', 'discard-failed', 'patch-failed']);
+  // A refusal is a decision the user saw, not a failure of the tool.
+  assert.equal(completionOutcomeFailed('apply-refused'), false);
+  assert.equal(completionOutcomeFailed('declined'), false);
+  assert.equal(completionOutcomeFailed('no-changes'), false);
+});
+
+test('only refusals and failures may carry a reason', () => {
+  assert.deepEqual(
+    COMPLETION_OUTCOMES.filter(completionOutcomeRequiresReason),
+    ['apply-refused', 'apply-failed', 'discard-failed', 'patch-failed'],
+  );
+});
+
+test('completion reasons are bounded and safe to print', () => {
+  const reason = boundedCompletionReason(
+    `git said \u001B[31mred\u001B[0m ${'x'.repeat(5_000)}`,
+  );
+
+  assert.equal(reason.length, MAX_COMPLETION_REASON_CHARS);
+  assert.equal(reason.includes('\u001B'), false);
+  assert.match(reason, /^git said red /);
 });

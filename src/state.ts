@@ -5,6 +5,7 @@ import {
   completionOutcomeRequiresReason,
   isCompletionOutcome,
   isSafeRunId,
+  MAX_COMPLETION_REASON_CHARS,
   type AgentDecision,
   type AgentName,
   type CompletionOutcome,
@@ -23,7 +24,6 @@ import {
 import { sanitizeTerminalText } from './terminal-text.ts';
 
 const MAX_RUN_STATE_BYTES = 50_000_000;
-export const MAX_COMPLETION_REASON_CHARS = 2_000;
 
 export interface SavedRound {
   phase: string;

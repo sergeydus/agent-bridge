@@ -347,6 +347,13 @@ creates a binary-safe patch and offers to:
 Agent Bridge never commits, stages, resets, or silently discards project
 changes.
 
+The completion step cannot fail a run that already succeeded. The run is
+recorded as completed before the menu appears, so declining it — including with
+Ctrl+D — keeps the workspace and leaves the run completed and discardable
+later. If applying the patch or removing the workspace fails, Agent Bridge says
+so, records what happened, exits `1`, and still leaves the run completed with
+its patch and workspace intact.
+
 If the selected checkout is dirty, an isolated workspace cannot include those
 changes. You must commit or stash them, or explicitly acknowledge a committed
 `HEAD` run with `--from-head`.

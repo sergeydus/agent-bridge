@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
+import { sanitizeTerminalText } from './terminal-text.ts';
+
 export type AgentName = 'codex' | 'claude';
 export type WorkflowKind = 'review' | 'fixed' | 'collaborative';
 export type AgentDecision = 'done' | 'continue';
@@ -75,6 +77,35 @@ export function completionOutcomeRequiresReason(
   outcome: CompletionOutcome,
 ): boolean {
   return OUTCOMES_REQUIRING_REASON.includes(outcome);
+}
+
+/**
+ * Outcomes where the action the user asked for did not happen. They set exit
+ * code 1 while leaving the checkpoint `completed`: the run succeeded, and only
+ * its completion step failed.
+ */
+const FAILED_COMPLETION_OUTCOMES: readonly CompletionOutcome[] = [
+  'apply-failed',
+  'discard-failed',
+  'patch-failed',
+];
+
+export function completionOutcomeFailed(outcome: CompletionOutcome): boolean {
+  return FAILED_COMPLETION_OUTCOMES.includes(outcome);
+}
+
+export const MAX_COMPLETION_REASON_CHARS = 2_000;
+
+/**
+ * Completion reasons quote provider and Git output, so they are sanitized and
+ * bounded where they are built. A checkpoint stores what a terminal can print.
+ */
+export function boundedCompletionReason(text: string): string {
+  return sanitizeTerminalText(text).slice(0, MAX_COMPLETION_REASON_CHARS);
+}
+
+export function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export interface WorkflowSelection {

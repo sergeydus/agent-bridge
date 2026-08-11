@@ -10,7 +10,9 @@ import {
   createTerminalCompletionPrompt,
   finishIsolatedRun,
   patchApplicationRefusalReason,
+  recordRunCompletion,
   type CompletionPrompt,
+  type CompletionResult,
 } from '../src/artifacts.ts';
 import { createIsolatedWorktree, currentCommit, execute } from '../src/git.ts';
 import { ProgressReporter } from '../src/ui.ts';
@@ -124,7 +126,7 @@ test('keeps the workspace and asks nothing when the agents changed no files', as
         createPrompt: () => prompt,
       });
 
-      assert.deepEqual(result, { workspace });
+      assert.deepEqual(result, { outcome: 'no-changes', workspace });
       assert.deepEqual(prompt.questions, []);
       assert.equal(await exists(patchPath), false);
     },
@@ -144,7 +146,7 @@ test('keeps the workspace without prompting when no prompt is available', async 
         createPrompt: () => undefined,
       });
 
-      assert.deepEqual(result, { patchPath, workspace });
+      assert.deepEqual(result, { outcome: 'kept', patchPath, workspace });
       assert.equal(await exists(patchPath), true);
       assert.equal(
         await readFile(join(repository, 'tracked.txt'), 'utf8'),
@@ -167,7 +169,7 @@ test('keeps both the patch and the workspace on the default choice', async () =>
         createPrompt: () => prompt,
       });
 
-      assert.deepEqual(result, { patchPath, workspace });
+      assert.deepEqual(result, { outcome: 'kept', patchPath, workspace });
       assert.equal(prompt.questions.length, 1);
       assert.match(prompt.questions[0] ?? '', /Choose 1, 2, or 3 \[1\]: $/);
       assert.equal(prompt.closed, 1);
@@ -192,7 +194,7 @@ test('a correction repeats only the choice line, never the whole menu', async ()
         createPrompt: () => prompt,
       });
 
-      assert.deepEqual(result, { patchPath, workspace });
+      assert.deepEqual(result, { outcome: 'kept', patchPath, workspace });
       assert.equal(prompt.questions.length, 3);
       assert.match(prompt.questions[0] ?? '', /^\nWhat should happen/);
       for (const question of prompt.questions.slice(1)) {
@@ -218,7 +220,12 @@ test('applies the patch to the original checkout when asked', async () => {
         createPrompt: () => prompt,
       });
 
-      assert.deepEqual(result, { patchPath, workspace, applied: true });
+      assert.deepEqual(result, {
+        outcome: 'applied',
+        patchPath,
+        workspace,
+        applied: true,
+      });
       assert.equal(
         await readFile(join(repository, 'tracked.txt'), 'utf8'),
         'after\n',
@@ -240,7 +247,12 @@ test('refuses to apply a patch for a run that recorded no base revision', async 
       createPrompt: () => prompt,
     });
 
-    assert.deepEqual(result, { patchPath, workspace });
+    assert.equal(result.outcome, 'apply-refused');
+    assert.match(result.reason ?? '', /predates base-revision tracking/);
+    assert.deepEqual(
+      { patchPath: result.patchPath, workspace: result.workspace },
+      { patchPath, workspace },
+    );
     assert.equal(
       await readFile(join(repository, 'tracked.txt'), 'utf8'),
       'before\n',
@@ -266,7 +278,8 @@ test('refuses to apply when the original checkout moved to another commit', asyn
         createPrompt: () => prompt,
       });
 
-      assert.deepEqual(result, { patchPath, workspace });
+      assert.equal(result.outcome, 'apply-refused');
+      assert.match(result.reason ?? '', /moved to a different commit/);
       assert.equal(
         await readFile(join(repository, 'tracked.txt'), 'utf8'),
         'before\n',
@@ -290,7 +303,8 @@ test('refuses to apply a patch that conflicts with the original checkout', async
         createPrompt: () => prompt,
       });
 
-      assert.deepEqual(result, { patchPath, workspace });
+      assert.equal(result.outcome, 'apply-refused');
+      assert.match(result.reason ?? '', /conflicts with the original checkout/);
       assert.equal(
         await readFile(join(repository, 'tracked.txt'), 'utf8'),
         'conflicting\n',
@@ -334,7 +348,7 @@ test('discards the workspace only after an explicit confirmation', async () => {
         createPrompt: () => prompt,
       });
 
-      assert.deepEqual(result, { patchPath });
+      assert.deepEqual(result, { outcome: 'discarded', patchPath });
       assert.equal(await exists(workspace), false);
       assert.equal(await exists(patchPath), true);
       assert.match(prompt.questions[1] ?? '', /permanently\? \[y\/N\]: $/);
@@ -355,7 +369,7 @@ test('keeps the workspace when the discard confirmation is declined', async () =
         createPrompt: () => prompt,
       });
 
-      assert.deepEqual(result, { patchPath, workspace });
+      assert.deepEqual(result, { outcome: 'kept', patchPath, workspace });
       assert.equal(await exists(workspace), true);
     },
   );
@@ -374,7 +388,7 @@ test('keeps the workspace when the menu goes unanswered', async () => {
         createPrompt: () => prompt,
       });
 
-      assert.deepEqual(result, { patchPath, workspace });
+      assert.deepEqual(result, { outcome: 'declined', patchPath, workspace });
       assert.equal(await exists(workspace), true);
       assert.equal(prompt.closed, 1);
     },
@@ -394,7 +408,7 @@ test('keeps the workspace when the discard confirmation goes unanswered', async 
         createPrompt: () => prompt,
       });
 
-      assert.deepEqual(result, { patchPath, workspace });
+      assert.deepEqual(result, { outcome: 'declined', patchPath, workspace });
       assert.equal(await exists(workspace), true);
     },
   );
@@ -460,4 +474,204 @@ test('the readline prompt writes its question and returns the typed answer', asy
   assert.equal(await answered, '2');
   assert.match(written.join(''), /Choose 1, 2, or 3 \[1\]: /);
   prompt.close();
+});
+
+test('reports an apply failure as an outcome instead of throwing', async () => {
+  await withFixture(
+    async ({ repository, workspace, patchPath, baseRevision, reporter }) => {
+      const result = await finishIsolatedRun({
+        repository,
+        workspace,
+        patchPath,
+        baseRevision,
+        reporter,
+        createPrompt: () => scriptedPrompt(['2']),
+        apply: () => Promise.reject(new Error('git apply exploded')),
+      });
+
+      assert.equal(result.outcome, 'apply-failed');
+      assert.match(
+        result.reason ?? '',
+        /could not be applied: git apply exploded/,
+      );
+      assert.equal(result.workspace, workspace);
+      assert.equal(await exists(patchPath), true);
+    },
+  );
+});
+
+test('reports a removal failure as an outcome and keeps the workspace', async () => {
+  await withFixture(
+    async ({ repository, workspace, patchPath, baseRevision, reporter }) => {
+      const result = await finishIsolatedRun({
+        repository,
+        workspace,
+        patchPath,
+        baseRevision,
+        reporter,
+        createPrompt: () => scriptedPrompt(['3', 'y']),
+        removeWorkspace: () => Promise.reject(new Error('worktree is locked')),
+      });
+
+      assert.equal(result.outcome, 'discard-failed');
+      assert.match(
+        result.reason ?? '',
+        /could not be removed: worktree is locked/,
+      );
+      assert.equal(result.workspace, workspace);
+      assert.equal(await exists(workspace), true);
+    },
+  );
+});
+
+test('reports a patch failure as an outcome and offers no menu', async () => {
+  await withFixture(
+    async ({ repository, workspace, patchPath, baseRevision, reporter }) => {
+      const prompt = scriptedPrompt([]);
+      const result = await finishIsolatedRun({
+        repository,
+        workspace,
+        // A directory can never be written as a patch file.
+        patchPath: workspace,
+        baseRevision,
+        reporter,
+        createPrompt: () => prompt,
+      });
+
+      assert.equal(result.outcome, 'patch-failed');
+      assert.notEqual(result.reason, undefined);
+      assert.equal(result.workspace, workspace);
+      assert.deepEqual(prompt.questions, []);
+      assert.equal(await exists(patchPath), false);
+    },
+  );
+});
+
+test('every failure reason is storable in a checkpoint', async () => {
+  await withFixture(
+    async ({ repository, workspace, patchPath, baseRevision, reporter }) => {
+      const result = await finishIsolatedRun({
+        repository,
+        workspace,
+        patchPath,
+        baseRevision,
+        reporter,
+        createPrompt: () => scriptedPrompt(['2']),
+        apply: () =>
+          Promise.reject(
+            new Error(`git said \u001B[31m${'x'.repeat(4_000)}\u001B[0m`),
+          ),
+      });
+
+      const reason = result.reason ?? '';
+      assert.equal(reason.length <= 2_000, true);
+      assert.equal(reason.includes('\u001B'), false);
+    },
+  );
+});
+
+test('the readline prompt reports end of input as no answer', async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const prompt = createReadlineCompletionPrompt({ input, output });
+
+  const answered = prompt.ask('Choose 1, 2, or 3 [1]: ');
+  input.end();
+
+  assert.equal(await answered, undefined);
+  prompt.close();
+});
+
+test('the readline prompt reports an aborted question as no answer', async () => {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const prompt = createReadlineCompletionPrompt({ input, output });
+
+  const answered = prompt.ask('Choose 1, 2, or 3 [1]: ');
+  // What a real terminal delivers for Ctrl+D at a prompt.
+  prompt.close();
+
+  assert.equal(await answered, undefined);
+});
+
+test('marks the run complete before the completion step is allowed to run', async () => {
+  const order: string[] = [];
+  const reporter = new ProgressReporter({ silent: true });
+
+  const result = await recordRunCompletion({
+    markCompleted: () => {
+      order.push('completed');
+      return Promise.resolve();
+    },
+    finish: () => {
+      order.push('finish');
+      return Promise.resolve<CompletionResult>({ outcome: 'kept' });
+    },
+    recordOutcome: () => {
+      order.push('record');
+      return Promise.resolve();
+    },
+    reporter,
+  });
+
+  assert.deepEqual(order, ['completed', 'finish', 'record']);
+  assert.equal(result?.outcome, 'kept');
+});
+
+test('marks a run with no isolated workspace complete and asks nothing further', async () => {
+  const order: string[] = [];
+
+  const result = await recordRunCompletion({
+    markCompleted: () => {
+      order.push('completed');
+      return Promise.resolve();
+    },
+    recordOutcome: () => {
+      order.push('record');
+      return Promise.resolve();
+    },
+    reporter: new ProgressReporter({ silent: true }),
+  });
+
+  assert.equal(result, undefined);
+  assert.deepEqual(order, ['completed']);
+});
+
+test('a failure to record the outcome leaves the completed checkpoint standing', async () => {
+  const warnings: string[] = [];
+  const reporter = new ProgressReporter({ silent: true });
+  reporter.warning = (message: string) => warnings.push(message);
+  let marked = 0;
+
+  const result = await recordRunCompletion({
+    markCompleted: () => {
+      marked += 1;
+      return Promise.resolve();
+    },
+    finish: () =>
+      Promise.resolve<CompletionResult>({
+        outcome: 'discarded',
+        patchPath: '/tmp/run.patch',
+      }),
+    recordOutcome: () => Promise.reject(new Error('disk is full')),
+    reporter,
+  });
+
+  // The outcome is still reported to the caller, and nothing was rewritten.
+  assert.equal(result?.outcome, 'discarded');
+  assert.equal(marked, 1);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0] ?? '', /could not be recorded: disk is full/);
+});
+
+test('a prompt failure that is not end of input still propagates', async () => {
+  const prompt = createReadlineCompletionPrompt({
+    input: new PassThrough(),
+    output: new PassThrough(),
+  });
+  prompt.close();
+
+  // Not a declined answer: asking a closed interface is a programming error,
+  // and swallowing it would hide the question that never reached the user.
+  await assert.rejects(() => prompt.ask('Choose 1, 2, or 3 [1]: '));
 });
