@@ -532,7 +532,13 @@ test('locks a chat against concurrent use', async () => {
     const lock = await store.acquireLock('chat-locked');
     await assert.rejects(
       () => store.acquireLock('chat-locked'),
-      /already open/,
+      (error: Error) => {
+        assert.match(error.message, /already open/);
+        // D5: the chat message names its lock file and a way forward too.
+        assert.ok(error.message.includes(store.lockPathFor('chat-locked')));
+        assert.match(error.message, /Let that process finish/);
+        return true;
+      },
     );
     await lock.release();
     const next = await store.acquireLock('chat-locked');

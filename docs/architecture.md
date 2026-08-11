@@ -52,7 +52,11 @@ subsystem. `terminal-text.ts` is the only sanitizer for untrusted text reaching
 a terminal. `filesystem.ts` is the only writer of persisted state, so every
 format gets the same atomic rename and owner-only mode. `file-lock.ts` is the
 only exclusive lock, so run checkpoints and chat sessions share one definition
-of ownership and one stale-owner check.
+of ownership and one stale-owner check. Ownership comes from winning an
+exclusive create, and the record written afterwards carries a host and an
+ownership token: a lock that cannot be attributed to a dead local process is
+never removed automatically, and a lock is released only by the holder whose
+token still matches.
 
 The CLI composes modules but does not decide turn order. The orchestrator does
 not know Codex or Claude command-line syntax. Provider adapters do not decide

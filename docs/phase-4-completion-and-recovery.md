@@ -1,6 +1,6 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 10, approved; slices 1 to 6 implemented
+Status: Contract revision 10, approved; slices 1 to 7 implemented
 
 Target release: 0.7.0
 
@@ -884,6 +884,22 @@ messages including the empty-lock case, and the shared-data-directory note in
 
 Acceptance: D5 and D6 no longer reproduce; `file-lock.ts` branch coverage above
 80%.
+
+Implemented. Lock states are classified once, and `stale` — the only removable
+one — requires a parsed record naming this host whose process is gone. Empty,
+older-build, unparseable, over-long, and foreign-host records are all left in
+place, each with its own recovery message; the contention message is composed
+centrally, so both callers gained the lock path and a next step without changing
+their own text. Two additions beyond the contract, both in the conservative
+direction: the record is read through the bounded reader in `filesystem.ts`, so a
+lock file too large to parse is unidentified rather than assumed dead, and a
+`host` longer than 256 characters is treated as corruption rather than identity.
+The host string is untrusted file content and is sanitized before it reaches a
+message.
+
+`removeStaleLock` is exported so its ownership re-check can be tested against a
+record that no longer matches. The window it guards lies between two syscalls
+inside `acquireFileLock`, which a single-process test cannot interleave.
 
 Slices 1 through 6 are ordered by dependency. Slice 7 is independent of all of
 them and may be reviewed or dropped separately.

@@ -86,6 +86,32 @@ Interactive chat never gives providers write access. Its editing commands
 create an owner-only temporary task file and launch the existing isolated
 workflow without a shell. The task file is removed after the child exits.
 
+## Exclusive locks
+
+Run checkpoints and chat sessions share one lock primitive. Creating the lock
+file with an exclusive open is what confers ownership; the record naming the
+owner is written immediately afterwards and only says who won. A lock is
+released by re-reading that record and comparing an ownership token, so a
+process whose lock was removed cannot later delete a successor's lock.
+
+A lock is removed automatically in exactly one case: its record parses, names
+this host, and its process is gone. Every other state is left in place and
+reported — an empty file, a record from an older Agent Bridge version, content
+that does not parse, a record naming another host, or a live process. An empty
+lock file is the state left behind when an owner is interrupted between claiming
+the lock and recording itself; it cannot be told apart from a live owner, so it
+is never cleared automatically. Contention always names the lock file and the
+recovery step. Deleting a lock file by hand is safe only when no Agent Bridge
+process is using that run or chat.
+
+A process identifier is only meaningful on the machine that wrote it, so lock
+records carry a host name and a foreign host is never evaluated against the
+local process table. **All Agent Bridge installations that share a data
+directory must be upgraded together.** An older build reads the process
+identifier and ignores the host, so a lock written on one machine can be judged
+against another machine's processes and cleared while it is genuinely held.
+Mixed versions on a single host remain safe.
+
 Configured verification executables must be bare names without path
 separators. This prevents shell syntax injection, but an approved executable or
 package script can still run arbitrary project code. Trust configuration only

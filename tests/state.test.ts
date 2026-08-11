@@ -103,7 +103,13 @@ test('locks a run against concurrent resume and releases it safely', async () =>
     const lock = await store.acquireLock('run-locked');
     await assert.rejects(
       () => store.acquireLock('run-locked'),
-      /already active/,
+      (error: Error) => {
+        assert.match(error.message, /already active/);
+        // D5: contention has to name the lock file and a way forward.
+        assert.ok(error.message.includes(store.lockPathFor('run-locked')));
+        assert.match(error.message, /Let that process finish/);
+        return true;
+      },
     );
     await lock.release();
     const nextLock = await store.acquireLock('run-locked');
