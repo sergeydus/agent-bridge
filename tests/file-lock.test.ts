@@ -20,24 +20,69 @@ import {
   acquireFileLock,
   takeOverStaleLock,
   writeWholeRecord,
+  CAN_REFUSE_LINK_ON_OPEN,
   type FileLock,
 } from '../src/file-lock.ts';
 
+/**
+ * Capabilities are measured, not assumed from the platform.
+ *
+ * Guessing cost real coverage: gating the symbolic-link tests on `win32` skipped
+ * the very regression test that had exposed the lock-path defect on Windows, and
+ * it was reported as passing. The runner does create symbolic links, which the
+ * earlier failing run proves. A probe cannot make that mistake.
+ */
+async function canDo(
+  probe: (directory: string) => Promise<void>,
+): Promise<boolean> {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-bridge-probe-'));
+  try {
+    await probe(directory);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+const canCreateSymlinks = await canDo((directory) =>
+  symlink(join(directory, 'no-such-target'), join(directory, 'link')),
+);
+
+const canCountHardLinks = await canDo(async (directory) => {
+  const file = join(directory, 'file');
+  await writeFile(file, 'x');
+  await link(file, join(directory, 'other'));
+  if ((await lstat(file)).nlink !== 2) {
+    throw new Error('hard links are not counted on this filesystem');
+  }
+});
+
 // Removing a file needs write permission on its directory, not on the file. A
-// read-only parent is the portable way to make `unlink` fail without racing
-// anything — except as root, which ignores the mode.
-const canObserveUnlinkFailure =
-  process.platform !== 'win32' && process.getuid?.() !== 0;
+// read-only parent makes `unlink` fail — where the mode is enforced at all,
+// which excludes Windows and excludes running as root.
+const enforcesDirectoryModes = await canDo(async (directory) => {
+  const guarded = join(directory, 'guarded');
+  await mkdir(guarded);
+  const victim = join(guarded, 'file');
+  await writeFile(victim, 'x');
+  await chmod(guarded, 0o500);
+  try {
+    await rm(victim);
+    throw new Error('the mode was not enforced');
+  } catch (error) {
+    if ((error as Error).message === 'the mode was not enforced') {
+      throw error;
+    }
+  } finally {
+    await chmod(guarded, 0o700);
+  }
+});
 
-// Automatic takeover of a stale lock needs an open that refuses to follow a
-// link. Windows has no such flag, so takeover is refused there by design and the
-// tests that expect it to succeed do not apply. The refusal itself is tested on
-// every platform through the injected capability, and again natively below.
-const takeoverSupported = process.platform !== 'win32';
-
-// Creating a symbolic link needs a privilege on Windows that CI does not grant,
-// and hard-link counts are not reported the same way there.
-const canObserveLinks = process.platform !== 'win32';
+// Automatic takeover needs an open that refuses to follow a link, so the tests
+// read the decision the module actually made rather than repeating its reasoning.
+const takeoverSupported = CAN_REFUSE_LINK_ON_OPEN;
 
 async function withDirectory(
   run: (directory: string) => Promise<void>,
@@ -495,7 +540,7 @@ test('many contenders for a free lock path produce exactly one holder', async ()
 // resolving it.
 test(
   'a symlinked lock path is refused and its target is untouched',
-  { skip: !canObserveLinks },
+  { skip: !canCreateSymlinks },
   async () => {
     await withDirectory(async (directory) => {
       const target = join(directory, 'victim');
@@ -604,7 +649,7 @@ test(
 
 test(
   'a lock file that cannot be read is never treated as absent',
-  { skip: !canObserveUnlinkFailure },
+  { skip: !enforcesDirectoryModes },
   async () => {
     await withDirectory(async (directory) => {
       const path = join(directory, 'r.lock');
@@ -623,7 +668,7 @@ test(
 
 test(
   'a hard-linked owner record is refused and neither name is rewritten',
-  { skip: !canObserveLinks },
+  { skip: !canCountHardLinks },
   async () => {
     await withDirectory(async (directory) => {
       const other = join(directory, 'also-here');
@@ -677,7 +722,7 @@ test('a record write that never progresses fails instead of claiming success', a
 
 test(
   'a takeover that cannot even be attempted surfaces the reason',
-  { skip: !canObserveUnlinkFailure },
+  { skip: !enforcesDirectoryModes },
   async () => {
     await withDirectory(async (directory) => {
       const path = join(directory, 'r.lock');
@@ -700,7 +745,7 @@ test(
 
 test(
   'a failed release can be retried once its cause is fixed',
-  { skip: !canObserveUnlinkFailure },
+  { skip: !enforcesDirectoryModes },
   async () => {
     await withDirectory(async (directory) => {
       const path = join(directory, 'r.lock');
@@ -800,7 +845,7 @@ test('terminal escapes in a foreign host record cannot reach the message', async
 // Creating it as a directory fails on the existing name instead.
 test(
   'a lock path that is occupied but resolves to nothing is refused, not spun on',
-  { skip: !canObserveLinks },
+  { skip: !canCreateSymlinks },
   async () => {
     await withDirectory(async (directory) => {
       const path = join(directory, 'r.lock');

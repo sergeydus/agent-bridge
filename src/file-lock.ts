@@ -81,7 +81,7 @@ const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
  * losing automatic recovery from a crashed run costs the user one deletion, while
  * overwriting an unrelated file costs them that file.
  */
-const CAN_REFUSE_LINK_ON_OPEN = NOFOLLOW !== 0;
+export const CAN_REFUSE_LINK_ON_OPEN = NOFOLLOW !== 0;
 
 /** The part of a `FileHandle` a record write needs, so tests can supply one. */
 export interface LockRecordWriter {
@@ -121,13 +121,14 @@ export async function writeWholeRecord(
 /**
  * Records who holds a lock directory this process has just created.
  *
- * Exclusive create cannot overwrite anything, even through a link, because it
- * fails when the resolved name already exists. Where a no-follow open is
- * unavailable, the remaining exposure is that a link planted inside this
+ * Exclusive create cannot modify anything that exists, even through a link,
+ * because it fails when the resolved name is already there. Where a no-follow
+ * open is unavailable, the remaining exposure is that a link raced into this
  * directory — which did not exist a moment ago and is owner-only where modes are
  * enforced — could redirect the creation to a path that does not exist yet. That
  * is checked for immediately afterwards and refused rather than reported as a
- * held lock.
+ * held lock. `docs/security.md` states this residual rather than claiming it
+ * closed; an unpredictable record name would close it.
  */
 async function publishOwnerRecord(
   lockPath: string,

@@ -109,10 +109,23 @@ which is the same manual recovery as any unattributable lock.
 
 A lock must be a plain directory whose record is a plain file with exactly one
 name. A symbolic link, a hard link, or any other special file in either position
-is never treated as a lock and never written to, because writing through it would
-modify whatever it refers to. For takeover, which rewrites an existing record, the
-check is made against the path and again against the opened handle, and the record
-is confirmed through that same handle before anything is written to it.
+is never treated as a lock, and nothing already on disk is ever modified through
+one. For takeover, which rewrites an existing record, the check is made against
+the path and again against the opened handle, and the record is confirmed through
+that same handle before anything is written to it.
+
+The one exception is stated rather than implied, because the guarantee above is
+otherwise not exact. Creating the record inside a lock directory this process has
+just created uses an exclusive create, which cannot modify anything that exists —
+it fails when the resolved name is already there. Where no no-follow open exists,
+a link raced into that new directory could still redirect the _creation_ to a path
+that does not exist yet. Doing so requires write access to a directory created
+moments earlier inside the user's own application-data directory, which is
+owner-only where modes are enforced, so it requires the user's own privileges. It
+is detected immediately afterwards and refused rather than reported as a held
+lock, and no existing file can be affected. Giving the record an unpredictable
+name would close it entirely and is the recorded extension point if that residual
+ever matters.
 
 Rewriting an existing record needs an open that refuses to follow a link, which
 POSIX provides and Windows does not. Where it is unavailable, automatic takeover

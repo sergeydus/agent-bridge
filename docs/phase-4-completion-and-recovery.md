@@ -1,6 +1,6 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 14, approved; slices 1 to 7 implemented
+Status: Contract revision 15, approved; slices 1 to 7 implemented
 
 Target release: 0.7.0
 
@@ -1371,6 +1371,42 @@ any assertion:
   reports as `0666`. They assert the mode only where the platform enforces it,
   which is what `docs/security.md` has always promised with "where supported".
   Every other assertion in those tests still runs on every platform.
+
+**Revision 15** measures test capabilities, and states the record-creation
+residual instead of implying it away.
+
+Three corrections from Codex's review of the directory lock.
+
+The first is mine to own. The Windows dangling-symlink regression test — the one
+that exposed the original defect — was gated on `process.platform !== 'win32'`
+when the link tests were grouped together, so it reported `# SKIP`, and it was
+reported here as passing on Windows. It was not run. The earlier failing run is
+itself the proof that the runner can create that link. Capabilities are now
+probed rather than assumed: whether symbolic links can be created, whether hard
+links are counted, and whether directory modes are enforced are each measured at
+startup, so a test is skipped only where the operating system actually prevents
+it. The takeover gate reads the exported capability from `file-lock.ts` instead of
+repeating its platform reasoning.
+
+The second is the record-creation window. `docs/security.md` promised that a link
+in either position is never written through, while `publishOwnerRecord` admits a
+link raced into a newly created lock directory could redirect the creation where
+no no-follow open exists. Codex offered closing the window or narrowing the
+documented model; the model is narrowed, because the claim was the inaccurate part.
+Exclusive create cannot modify anything that exists, so the residual is confined
+to creating a file at a path that does not exist yet, by someone who already has
+write access to a directory created moments earlier inside the user's own
+owner-only data directory. It is detected immediately and refused. An
+unpredictable record name would close it and is recorded as the extension point.
+
+The third is the red Windows gate. Every functional test passed — 345 passed, 0
+failed, 17 skipped — and Node's coverage reporter then failed with
+`Unexpected end of JSON input`, exiting 1. The cause is child coverage reports:
+a Node process spawned by a test inherits `NODE_V8_COVERAGE` and writes its own
+report into the same directory the reporter is reading. The four test files that
+spawn Node children now clear that variable, which was verified not to affect
+those files' own coverage, since V8 enabled it at startup. Whether this was the
+whole cause is for the Windows job to confirm, not for this document to assert.
 
 ## Questions for review
 
