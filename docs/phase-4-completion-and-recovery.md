@@ -635,9 +635,16 @@ The disclosure reports counts — how many tracked files are modified and how
 many untracked files are present — and does not list paths, because compact
 output does not expose project paths by default.
 
-After a successful apply, the summary reports how many files the patch touched,
-so agent changes remain distinguishable from the user's own while the two are
-still separable in memory.
+After a successful apply, the summary reports how many files the patch touched.
+It must not claim that `git diff` separates those changes from the user's own:
+applied into a dirty checkout both are unstaged and appear together, which is
+the condition D3 exists to disclose. The saved patch is the separate record.
+
+Failure messages compose their guidance separately from the quoted command
+output, so a long Git error truncates the error rather than the artifact
+locations and the next command. Suggested commands are shell-quoted, because the
+macOS application-data path contains `Application Support`, and the discard
+suggestion prints the actual run id rather than a placeholder.
 
 ### Injectable prompt boundary
 

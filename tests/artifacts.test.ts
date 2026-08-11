@@ -1541,7 +1541,11 @@ test('a successful apply reports how many files it touched', async () => {
     assert.equal(result.outcome, 'applied');
     // Two files: the edited one and the new one.
     assert.match(messages.at(-1) ?? '', /2 files changed/);
-    assert.match(messages.at(-1) ?? '', /git diff` separates them/);
+    // The applied changes and any of the user's own are both unstaged and
+    // appear in the same diff, so the patch is what keeps them distinguishable.
+    assert.match(messages.at(-1) ?? '', /inspect the combined checkout/);
+    assert.equal((messages.at(-1) ?? '').includes('separates them'), false);
+    assert.ok((messages.at(-1) ?? '').includes(fixture.patchPath));
   });
 });
 
@@ -1620,5 +1624,74 @@ test('an unavailable file count is reported without blocking the apply', async (
       await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'),
       'after\n',
     );
+  });
+});
+
+test('a long apply error keeps the recovery guidance', async () => {
+  await withFixture(async (fixture) => {
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'apply',
+      runId: 'run-20260811-abc123',
+      reporter: fixture.reporter,
+      createPrompt: () => undefined,
+      apply: () => Promise.reject(new Error('x'.repeat(4_000))),
+    });
+
+    const reason = result.reason ?? '';
+    // Bounded overall, but the guidance is what survives truncation.
+    assert.ok(reason.length <= 2_000);
+    assert.ok(reason.includes(`still at ${fixture.patchPath}`));
+    assert.match(reason, /git status/);
+    assert.match(reason, /retry with/);
+    // The error itself is what gets cut.
+    assert.match(reason, /…/);
+  });
+});
+
+test('a long removal error keeps the recovery guidance', async () => {
+  await withFixture(async (fixture) => {
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'discard',
+      runId: 'run-20260811-abc123',
+      reporter: fixture.reporter,
+      createPrompt: () => undefined,
+      removeWorkspace: () => Promise.reject(new Error('y'.repeat(4_000))),
+    });
+
+    const reason = result.reason ?? '';
+    assert.ok(reason.length <= 2_000);
+    assert.ok(reason.includes(`still at ${fixture.workspace}`));
+    assert.match(reason, /--discard-workspace 'run-20260811-abc123'/);
+    assert.match(reason, /…/);
+  });
+});
+
+test('recovery commands are runnable when paths contain spaces', async () => {
+  await withFixture(async (fixture) => {
+    // The real macOS data directory is under `Application Support`.
+    const spaced = join(fixture.root, 'Application Support', 'run.patch');
+
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: spaced,
+      baseRevision: fixture.baseRevision,
+      instruction: 'apply',
+      runId: 'run-20260811-abc123',
+      reporter: fixture.reporter,
+      createPrompt: () => undefined,
+      apply: () => Promise.reject(new Error('failed')),
+    });
+
+    // Quoted, so the suggestion can be pasted as shown.
+    assert.ok((result.reason ?? '').includes(`git apply '${spaced}'`));
   });
 });

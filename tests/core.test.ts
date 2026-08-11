@@ -3,10 +3,12 @@ import test from 'node:test';
 
 import {
   boundedCompletionReason,
+  completionFailureReason,
   completionOutcomeFailed,
   completionOutcomeRequiresReason,
   COMPLETION_OUTCOMES,
   MAX_COMPLETION_REASON_CHARS,
+  shellQuote,
   deriveCurrentPairedExchangeStatus,
   deriveHistoricalPairedExchangeStatus,
   editorForRound,
@@ -185,4 +187,38 @@ test('completion reasons are bounded and safe to print', () => {
   assert.equal(reason.length, MAX_COMPLETION_REASON_CHARS);
   assert.equal(reason.includes('\u001B'), false);
   assert.match(reason, /^git said red /);
+});
+
+test('a failure reason truncates the error, never the guidance', () => {
+  const guidance =
+    'The patch is still at /tmp/run.patch. Retry with git apply.';
+  const reason = completionFailureReason({
+    summary: 'The patch could not be applied:',
+    error: 'x'.repeat(5_000),
+    guidance,
+  });
+
+  assert.equal(reason.length <= MAX_COMPLETION_REASON_CHARS, true);
+  assert.match(reason, /^The patch could not be applied:/);
+  assert.ok(reason.endsWith(guidance));
+  assert.match(reason, /…/);
+});
+
+test('a short failure reason keeps the error intact', () => {
+  const reason = completionFailureReason({
+    summary: 'It failed:',
+    error: 'permission denied',
+    guidance: 'Try again.',
+  });
+
+  assert.equal(reason, 'It failed: permission denied Try again.');
+});
+
+test('shell suggestions survive spaces and quotes', () => {
+  assert.equal(
+    shellQuote('/Users/me/Library/Application Support/Agent Bridge/r.patch'),
+    "'/Users/me/Library/Application Support/Agent Bridge/r.patch'",
+  );
+  // An embedded quote must not end the quoting early.
+  assert.equal(shellQuote("it's"), "'it'\\''s'");
 });

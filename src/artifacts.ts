@@ -12,7 +12,9 @@ import {
 } from './git.ts';
 import {
   boundedCompletionReason,
+  completionFailureReason,
   errorMessage,
+  shellQuote,
   summarizePorcelainStatus,
   type CompletionInstruction,
   type CompletionOutcome,
@@ -363,6 +365,7 @@ export async function finishIsolatedRun({
   baseRevision,
   derivedBaseRevision,
   instruction = 'ask',
+  runId,
   reporter,
   createPrompt = createTerminalCompletionPrompt,
   apply = applyPatch,
@@ -375,6 +378,8 @@ export async function finishIsolatedRun({
   baseRevision?: string;
   derivedBaseRevision?: string;
   instruction?: CompletionInstruction;
+  /** Printed in recovery guidance so the discard command is runnable as shown. */
+  runId?: string;
   reporter: ProgressReporter;
   createPrompt?: () => CompletionPrompt | undefined;
   apply?: typeof applyPatch;
@@ -483,21 +488,28 @@ export async function finishIsolatedRun({
     try {
       await apply({ repository, patchPath });
     } catch (error) {
-      const reason = boundedCompletionReason(
-        `The patch could not be applied: ${errorMessage(error)} ` +
+      const reason = completionFailureReason({
+        summary: 'The patch could not be applied:',
+        error: errorMessage(error),
+        guidance:
           `The patch is still at ${patchPath} and the isolated workspace was ` +
           `kept at ${workspace}. Nothing was staged or committed. Inspect the ` +
           'checkout with `git status`, resolve what blocked the apply, then ' +
-          `retry with \`git apply ${patchPath}\`.`,
-      );
+          `retry with \`git apply ${shellQuote(patchPath)}\`.`,
+      });
       reporter.warning(reason);
       return { outcome: 'apply-failed', reason, patchPath, workspace };
     }
+    // Applied into a possibly dirty checkout, the agents' changes and the
+    // user's own are both unstaged and appear together in one diff. Claiming
+    // `git diff` separates them would describe the opposite of D3.
     reporter.success(
-      touched === undefined
+      (touched === undefined
         ? 'Applied the patch to the original checkout.'
-        : `Applied the patch to the original checkout: ${touched} file${touched === 1 ? '' : 's'} changed. ` +
-            'They are unstaged, so `git diff` separates them from your own work.',
+        : `Applied the patch to the original checkout: ${touched} file${touched === 1 ? '' : 's'} changed.`) +
+        ' Changes remain unstaged; inspect the combined checkout with ' +
+        "`git diff`. The saved patch is the separate record of the agents' " +
+        `changes: ${patchPath}`,
     );
     return { outcome: 'applied', patchPath, workspace, applied: true };
   };
@@ -532,15 +544,17 @@ export async function finishIsolatedRun({
     try {
       await removeWorkspace({ repository, workspace });
     } catch (error) {
-      const reason = boundedCompletionReason(
-        `The isolated workspace could not be removed: ${errorMessage(error)} ` +
+      const reason = completionFailureReason({
+        summary: 'The isolated workspace could not be removed:',
+        error: errorMessage(error),
+        guidance:
           `It is still at ${workspace} with its work intact` +
           (plan.patchPath
             ? `, and a complete patch is at ${plan.patchPath}`
             : '') +
           '. Close anything using that directory, then remove it with ' +
-          '`agent-bridge --discard-workspace <run-id>`.',
-      );
+          `\`agent-bridge --discard-workspace ${runId ? shellQuote(runId) : '<run-id>'}\`.`,
+      });
       reporter.warning(reason);
       return {
         outcome: 'discard-failed',

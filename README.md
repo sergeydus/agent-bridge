@@ -348,8 +348,9 @@ If the original checkout already holds uncommitted work, applying says so
 first — how many files are changed and how many are untracked — and asks
 before touching anything, because afterwards the agents' changes and yours are
 mixed together with no undo. A successful apply reports how many files it
-changed and leaves them unstaged, so `git diff` still separates them from your
-own work.
+changed and leaves them unstaged. Your own uncommitted work is unstaged too, so
+`git diff` shows the combined result; the saved patch remains the separate
+record of what the agents changed.
 
 When applying or removing fails, the message says where the patch and the
 workspace are, that nothing was staged or committed, and the command to try

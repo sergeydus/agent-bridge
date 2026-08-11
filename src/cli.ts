@@ -703,6 +703,7 @@ continue from its actual state instead of repeating changes blindly.`;
                 baseRevision,
                 derivedBaseRevision,
                 instruction: options.onComplete,
+                runId,
                 reporter,
               })
           : undefined,

@@ -295,8 +295,8 @@ export async function canApplyPatch({
 
 /**
  * How many files a patch touches, without applying it. Reported after a
- * successful apply so agent changes stay distinguishable from the user's own
- * while the two are still separable in memory.
+ * successful apply so the user knows the size of what landed; the patch itself,
+ * not the diff, is what keeps the agents' changes distinguishable afterwards.
  */
 export async function countPatchedFiles({
   repository,

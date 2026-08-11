@@ -114,6 +114,43 @@ export function boundedCompletionReason(text: string): string {
   return sanitizeTerminalText(text).slice(0, MAX_COMPLETION_REASON_CHARS);
 }
 
+/**
+ * Quotes a path for a shell command the user is invited to run. Application
+ * data lives under `Application Support` on macOS, so an unquoted suggestion
+ * is not runnable.
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+/**
+ * Composes a failure reason that keeps its guidance. Only the quoted command
+ * output is truncated: appending recovery steps after an unbounded error meant
+ * a long Git failure pushed the artifact locations and the next command past
+ * the bound, leaving the user with a wall of output and no way forward.
+ */
+export function completionFailureReason({
+  summary,
+  error,
+  guidance,
+}: {
+  summary: string;
+  error: string;
+  guidance: string;
+}): string {
+  const framing = boundedCompletionReason(`${summary} ${guidance}`);
+  const room = MAX_COMPLETION_REASON_CHARS - framing.length - 1;
+  if (room <= 0) {
+    return framing;
+  }
+  const detail = sanitizeTerminalText(error);
+  const trimmed =
+    detail.length > room
+      ? `${detail.slice(0, Math.max(0, room - 1))}…`
+      : detail;
+  return boundedCompletionReason(`${summary} ${trimmed} ${guidance}`);
+}
+
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
