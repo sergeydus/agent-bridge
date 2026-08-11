@@ -1,7 +1,12 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import type { AgentName, ReasoningEffort } from './core.ts';
+import type {
+  AgentName,
+  CompletionInstruction,
+  ReasoningEffort,
+} from './core.ts';
+import { COMPLETION_INSTRUCTIONS } from './core.ts';
 import { getAppPaths } from './paths.ts';
 import type { UiMode } from './terminal-capabilities.ts';
 
@@ -24,6 +29,12 @@ export interface BridgeOptions {
   output: string;
   dryRun: boolean;
   noTranscript: boolean;
+  /**
+   * What to do with a completed isolated workspace. Never persisted: it is
+   * fresh authorization for an action outside the tool, so a resumed run must
+   * not apply a patch because of a flag passed to an earlier invocation.
+   */
+  onComplete: CompletionInstruction;
   screenReader: boolean;
   screenReaderExplicit: boolean;
   /**
@@ -97,6 +108,10 @@ Options:
   --claude-effort <level> low, medium, high, xhigh, or max
   --output <directory>    Override transcript and workspace storage
   --no-transcript         Remove completed run or chat transcripts
+  --on-complete <action>  Isolated workspace at completion: ask (default),
+                          keep, apply, or discard. Without a terminal the
+                          default is keep. discard permanently removes the
+                          workspace after its work is captured to a patch.
   --screen-reader         Use append-only, screen-reader-friendly presentation
   --color                 Enable color on interactive terminals
   --no-color              Disable Agent Bridge color output
@@ -143,6 +158,7 @@ export function parseArgs(
     output: defaultOutput,
     dryRun: false,
     noTranscript: false,
+    onComplete: 'ask',
     screenReader: false,
     screenReaderExplicit: false,
     colorExplicit: false,
@@ -211,6 +227,9 @@ export function parseArgs(
     },
     'project-config': (value) => {
       options.projectConfigPath = value;
+    },
+    'on-complete': (value) => {
+      options.onComplete = value as CompletionInstruction;
     },
     ui: (value) => {
       options.ui = value as UiMode;
@@ -365,6 +384,19 @@ export function parseArgs(
   }
   if (!['codex', 'claude'].includes(options.judge)) {
     throw new Error('--judge must be codex or claude');
+  }
+  if (!COMPLETION_INSTRUCTIONS.includes(options.onComplete)) {
+    throw new Error(
+      `--on-complete must be ${COMPLETION_INSTRUCTIONS.join(', ')}`,
+    );
+  }
+  // An early, better-worded error for a combination that cannot work. It is
+  // not the enforcement point: a resumed run takes its isolation from the
+  // checkpoint, so the authoritative check happens at runtime.
+  if (!options.isolation && ['apply', 'discard'].includes(options.onComplete)) {
+    throw new Error(
+      `--on-complete ${options.onComplete} needs an isolated workspace, and --no-isolation edits the project directly`,
+    );
   }
   if (
     options.implementer &&

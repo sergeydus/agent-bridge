@@ -444,3 +444,81 @@ test('a failed run-lock acquisition does not overwrite the active owner state', 
     rmSync(bridgeHome, { recursive: true, force: true });
   }
 });
+
+test('an impossible --on-complete is rejected before any provider call', async () => {
+  const directory = mkdtempSync(`${tmpdir()}/agent-bridge-on-complete-`);
+  const bridgeHome = mkdtempSync(`${tmpdir()}/agent-bridge-home-`);
+  const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: bridgeHome } });
+  const store = new RunStateStore(paths.stateDirectory);
+  const now = new Date().toISOString();
+  const savedRun: SavedRun = {
+    version: 3,
+    id: 'run-20260811-direct001',
+    createdAt: now,
+    updatedAt: now,
+    status: 'reviewing',
+    task: 'A resumed run that never had an isolated workspace.',
+    originalCwd: directory,
+    agentCwd: directory,
+    projectKind: 'git',
+    outputDirectory: paths.runsDirectory,
+    // No workspace: resume resolves isolation from the checkpoint, so the
+    // current flags alone could not have told us this.
+    workflow: { kind: 'collaborative', firstAgent: 'codex', maxRounds: 1 },
+    judge: 'codex',
+    retries: 0,
+    timeoutMinutes: 1,
+    untilAgreement: false,
+    requireAgreement: false,
+    noTranscript: false,
+    verification: [],
+    protectedPaths: [],
+    protectedPathFingerprints: {},
+    completedCycles: 0,
+    codexPrevious: '',
+    claudePrevious: '',
+    handoff: '',
+    converged: false,
+    rounds: [],
+  };
+  try {
+    await store.save(savedRun);
+    const result = spawnSync(
+      process.execPath,
+      [
+        'bin/agent-bridge.mjs',
+        '--resume',
+        savedRun.id,
+        '--on-complete',
+        'apply',
+      ],
+      {
+        cwd: bridgeRoot,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          AGENT_BRIDGE_HOME: bridgeHome,
+          // Any provider lookup would now fail loudly and differently, which
+          // is what proves none was attempted.
+          PATH: directory,
+        },
+      },
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /needs an editing run with an isolated workspace/,
+    );
+    assert.match(result.stderr, new RegExp(savedRun.id));
+    assert.equal(/codex|claude/i.test(result.stderr), false);
+    // The checkpoint is untouched: nothing about the run changed.
+    assert.deepEqual(await store.load(savedRun.id), {
+      ...savedRun,
+      updatedAt: (await store.load(savedRun.id)).updatedAt,
+    });
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+    rmSync(bridgeHome, { recursive: true, force: true });
+  }
+});

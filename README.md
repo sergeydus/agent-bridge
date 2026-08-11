@@ -347,6 +347,34 @@ creates a binary-safe patch and offers to:
 Agent Bridge never commits, stages, resets, or silently discards project
 changes.
 
+`--on-complete` chooses that outcome without a terminal, so a script or CI job
+can finish a run on its own:
+
+```sh
+agent-bridge --collaborative codex --task "…" --on-complete apply
+```
+
+- `ask` is the default and shows the menu above.
+- `keep` is the default when there is no terminal, and keeps the workspace and
+  its patch.
+- `apply` runs the same base-revision and `git apply --check` gates. It also
+  refuses a checkout that holds your own uncommitted work, because applied on
+  top of it the agents' changes and yours become indistinguishable and there is
+  no undo. Commit or stash first, or apply interactively.
+- `discard` permanently removes the workspace once its work is captured to a
+  patch. It skips the confirmation because the flag is itself the instruction,
+  but every preservation check still applies.
+
+The flag is never saved. Resuming a run does not repeat an apply that an
+earlier invocation authorized. `apply` and `discard` are rejected before any
+provider call when the run has no isolated workspace, so an impossible
+instruction costs nothing.
+
+Exit code `1` means a completion action you asked for did not happen: it failed,
+or an unattended `apply` was refused. It takes precedence over the
+`--require-agreement` code `2`, because an action that did not happen is the
+more actionable signal; the run itself is still recorded as completed.
+
 The completion step cannot fail a run that already succeeded. The run is
 recorded as completed before the menu appears, so declining it — including with
 Ctrl+D — keeps the workspace and leaves the run completed and discardable

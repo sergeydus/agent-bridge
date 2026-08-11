@@ -1,6 +1,6 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 9, approved; slices 1 to 4 implemented
+Status: Contract revision 9, approved; slices 1 to 5 implemented
 
 Target release: 0.7.0
 

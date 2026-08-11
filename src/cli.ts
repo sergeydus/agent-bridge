@@ -155,6 +155,24 @@ async function main(): Promise<void> {
     console.log(`Continuing run ${resumedRun.id}…`);
   }
 
+  // Runtime validation, as early as the information exists. A resumed run
+  // takes its isolation from the checkpoint, so the current flags alone cannot
+  // tell whether an isolated workspace exists — and this must be answered
+  // before any provider call is paid for.
+  if (
+    ['apply', 'discard'].includes(options.onComplete) &&
+    !(
+      options.isolation && Boolean(options.implementer || options.collaborative)
+    )
+  ) {
+    throw new Error(
+      `--on-complete ${options.onComplete} needs an editing run with an isolated workspace. ` +
+        (resumedRun
+          ? `Run ${resumedRun.id} has none, so there is no patch or workspace to act on.`
+          : 'Use --implementer or --collaborate without --no-isolation.'),
+    );
+  }
+
   if (!options.dryRun && !resumedRun) {
     await assertProvidersAvailable(PROVIDERS);
   }
@@ -684,6 +702,7 @@ continue from its actual state instead of repeating changes blindly.`;
                 patchPath: join(options.output, `${runId}.patch`),
                 baseRevision,
                 derivedBaseRevision,
+                instruction: options.onComplete,
                 reporter,
               })
           : undefined,
@@ -741,7 +760,10 @@ continue from its actual state instead of repeating changes blindly.`;
     }
     // A completion action that did not happen is the more actionable signal,
     // so it outranks the agreement-cap code.
-    if (finished && completionOutcomeFailed(finished.outcome)) {
+    if (
+      finished &&
+      (completionOutcomeFailed(finished.outcome) || finished.refusedInstruction)
+    ) {
       process.exitCode = 1;
     }
   } catch (error) {

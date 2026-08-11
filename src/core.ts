@@ -94,6 +94,16 @@ export function completionOutcomeFailed(outcome: CompletionOutcome): boolean {
   return FAILED_COMPLETION_OUTCOMES.includes(outcome);
 }
 
+/** What the user asked to happen to a completed isolated workspace. */
+export type CompletionInstruction = 'ask' | 'keep' | 'apply' | 'discard';
+
+export const COMPLETION_INSTRUCTIONS: readonly CompletionInstruction[] = [
+  'ask',
+  'keep',
+  'apply',
+  'discard',
+];
+
 export const MAX_COMPLETION_REASON_CHARS = 2_000;
 
 /**

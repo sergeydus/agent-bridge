@@ -12,8 +12,11 @@ import {
 import {
   boundedCompletionReason,
   errorMessage,
+  summarizePorcelainStatus,
+  type CompletionInstruction,
   type CompletionOutcome,
 } from './core.ts';
+import { workingTreeStatus } from './snapshot.ts';
 import type { ProgressReporter } from './ui.ts';
 
 /**
@@ -157,6 +160,12 @@ export interface CompletionResult {
   patchPath?: string;
   workspace?: string;
   applied?: boolean;
+  /**
+   * True when an explicit `--on-complete` instruction was refused. An unattended
+   * script asked for an action that did not happen, so the run must not read as
+   * a success; an interactive refusal is a decision the user saw instead.
+   */
+  refusedInstruction?: boolean;
 }
 
 export type WorkspaceRemovalPlan =
@@ -273,6 +282,31 @@ export async function planWorkspaceRemoval({
 }
 
 /**
+ * Unattended application refuses a checkout that holds the user's own
+ * uncommitted work: applied on top of it, agent changes and user changes become
+ * indistinguishable, and Agent Bridge never commits or stages, so there is no
+ * undo. Counts are reported rather than paths, because compact output does not
+ * expose project paths by default.
+ */
+async function dirtyCheckoutRefusalReason(
+  repository: string,
+): Promise<string | undefined> {
+  const summary = summarizePorcelainStatus(
+    await workingTreeStatus({ cwd: repository }),
+  );
+  const dirty = summary.modifiedFiles + summary.stagedFiles;
+  if (dirty === 0 && summary.untrackedFiles === 0) {
+    return undefined;
+  }
+  return boundedCompletionReason(
+    'The original checkout has uncommitted work ' +
+      `(${dirty} changed, ${summary.untrackedFiles} untracked), and applying ` +
+      "unattended would mix it with the agents' changes. The patch was not " +
+      'applied. Commit or stash that work, or apply interactively.',
+  );
+}
+
+/**
  * Resolves the end of an editing run to exactly one outcome. Every failure here
  * is reported as an outcome rather than thrown, because the agents' work is
  * already finished and complete by the time this runs.
@@ -283,6 +317,7 @@ export async function finishIsolatedRun({
   patchPath,
   baseRevision,
   derivedBaseRevision,
+  instruction = 'ask',
   reporter,
   createPrompt = createTerminalCompletionPrompt,
   apply = applyPatch,
@@ -293,6 +328,7 @@ export async function finishIsolatedRun({
   patchPath: string;
   baseRevision?: string;
   derivedBaseRevision?: string;
+  instruction?: CompletionInstruction;
   reporter: ProgressReporter;
   createPrompt?: () => CompletionPrompt | undefined;
   apply?: typeof applyPatch;
@@ -329,11 +365,119 @@ export async function finishIsolatedRun({
     return { outcome: 'no-changes', workspace };
   }
   reporter.success(`Saved a portable patch to ${patchPath}`);
+
+  const applyToCheckout = async (
+    interactive: boolean,
+  ): Promise<CompletionResult> => {
+    let refusalReason: string | undefined;
+    try {
+      refusalReason =
+        (await patchApplicationRefusalReason({
+          repository,
+          patchPath,
+          baseRevision,
+        })) ??
+        // A disclosure printed to a process nobody is watching authorizes
+        // nothing, and the instruction may execute hours after it was typed.
+        (interactive
+          ? undefined
+          : await dirtyCheckoutRefusalReason(repository));
+    } catch (error) {
+      // The safety checks could not be evaluated, so nothing was applied.
+      // This is reported as a failure rather than a refusal: a refusal is a
+      // known answer, and here the state of the checkout is unknown.
+      const reason = boundedCompletionReason(
+        `The patch was not applied because the original checkout could not be checked: ${errorMessage(error)}`,
+      );
+      reporter.warning(reason);
+      return { outcome: 'apply-failed', reason, patchPath, workspace };
+    }
+    if (refusalReason) {
+      reporter.warning(refusalReason);
+      return {
+        outcome: 'apply-refused',
+        reason: refusalReason,
+        patchPath,
+        workspace,
+        // Only set when an unattended instruction was refused; an interactive
+        // refusal is a decision the user saw, not a failed instruction.
+        ...(interactive ? {} : { refusedInstruction: true }),
+      };
+    }
+    try {
+      await apply({ repository, patchPath });
+    } catch (error) {
+      const reason = boundedCompletionReason(
+        `The patch could not be applied: ${errorMessage(error)}`,
+      );
+      reporter.warning(reason);
+      return { outcome: 'apply-failed', reason, patchPath, workspace };
+    }
+    reporter.success('Applied the patch to the original checkout.');
+    return { outcome: 'applied', patchPath, workspace, applied: true };
+  };
+
+  const removeAfterConfirmation = async (
+    confirm?: (
+      plan: WorkspaceRemovalPlan & { removable: true },
+    ) => Promise<'yes' | 'no' | 'unanswered'>,
+  ): Promise<CompletionResult> => {
+    const plan = await planWorkspaceRemoval({
+      workspace,
+      patchPath,
+      baseRevision,
+      interactive: confirm !== undefined,
+    });
+    if (!plan.removable) {
+      reporter.warning(plan.reason);
+      return {
+        outcome: plan.outcome,
+        reason: plan.reason,
+        patchPath,
+        workspace,
+      };
+    }
+    const answer = confirm ? await confirm(plan) : 'yes';
+    if (answer === 'unanswered') {
+      return { outcome: 'declined', patchPath: plan.patchPath, workspace };
+    }
+    if (answer === 'no') {
+      return { outcome: 'kept', patchPath: plan.patchPath, workspace };
+    }
+    try {
+      await removeWorkspace({ repository, workspace });
+    } catch (error) {
+      const reason = boundedCompletionReason(
+        `The isolated workspace could not be removed: ${errorMessage(error)}`,
+      );
+      reporter.warning(reason);
+      return {
+        outcome: 'discard-failed',
+        reason,
+        patchPath: plan.patchPath,
+        workspace,
+      };
+    }
+    reporter.success('Discarded the isolated workspace.');
+    return { outcome: 'discarded', patchPath: plan.patchPath };
+  };
+
+  if (instruction === 'keep') {
+    return { outcome: 'kept', patchPath, workspace };
+  }
+  if (instruction === 'apply') {
+    return applyToCheckout(false);
+  }
+  if (instruction === 'discard') {
+    // The flag is itself the explicit instruction, so there is nothing left to
+    // confirm; the preservation gate still runs.
+    return removeAfterConfirmation();
+  }
+
   const prompt = createPrompt();
   if (!prompt) {
     return { outcome: 'kept', patchPath, workspace };
   }
-
   try {
     const choice = await askForChoice(prompt, {
       question: COMPLETION_MENU,
@@ -345,94 +489,27 @@ export async function finishIsolatedRun({
       return { outcome: 'declined', patchPath, workspace };
     }
     if (choice === '2') {
-      let refusalReason: string | undefined;
-      try {
-        refusalReason = await patchApplicationRefusalReason({
-          repository,
-          patchPath,
-          baseRevision,
-        });
-      } catch (error) {
-        // The safety checks could not be evaluated, so nothing was applied.
-        // This is reported as a failure rather than a refusal: a refusal is a
-        // known answer, and here the state of the checkout is unknown.
-        const reason = boundedCompletionReason(
-          `The patch was not applied because the original checkout could not be checked: ${errorMessage(error)}`,
-        );
-        reporter.warning(reason);
-        return { outcome: 'apply-failed', reason, patchPath, workspace };
-      }
-      if (refusalReason) {
-        reporter.warning(refusalReason);
-        return {
-          outcome: 'apply-refused',
-          reason: refusalReason,
-          patchPath,
-          workspace,
-        };
-      }
-      try {
-        await apply({ repository, patchPath });
-      } catch (error) {
-        const reason = boundedCompletionReason(
-          `The patch could not be applied: ${errorMessage(error)}`,
-        );
-        reporter.warning(reason);
-        return { outcome: 'apply-failed', reason, patchPath, workspace };
-      }
-      reporter.success('Applied the patch to the original checkout.');
-      return { outcome: 'applied', patchPath, workspace, applied: true };
+      return await applyToCheckout(true);
     }
     if (choice === '3') {
-      const plan = await planWorkspaceRemoval({
-        workspace,
-        patchPath,
-        baseRevision,
-        interactive: true,
-      });
-      if (!plan.removable) {
-        reporter.warning(plan.reason);
-        return {
-          outcome: plan.outcome,
-          reason: plan.reason,
-          patchPath,
-          workspace,
-        };
-      }
-      const confirmed = await askForChoice(prompt, {
-        question: plan.unanchoredHistory
-          ? `This workspace ${describeUnanchoredHistory(plan.unanchoredHistory)}, ` +
-            'and no branch or tag contains those commits. The patch preserves ' +
-            'the resulting files, but not commit messages, authorship, ' +
-            'signatures, or topology.\n' +
-            'Discard this isolated workspace permanently? [y/N]: '
-          : 'Discard this isolated workspace permanently? [y/N]: ',
-        retryQuestion: 'Discard this isolated workspace permanently? [y/N]: ',
-        choices: ['y', 'yes', 'n', 'no'],
-        defaultChoice: 'n',
-      });
-      if (confirmed === undefined) {
-        return { outcome: 'declined', patchPath: plan.patchPath, workspace };
-      }
-      if (['y', 'yes'].includes(confirmed)) {
-        try {
-          await removeWorkspace({ repository, workspace });
-        } catch (error) {
-          const reason = boundedCompletionReason(
-            `The isolated workspace could not be removed: ${errorMessage(error)}`,
-          );
-          reporter.warning(reason);
-          return {
-            outcome: 'discard-failed',
-            reason,
-            patchPath: plan.patchPath,
-            workspace,
-          };
+      return await removeAfterConfirmation(async (plan) => {
+        const confirmed = await askForChoice(prompt, {
+          question: plan.unanchoredHistory
+            ? `This workspace ${describeUnanchoredHistory(plan.unanchoredHistory)}, ` +
+              'and no branch or tag contains those commits. The patch preserves ' +
+              'the resulting files, but not commit messages, authorship, ' +
+              'signatures, or topology.\n' +
+              'Discard this isolated workspace permanently? [y/N]: '
+            : 'Discard this isolated workspace permanently? [y/N]: ',
+          retryQuestion: 'Discard this isolated workspace permanently? [y/N]: ',
+          choices: ['y', 'yes', 'n', 'no'],
+          defaultChoice: 'n',
+        });
+        if (confirmed === undefined) {
+          return 'unanswered';
         }
-        reporter.success('Discarded the isolated workspace.');
-        return { outcome: 'discarded', patchPath: plan.patchPath };
-      }
-      return { outcome: 'kept', patchPath: plan.patchPath, workspace };
+        return ['y', 'yes'].includes(confirmed) ? 'yes' : 'no';
+      });
     }
     return { outcome: 'kept', patchPath, workspace };
   } finally {

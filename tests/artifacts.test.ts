@@ -1207,3 +1207,169 @@ test('an uninspectable history is persisted as a completion outcome', async () =
     assert.equal(await exists(fixture.workspace), true);
   });
 });
+
+test('every completion outcome is reachable without a terminal', async () => {
+  await withFixture(async (fixture) => {
+    const kept = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'keep',
+      reporter: fixture.reporter,
+      // No prompt exists at all: nothing may try to ask.
+      createPrompt: () => undefined,
+    });
+    assert.deepEqual(kept, {
+      outcome: 'kept',
+      patchPath: fixture.patchPath,
+      workspace: fixture.workspace,
+    });
+
+    const applied = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'apply',
+      reporter: fixture.reporter,
+      createPrompt: () => undefined,
+    });
+    assert.equal(applied.outcome, 'applied');
+    assert.equal(
+      await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'),
+      'after\n',
+    );
+
+    const discarded = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'discard',
+      reporter: fixture.reporter,
+      createPrompt: () => undefined,
+    });
+    assert.equal(discarded.outcome, 'discarded');
+    assert.equal(await exists(fixture.workspace), false);
+  });
+});
+
+test('an explicit discard instruction needs no further confirmation', async () => {
+  await withFixture(async (fixture) => {
+    const prompt = scriptedPrompt([]);
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'discard',
+      reporter: fixture.reporter,
+      // A terminal is available, but the flag is itself the instruction.
+      createPrompt: () => prompt,
+    });
+
+    assert.equal(result.outcome, 'discarded');
+    assert.deepEqual(prompt.questions, []);
+    assert.equal(await exists(fixture.workspace), false);
+  });
+});
+
+test('an explicit discard still runs the preservation gate', async () => {
+  await withFixture(async (fixture) => {
+    await execute('git', ['add', '--all'], { cwd: fixture.workspace });
+    await execute('git', ['commit', '-m', 'inside'], {
+      cwd: fixture.workspace,
+    });
+
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'discard',
+      reporter: fixture.reporter,
+      createPrompt: () => undefined,
+    });
+
+    // Unattended: unanchored commits are refused, never confirmed away.
+    assert.equal(result.outcome, 'discard-failed');
+    assert.match(
+      result.reason ?? '',
+      /no branch or tag contains those commits/,
+    );
+    assert.equal(await exists(fixture.workspace), true);
+  });
+});
+
+test("unattended apply refuses a checkout holding the user's own work", async () => {
+  await withFixture(async (fixture) => {
+    await writeFile(join(fixture.repository, 'mine.txt'), 'my own work\n');
+    await writeFile(join(fixture.repository, 'notes.md'), 'untracked\n');
+    await execute('git', ['add', 'mine.txt'], { cwd: fixture.repository });
+
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      instruction: 'apply',
+      reporter: fixture.reporter,
+      createPrompt: () => undefined,
+    });
+
+    assert.equal(result.outcome, 'apply-refused');
+    assert.match(
+      result.reason ?? '',
+      /uncommitted work \(1 changed, 1 untracked\)/,
+    );
+    // Counts, not paths: compact output does not expose project paths.
+    assert.equal((result.reason ?? '').includes('mine.txt'), false);
+    assert.equal(result.refusedInstruction, true);
+    assert.equal(
+      await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'),
+      'before\n',
+    );
+  });
+});
+
+test('interactive apply into a dirty checkout remains available', async () => {
+  await withFixture(async (fixture) => {
+    await writeFile(join(fixture.repository, 'notes.md'), 'untracked\n');
+
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      reporter: fixture.reporter,
+      createPrompt: () => scriptedPrompt(['2']),
+    });
+
+    // The user is present and answered; only unattended application refuses.
+    assert.equal(result.outcome, 'applied');
+    assert.equal(result.refusedInstruction, undefined);
+    assert.equal(
+      await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'),
+      'after\n',
+    );
+  });
+});
+
+test('an interactive refusal does not mark the run as an instruction failure', async () => {
+  await withFixture(async (fixture) => {
+    await writeFile(join(fixture.repository, 'tracked.txt'), 'conflicting\n');
+
+    const result = await finishIsolatedRun({
+      repository: fixture.repository,
+      workspace: fixture.workspace,
+      patchPath: fixture.patchPath,
+      baseRevision: fixture.baseRevision,
+      reporter: fixture.reporter,
+      createPrompt: () => scriptedPrompt(['2']),
+    });
+
+    assert.equal(result.outcome, 'apply-refused');
+    assert.equal(result.refusedInstruction, undefined);
+  });
+});
