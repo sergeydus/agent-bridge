@@ -8,7 +8,6 @@ import {
   completionOutcomeRequiresReason,
   COMPLETION_OUTCOMES,
   MAX_COMPLETION_REASON_CHARS,
-  shellQuote,
   deriveCurrentPairedExchangeStatus,
   deriveHistoricalPairedExchangeStatus,
   editorForRound,
@@ -214,11 +213,15 @@ test('a short failure reason keeps the error intact', () => {
   assert.equal(reason, 'It failed: permission denied Try again.');
 });
 
-test('shell suggestions survive spaces and quotes', () => {
-  assert.equal(
-    shellQuote('/Users/me/Library/Application Support/Agent Bridge/r.patch'),
-    "'/Users/me/Library/Application Support/Agent Bridge/r.patch'",
-  );
-  // An embedded quote must not end the quoting early.
-  assert.equal(shellQuote("it's"), "'it'\\''s'");
+test('run ids accepted by isSafeRunId need no shell quoting', () => {
+  // Recovery messages print run ids inside a suggested command unquoted. That
+  // is only safe because the accepted character set contains nothing any shell
+  // splits or interprets, on POSIX or on Windows.
+  for (const id of ['run-20260811-abc123', 'r', 'A.b_c-1']) {
+    assert.ok(isSafeRunId(id));
+    assert.ok(/^[A-Za-z0-9._-]+$/.test(id));
+  }
+  for (const id of ['a b', 'a;b', 'a&b', 'a|b', 'a$b', 'a"b', "a'b", '-a']) {
+    assert.equal(isSafeRunId(id), false);
+  }
 });

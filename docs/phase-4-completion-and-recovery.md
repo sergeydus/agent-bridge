@@ -1,6 +1,6 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 9, approved; slices 1 to 6 implemented
+Status: Contract revision 10, approved; slices 1 to 6 implemented
 
 Target release: 0.7.0
 
@@ -642,9 +642,17 @@ the condition D3 exists to disclose. The saved patch is the separate record.
 
 Failure messages compose their guidance separately from the quoted command
 output, so a long Git error truncates the error rather than the artifact
-locations and the next command. Suggested commands are shell-quoted, because the
-macOS application-data path contains `Application Support`, and the discard
-suggestion prints the actual run id rather than a placeholder.
+locations and the next command.
+
+Recovery guidance does not embed a path in a pasteable command. Quoting is
+shell-specific — POSIX single quotes are literal characters in `cmd.exe` — and
+the parent shell cannot be inferred from inside the process, so a quoted
+suggestion would be wrong on a supported platform. Paths, which may contain
+spaces such as the macOS `Application Support`, are stated exactly and named as
+the argument to a shell-neutral command. Run ids are printed unquoted inside the
+suggested command, which is safe for every shell because `isSafeRunId` restricts
+them to alphanumerics, dot, dash, and underscore; the discard suggestion prints
+the actual run id rather than a placeholder.
 
 ### Injectable prompt boundary
 
@@ -1185,6 +1193,19 @@ Against a moving `HEAD` a commit returned the fingerprint to its clean value;
 the property is that a fixed base keeps the edited value, not that the
 fingerprint "moves when an agent commits". The test always asserted the correct
 property.
+
+**Revision 10** drops the shell-quoting claim from recovery guidance.
+
+Slice 6's first attempt at making suggested commands runnable used POSIX single
+quotes. Codex's review is correct that this is not portable: in `cmd.exe` single
+quotes are ordinary characters and protect nothing, so a Windows path under
+`Application Support` was no more runnable than before, only differently wrong —
+and the test proving the quoting asserted zsh syntax on a tool that supports
+Windows. The parent shell is not inferable from inside the process, so no single
+quoting rule can be correct. Guidance now states paths exactly and names a
+shell-neutral command, prints run ids unquoted under the `isSafeRunId` character
+set, and the `shellQuote` helper is removed rather than kept as a
+platform-specific trap.
 
 ## Questions for review
 

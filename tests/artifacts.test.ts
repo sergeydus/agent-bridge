@@ -1568,7 +1568,7 @@ test('a failed apply says where the patch is and how to retry', async () => {
     assert.ok(reason.includes(`still at ${fixture.patchPath}`));
     assert.ok(reason.includes(`kept at ${fixture.workspace}`));
     assert.match(reason, /Nothing was staged or committed/);
-    assert.match(reason, /retry with/);
+    assert.match(reason, /run `git apply` again on that patch path/);
     assert.equal(await exists(fixture.patchPath), true);
   });
 });
@@ -1646,7 +1646,7 @@ test('a long apply error keeps the recovery guidance', async () => {
     assert.ok(reason.length <= 2_000);
     assert.ok(reason.includes(`still at ${fixture.patchPath}`));
     assert.match(reason, /git status/);
-    assert.match(reason, /retry with/);
+    assert.match(reason, /run `git apply` again on that patch path/);
     // The error itself is what gets cut.
     assert.match(reason, /…/);
   });
@@ -1669,12 +1669,12 @@ test('a long removal error keeps the recovery guidance', async () => {
     const reason = result.reason ?? '';
     assert.ok(reason.length <= 2_000);
     assert.ok(reason.includes(`still at ${fixture.workspace}`));
-    assert.match(reason, /--discard-workspace 'run-20260811-abc123'/);
+    assert.match(reason, /--discard-workspace run-20260811-abc123\b/);
     assert.match(reason, /…/);
   });
 });
 
-test('recovery commands are runnable when paths contain spaces', async () => {
+test('a path with spaces is stated exactly, not wrapped in one shell syntax', async () => {
   await withFixture(async (fixture) => {
     // The real macOS data directory is under `Application Support`.
     const spaced = join(fixture.root, 'Application Support', 'run.patch');
@@ -1691,7 +1691,14 @@ test('recovery commands are runnable when paths contain spaces', async () => {
       apply: () => Promise.reject(new Error('failed')),
     });
 
-    // Quoted, so the suggestion can be pasted as shown.
-    assert.ok((result.reason ?? '').includes(`git apply '${spaced}'`));
+    const reason = result.reason ?? '';
+    // The exact path, so it can be copied wherever the user needs it.
+    assert.ok(reason.includes(spaced));
+    // Not embedded in a command whose quoting only works on some platforms:
+    // POSIX single quotes are literal characters in `cmd.exe`, and the parent
+    // shell is not knowable from here.
+    assert.ok(!reason.includes(`'${spaced}'`));
+    assert.ok(!reason.includes(`"${spaced}"`));
+    assert.ok(reason.includes('quoted as your shell requires'));
   });
 });

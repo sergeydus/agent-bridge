@@ -115,15 +115,6 @@ export function boundedCompletionReason(text: string): string {
 }
 
 /**
- * Quotes a path for a shell command the user is invited to run. Application
- * data lives under `Application Support` on macOS, so an unquoted suggestion
- * is not runnable.
- */
-export function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-/**
  * Composes a failure reason that keeps its guidance. Only the quoted command
  * output is truncated: appending recovery steps after an unbounded error meant
  * a long Git failure pushed the artifact locations and the next command past

@@ -14,7 +14,7 @@ import {
   boundedCompletionReason,
   completionFailureReason,
   errorMessage,
-  shellQuote,
+  isSafeRunId,
   summarizePorcelainStatus,
   type CompletionInstruction,
   type CompletionOutcome,
@@ -491,11 +491,16 @@ export async function finishIsolatedRun({
       const reason = completionFailureReason({
         summary: 'The patch could not be applied:',
         error: errorMessage(error),
+        // The path is stated on its own rather than inside a pasteable
+        // command. Quoting is shell-specific — POSIX single quotes are literal
+        // characters in `cmd.exe` — and the parent shell cannot be inferred
+        // from here, so a quoted suggestion would be wrong on some platforms.
         guidance:
           `The patch is still at ${patchPath} and the isolated workspace was ` +
           `kept at ${workspace}. Nothing was staged or committed. Inspect the ` +
           'checkout with `git status`, resolve what blocked the apply, then ' +
-          `retry with \`git apply ${shellQuote(patchPath)}\`.`,
+          'run `git apply` again on that patch path, quoted as your shell ' +
+          'requires.',
       });
       reporter.warning(reason);
       return { outcome: 'apply-failed', reason, patchPath, workspace };
@@ -553,7 +558,11 @@ export async function finishIsolatedRun({
             ? `, and a complete patch is at ${plan.patchPath}`
             : '') +
           '. Close anything using that directory, then remove it with ' +
-          `\`agent-bridge --discard-workspace ${runId ? shellQuote(runId) : '<run-id>'}\`.`,
+          // Unquoted, and safe in every shell: `isSafeRunId` restricts run ids
+          // to alphanumerics, dot, dash, and underscore, so there is nothing
+          // for a shell to split or interpret. The guard keeps that true even
+          // if an unchecked id ever reaches here.
+          `\`agent-bridge --discard-workspace ${runId && isSafeRunId(runId) ? runId : '<run-id>'}\`.`,
       });
       reporter.warning(reason);
       return {
