@@ -365,9 +365,13 @@ The boundary is explicit state, not ordering:
 
 - `saveState('completed')` runs before the completion step.
 - On success it sets a `completionRecorded` flag.
+- Known operational completion failures — patch creation, the apply gates, the
+  apply itself, and workspace removal — are converted to outcomes inside the
+  completion step and recorded there, before the `catch` handler is reached.
 - The `catch` handler consults that flag first. When set, it never calls
-  `saveState('failed')` or `saveState('cancelled')`; it reports the completion
-  failure, records the corresponding failure outcome, and sets exit code `1`.
+  `saveState('failed')` or `saveState('cancelled')`. An unexpected
+  post-boundary throw is reported with exit code `1` while the `completed`
+  checkpoint remains unchanged; no outcome is fabricated.
 - The outcome-recording save is itself failure-tolerant: if it throws, the
   already-durable `completed` checkpoint stands and the failure is reported.
 
@@ -794,11 +798,13 @@ invariants is rejected by a dedicated case.
 The one-way boundary flag, `declined`, the failure outcomes, outcome recording,
 `printCompletion` on every completion-outcome path, and the exit-code rules.
 
-"Every completion-outcome path" is the precise claim: the completion step is
-total over the failures it can cause, so each of the nine outcomes reaches the
-final summary. An unexpected throw from somewhere else past the boundary is
-still possible; it is reported, exits `1`, and leaves the checkpoint
-`completed`, but it produces no outcome record and no summary. That is the
+"Every completion-outcome path" is the precise claim. Known operational
+completion failures are converted to outcomes before reaching the catch
+handler, so each of the nine outcomes reaches the final summary. Other throws
+remain possible — including from constructing or using the prompt, which is
+inside the completion step, not outside it. An unexpected post-boundary throw
+is reported with exit code `1` while the `completed` checkpoint remains
+unchanged; no outcome is fabricated and no summary is printed. That is the
 boundary's floor, not its guarantee.
 
 Acceptance: D1 no longer reproduces, in a deterministic test and in the PTY
@@ -1132,6 +1138,14 @@ final summary. `apply-failed` now covers gates that could not be evaluated, and
 "`printCompletion` on every path" is stated precisely as every
 completion-outcome path, with the residual unexpected-throw behavior named
 rather than implied.
+
+The boundary description carried the contradiction that made this easy to miss:
+it promised the catch handler "records the corresponding failure outcome",
+which was never true of an unexpected throw. Both places now say the same
+thing — known operational failures become outcomes inside the completion step,
+and an unexpected post-boundary throw fabricates nothing. Prompt construction
+and use are named as inside the completion step, since "somewhere else" was
+wrong.
 
 ## Questions for review
 
