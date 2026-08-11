@@ -200,6 +200,9 @@ test('run management refuses to remove a workspace holding unanchored commits', 
       ['user.name', 'Agent Bridge Test'],
       ['user.email', 'test@example.com'],
       ['commit.gpgsign', 'false'],
+      // Git for Windows rewrites LF to CRLF on checkout by default, which
+      // would make file contents differ from what the test wrote.
+      ['core.autocrlf', 'false'],
     ] as [string, string][]) {
       await execute('git', ['config', key, value], { cwd: repository });
     }
@@ -262,6 +265,9 @@ test('run management removes a workspace once its history is anchored', async ()
       ['user.name', 'Agent Bridge Test'],
       ['user.email', 'test@example.com'],
       ['commit.gpgsign', 'false'],
+      // Git for Windows rewrites LF to CRLF on checkout by default, which
+      // would make file contents differ from what the test wrote.
+      ['core.autocrlf', 'false'],
     ] as [string, string][]) {
       await execute('git', ['config', key, value], { cwd: repository });
     }

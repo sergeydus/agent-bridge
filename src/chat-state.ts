@@ -819,7 +819,9 @@ export class ChatSessionStore {
     await Promise.all([
       rm(this.pathFor(id), { force: true }),
       rm(this.transcriptPathFor(id), { force: true }),
-      rm(this.lockPathFor(id), { force: true }),
+      // The lock is a directory, so its removal has to be recursive. Deletion
+      // holds the lock while doing this, so it is removing its own.
+      rm(this.lockPathFor(id), { force: true, recursive: true }),
     ]);
   }
 }

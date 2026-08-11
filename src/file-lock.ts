@@ -1,24 +1,43 @@
 import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
-import { lstat, mkdir, open, unlink } from 'node:fs/promises';
+import { lstat, mkdir, open, rm, unlink } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { hostname } from 'node:os';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import { readTextFilePrefix } from './filesystem.ts';
 import { sanitizeTerminalText } from './terminal-text.ts';
 
 /**
- * What a lock file says about its owner. `host` and `token` are additive: a
- * record written by an older build carries neither, which makes it unidentified
- * rather than stale. `token` is what distinguishes this holder from a successor
- * that took the same path, so release cannot unlink a lock it no longer owns.
+ * What a lock says about its owner. `host` and `token` are additive: a record
+ * written by an older build carries neither, which makes it unidentified rather
+ * than stale. `token` is what distinguishes this holder from a successor that
+ * took the same path, so release cannot remove a lock it no longer owns.
  */
 interface LockRecord {
   pid: number;
   host: string;
   token: string;
   createdAt: string;
+}
+
+/**
+ * A lock is a directory, and its owner record is a file inside it.
+ *
+ * Publication has to be atomic and has to refuse to follow a link, or a link
+ * planted at the lock path redirects the write. `open(path, 'wx')` does not
+ * satisfy that everywhere: POSIX requires exclusive create to fail on a symbolic
+ * link, but Windows resolves the link first and creates its target, which the
+ * Windows CI job demonstrated by acquiring a lock through a dangling link. An
+ * `lstat` before the open would only narrow that window, not close it.
+ *
+ * `mkdir` closes it on every platform and every filesystem: the name is created
+ * or the call fails, and it never writes through a link, because a link at that
+ * name is an existing entry rather than something to resolve. Hard links to
+ * directories do not exist either.
+ */
+function ownerPathFor(lockPath: string): string {
+  return join(lockPath, 'owner.json');
 }
 
 /** Larger than any record this writes, and small enough to read eagerly. */
@@ -28,15 +47,16 @@ const MAX_LOCK_RECORD_CHARS = 4_096;
 const MAX_LOCK_HOST_CHARS = 256;
 
 /**
- * How a lock file was read.
+ * How a lock was read.
  *
- * `stale` is the only state eligible for takeover, and it is deliberately narrow:
- * the path is a plain file, the record parsed, it names this host, and its
- * process is gone. Everything else — an empty file, an older build's record,
+ * `stale` is the only state eligible for takeover, and it is deliberately
+ * narrow: the lock is a plain directory, its record is a plain file with one
+ * name, the record parsed, it names this host, and its process is gone.
+ * Everything else — a lock naming no owner, an older build's file lock,
  * unparseable content, a record from another machine, a live process, anything
- * that is not a regular file — is a lock that is left alone. The empty case is
- * the whole of D6: the owner wins `open(path, 'wx')` before it writes its record,
- * so a reader inside that window sees a live lock as a 0-byte file.
+ * that is not a plain directory and record — is left alone. The owner-less case
+ * is the whole of D6: the owner creates the lock before it records who it is, so
+ * a reader inside that window sees a live lock with no record yet.
  */
 type LockState =
   | { kind: 'absent' }
@@ -95,6 +115,40 @@ export async function writeWholeRecord(
       throw new Error(`Wrote no bytes of a ${buffer.length}-byte lock record.`);
     }
     written += result.bytesWritten;
+  }
+}
+
+/**
+ * Records who holds a lock directory this process has just created.
+ *
+ * Exclusive create cannot overwrite anything, even through a link, because it
+ * fails when the resolved name already exists. Where a no-follow open is
+ * unavailable, the remaining exposure is that a link planted inside this
+ * directory — which did not exist a moment ago and is owner-only where modes are
+ * enforced — could redirect the creation to a path that does not exist yet. That
+ * is checked for immediately afterwards and refused rather than reported as a
+ * held lock.
+ */
+async function publishOwnerRecord(
+  lockPath: string,
+  token: string,
+): Promise<void> {
+  const ownerPath = ownerPathFor(lockPath);
+  const handle = await open(
+    ownerPath,
+    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | NOFOLLOW,
+    0o600,
+  );
+  try {
+    await writeWholeRecord(handle, lockRecordText(token));
+  } finally {
+    await handle.close();
+  }
+  const written = await lstat(ownerPath);
+  if (!written.isFile() || written.nlink !== 1) {
+    throw new Error(
+      `Refusing to hold a lock whose record is not a plain file: ${ownerPath}`,
+    );
   }
 }
 
@@ -183,14 +237,18 @@ async function readLockRecordFrom(handle: FileHandle): Promise<LockRead> {
   return classifyLockText(buffer.subarray(0, filled).toString('utf8'));
 }
 
-async function readLockRecord(path: string): Promise<LockRead> {
-  // `lstat` describes the path itself, so a symbolic link is seen as a link
-  // rather than as whatever it points at. A lock path that is not a plain file
-  // with exactly one name cannot be attributed to an owner, and reading through
-  // it would report someone else's file as a lock record.
+async function readLockRecord(lockPath: string): Promise<LockRead> {
+  // `lstat` describes the name itself, so a link is seen as a link rather than
+  // as whatever it points at.
   try {
-    const link = await lstat(path);
-    if (!link.isFile() || link.nlink !== 1) {
+    const entry = await lstat(lockPath);
+    if (entry.isFile()) {
+      // What an older build left: the lock was the file, not a directory. It
+      // cannot be attributed — it has no host and no token — so it is reported
+      // as an older record rather than as corruption.
+      return { kind: 'unidentified', reason: 'legacy' };
+    }
+    if (!entry.isDirectory()) {
       return { kind: 'unidentified', reason: 'irregular' };
     }
   } catch (error) {
@@ -199,18 +257,33 @@ async function readLockRecord(path: string): Promise<LockRead> {
     }
     return { kind: 'unidentified', reason: 'unreadable' };
   }
+  const ownerPath = ownerPathFor(lockPath);
+  try {
+    const owner = await lstat(ownerPath);
+    if (!owner.isFile() || owner.nlink !== 1) {
+      return { kind: 'unidentified', reason: 'irregular' };
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // The lock directory exists but names no owner yet. This is the window
+      // between claiming the lock and recording who holds it, and it is
+      // indistinguishable from an owner interrupted inside it.
+      return { kind: 'unidentified', reason: 'empty' };
+    }
+    return { kind: 'unidentified', reason: 'unreadable' };
+  }
   let text: string;
   try {
     text = await readTextFilePrefix({
-      path,
+      path: ownerPath,
       maxCharacters: MAX_LOCK_RECORD_CHARS,
     });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      return { kind: 'absent' };
+      return { kind: 'unidentified', reason: 'empty' };
     }
-    // An unreadable lock file is not an absent one. Treating a permission error
-    // as "no lock" would hand out a lock another user is holding.
+    // An unreadable record is not an absent one. Treating a permission error as
+    // "no lock" would hand out a lock another user is holding.
     return { kind: 'unidentified', reason: 'unreadable' };
   }
   return classifyLockText(text);
@@ -246,9 +319,12 @@ async function inspectLock(path: string): Promise<LockState> {
   return { kind: 'stale', record };
 }
 
-/** Where the exclusive right to take over a stale lock is claimed. */
-function takeoverPathFor(path: string): string {
-  return `${path}.takeover`;
+/**
+ * Where the exclusive right to take over a stale lock is claimed. It sits inside
+ * the lock directory, so it cannot outlive the lock it guards as loose litter.
+ */
+function takeoverPathFor(lockPath: string): string {
+  return join(lockPath, 'takeover');
 }
 
 /**
@@ -310,6 +386,11 @@ export async function takeOverStaleLock({
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
       return { kind: 'blocked' };
     }
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // The marker lives inside the lock, so this is the lock itself being
+      // gone — there is nothing to take over.
+      return { kind: 'vanished' };
+    }
     throw error;
   }
   try {
@@ -324,9 +405,9 @@ export async function takeOverStaleLock({
       return { kind: 'lost', state };
     }
     // `O_NOFOLLOW` refuses to traverse a symbolic link at the final component.
-    // Without it, a lock path pointing at any file whose contents happen to
+    // Without it, a record file pointing at any file whose contents happen to
     // parse as a stale record made takeover overwrite that file instead.
-    const handle = await open(path, constants.O_RDWR | NOFOLLOW);
+    const handle = await open(ownerPathFor(path), constants.O_RDWR | NOFOLLOW);
     try {
       // Verified through the handle, so the object checked is exactly the object
       // about to be written: a path check alone could describe a different file
@@ -374,8 +455,8 @@ export async function takeOverStaleLock({
 }
 
 function describeOwner(state: LockState, path: string): string {
-  const where = `The lock file is ${path}.`;
-  const remove = 'delete that file and try again.';
+  const where = `The lock is the directory ${path}.`;
+  const remove = 'delete that directory and try again.';
   if (state.kind === 'held') {
     // Untrusted: the host string comes from a file this process did not write.
     const host = sanitizeTerminalText(state.record.host).slice(
@@ -398,29 +479,33 @@ function describeOwner(state: LockState, path: string): string {
   }
   if (state.kind === 'unidentified' && state.reason === 'empty') {
     return (
-      `The lock file is empty, which happens when its owner was interrupted ` +
+      `The lock names no owner, which happens when its owner was interrupted ` +
       `between claiming the lock and recording who it is. A live owner looks ` +
-      `the same from here, so the lock is never removed automatically. ` +
+      `the same from here, so the lock is never taken over automatically. ` +
       `${where} If no other Agent Bridge process is running, ${remove}`
     );
   }
+  // Neither of the next two is a lock directory, so neither is described as
+  // one: a link is not a directory, and an older build's lock is a plain file.
   if (state.kind === 'unidentified' && state.reason === 'irregular') {
     return (
-      `The lock path is not a plain file — a symbolic link or another special ` +
-      `file is in its place — so it cannot be attributed to an owner and is ` +
-      `left untouched. Writing through it would modify whatever it points at. ` +
-      `${where} If no other Agent Bridge process is running, ${remove}`
+      `The lock path is not a plain directory holding a plain record — a ` +
+      `symbolic link or another special file is in its place — so it cannot be ` +
+      `attributed to an owner and is left untouched. Writing through it would ` +
+      `modify whatever it points at. The lock path is ${path}. If no other ` +
+      `Agent Bridge process is running, delete it and try again.`
     );
   }
   if (state.kind === 'unidentified' && state.reason === 'legacy') {
     return (
-      `The lock file was written by an older Agent Bridge version and does ` +
-      `not record enough to identify its owner, so it is left in place. ` +
-      `${where} If no other Agent Bridge process is running, ${remove}`
+      `The lock was written by an older Agent Bridge version, which made the ` +
+      `lock a file rather than a directory, and it does not record enough to ` +
+      `identify its owner. It is left in place. The lock is ${path}. If no ` +
+      `other Agent Bridge process is running, delete it and try again.`
     );
   }
   return (
-    `The lock file cannot be read as an Agent Bridge lock record, so its ` +
+    `The lock record cannot be read as an Agent Bridge lock record, so its ` +
     `owner is unknown and it is left in place. ${where} If no other Agent ` +
     `Bridge process is running, ${remove}`
   );
@@ -458,13 +543,18 @@ export class FileLock {
       this.#released = true;
       return;
     }
-    await unlink(this.#path).catch((error: NodeJS.ErrnoException) => {
-      if (error.code !== 'ENOENT') {
-        // Left unreleased on purpose, so a caller that can fix the cause — a
-        // read-only parent directory, say — can call release again.
-        throw error;
-      }
-    });
+    // Recursive because a takeover marker left by an interrupted process may
+    // still be inside. The token match above is what proves this lock is this
+    // holder's to remove.
+    await rm(this.#path, { recursive: true, force: true }).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') {
+          // Left unreleased on purpose, so a caller that can fix the cause — a
+          // read-only parent directory, say — can call release again.
+          throw error;
+        }
+      },
+    );
     this.#released = true;
   }
 }
@@ -484,16 +574,13 @@ export async function acquireFileLock({
     const token = randomUUID();
     try {
       // Winning this call is what confers ownership; the record that follows
-      // only says who won.
-      // `wx` is `O_CREAT | O_EXCL`, which POSIX requires to fail on a symbolic
-      // link at the final component, so creation cannot be redirected either.
-      const handle = await open(path, 'wx', 0o600);
+      // only says who won. Creating a directory is atomic and never resolves a
+      // link at the name being created, on any platform or filesystem.
+      await mkdir(path, { mode: 0o700 });
       try {
-        await writeWholeRecord(handle, lockRecordText(token));
-        await handle.close();
+        await publishOwnerRecord(path, token);
       } catch (error) {
-        await handle.close().catch(() => {});
-        await unlink(path).catch(() => {});
+        await rm(path, { recursive: true, force: true }).catch(() => {});
         throw error;
       }
       return new FileLock(path, token);
@@ -526,9 +613,9 @@ export async function acquireFileLock({
                 `longer running, but this platform cannot open a file while ` +
                 `refusing to follow a link, so taking the lock over ` +
                 `automatically could write through a link put in its place and ` +
-                `modify an unrelated file. The lock is left untouched. The lock ` +
-                `file is ${path}. If no other Agent Bridge process is running, ` +
-                `delete that file and try again.`,
+                `modify an unrelated file. The lock is left untouched. The ` +
+                `lock is the directory ${path}. If no other Agent Bridge ` +
+                `process is running, delete that directory and try again.`,
               { cause: error },
             );
           }
@@ -537,9 +624,10 @@ export async function acquireFileLock({
               `${activeMessage} A lock left behind by a process that is no ` +
                 `longer running is being taken over by another Agent Bridge ` +
                 `process, or by one that was interrupted while doing so. The ` +
-                `lock file is ${path} and the takeover marker is ` +
-                `${takeoverPathFor(path)}. Try again, and if this persists ` +
-                `with no Agent Bridge process running, delete both files.`,
+                `lock is the directory ${path} and the takeover marker inside ` +
+                `it is ${takeoverPathFor(path)}. Try again, and if this ` +
+                `persists with no Agent Bridge process running, delete that ` +
+                `directory.`,
               { cause: error },
             );
           }

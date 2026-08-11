@@ -67,6 +67,9 @@ async function withFixture(
       ['user.name', 'Agent Bridge Test'],
       ['user.email', 'test@example.com'],
       ['commit.gpgsign', 'false'],
+      // Git for Windows rewrites LF to CRLF on checkout by default, which
+      // would make file contents differ from what the test wrote.
+      ['core.autocrlf', 'false'],
     ];
     for (const [key, value] of configuration) {
       await execute('git', ['config', key, value], { cwd: repository });
@@ -1145,10 +1148,11 @@ test('an uninspectable history refuses removal instead of escaping', async () =>
       /history could not be inspected/,
     );
     // The refreshed patch is named, because it is where the work now lives.
-    assert.match(
-      plan.removable === false ? plan.reason : '',
-      new RegExp(
-        `A complete patch is at ${fixture.patchPath.replace(/[.]/g, '\\.')}`,
+    // Compared as text rather than as a pattern: a Windows path is full of
+    // backslashes, which a regular expression would read as escapes.
+    assert.ok(
+      (plan.removable === false ? plan.reason : '').includes(
+        `A complete patch is at ${fixture.patchPath}`,
       ),
     );
     assert.equal(await exists(fixture.workspace), true);

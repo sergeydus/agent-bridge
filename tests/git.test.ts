@@ -30,6 +30,19 @@ import {
   repositoryHasHead,
 } from '../src/git.ts';
 
+// Windows does not implement POSIX permission bits and reports 0o666 for every
+// file. The guarantee is owner-only access "where supported", so the mode is
+// asserted only where the platform can enforce it; every other assertion about
+// the file still runs everywhere.
+const enforcesFileModes = process.platform !== 'win32';
+
+async function assertOwnerOnly(path: string): Promise<void> {
+  if (!enforcesFileModes) {
+    return;
+  }
+  assert.equal((await lstat(path)).mode & 0o777, 0o600);
+}
+
 test('initializes a repository without creating a commit', async () => {
   const root = await mkdtemp(join(tmpdir(), 'agent-bridge-git-init-'));
   try {
@@ -143,6 +156,9 @@ async function initializeFixtureRepository(root: string): Promise<string> {
     ['user.name', 'Agent Bridge Test'],
     ['user.email', 'test@example.com'],
     ['commit.gpgsign', 'false'],
+    // Git for Windows rewrites LF to CRLF on checkout by default, which
+    // would make file contents differ from what the test wrote.
+    ['core.autocrlf', 'false'],
   ] as [string, string][]) {
     await execute('git', ['config', key, value], { cwd: repository });
   }
@@ -185,7 +201,7 @@ test('a patch is published atomically or not at all', async () => {
       }),
       true,
     );
-    assert.equal((await lstat(destination)).mode & 0o777, 0o600);
+    await assertOwnerOnly(destination);
     assert.match(await readFile(destination, 'utf8'), /tracked\.txt/);
   } finally {
     await rm(root, { recursive: true, force: true });

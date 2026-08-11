@@ -52,15 +52,17 @@ subsystem. `terminal-text.ts` is the only sanitizer for untrusted text reaching
 a terminal. `filesystem.ts` is the only writer of persisted state, so every
 format gets the same atomic rename and owner-only mode. `file-lock.ts` is the
 only exclusive lock, so run checkpoints and chat sessions share one definition
-of ownership and one stale-owner check. Ownership comes from winning an
-exclusive create, and the record written afterwards carries a host and an
-ownership token: a lock that cannot be attributed to a dead local process is
+of ownership and one stale-owner check. A lock is a directory holding its owner
+record, because creating a directory is atomic and never resolves a link at the
+name being created. Ownership comes from winning that create, and the record
+written afterwards carries a host and an ownership token: a lock that cannot be attributed to a dead local process is
 never taken over, and a lock is released only by the holder whose token still
 matches. Taking over a dead process's lock happens under an exclusively created
-marker and overwrites the record in place, so the path is never free mid-takeover
-and no process unlinks a lock file it does not own. Takeover requires an open that
-refuses to follow a link; where the platform has none, it is refused rather than
-weakened.
+marker and overwrites the record in place, so the lock is never free mid-takeover
+and no process removes a lock it does not own. Rewriting an existing record
+requires an open that refuses to follow a link; where the platform has none,
+takeover is refused rather than weakened, while acquiring a free lock works
+everywhere.
 
 The CLI composes modules but does not decide turn order. The orchestrator does
 not know Codex or Claude command-line syntax. Provider adapters do not decide

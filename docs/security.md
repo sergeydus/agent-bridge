@@ -88,44 +88,51 @@ workflow without a shell. The task file is removed after the child exits.
 
 ## Exclusive locks
 
-Run checkpoints and chat sessions share one lock primitive. Creating the lock
-file with an exclusive open is what confers ownership; the record naming the
-owner is written immediately afterwards and only says who won. A lock is
+Run checkpoints and chat sessions share one lock primitive. A lock is a
+directory, and the record naming its owner is a file inside it. Creating that
+directory is what confers ownership; the record is written immediately afterwards
+and only says who won. A directory is used because creating one is atomic and
+never resolves a link at the name being created, on every platform and
+filesystem. Creating a file exclusively does not carry that guarantee everywhere:
+Windows resolves a link at the path first and creates its target. A lock is
 released by re-reading that record and comparing an ownership token, so a
 process whose lock was removed cannot later delete a successor's lock.
 
 A lock left behind by a process that is gone is taken over, never deleted and
-recreated. Takeover happens under a separate marker created with the same
-exclusive open, so at most one process is ever inside it, and the stale record is
-overwritten in place, so the lock path is never briefly free for a further
-process to claim. No process ever unlinks a lock file it does not own. A marker
-left behind by a process interrupted mid-takeover is not removed automatically
-either; it disables automatic recovery for that one lock and is named in the
-message, which is the same manual recovery as any unattributable lock.
+recreated. Takeover happens under a marker created inside the lock with the same
+exclusive semantics, so at most one process is ever inside it, and the stale
+record is overwritten in place, so the lock is never briefly free for a further
+process to claim. No process ever removes a lock it does not own. A marker left
+behind by a process interrupted mid-takeover is not removed automatically either;
+it disables automatic recovery for that one lock and is named in the message,
+which is the same manual recovery as any unattributable lock.
 
-A lock path must be a plain file with exactly one name. A symbolic link, a hard
-link, or any other special file in its place is never treated as a lock and never
-written to, because writing through it would modify whatever it refers to. The
+A lock must be a plain directory whose record is a plain file with exactly one
+name. A symbolic link, a hard link, or any other special file in either position
+is never treated as a lock and never written to, because writing through it would
+modify whatever it refers to. For takeover, which rewrites an existing record, the
 check is made against the path and again against the opened handle, and the record
 is confirmed through that same handle before anything is written to it.
 
-That guarantee needs an open that refuses to follow a link, which POSIX provides
-and Windows does not. Where it is unavailable, automatic takeover of a stale lock
-is refused outright rather than performed with a weaker check, because a path can
-turn into a link between being classified and being opened. Recovery on those
+Rewriting an existing record needs an open that refuses to follow a link, which
+POSIX provides and Windows does not. Where it is unavailable, automatic takeover
+of a stale lock is refused outright rather than performed with a weaker check,
+because a path can turn into a link between being classified and being opened.
+Acquiring a free lock is unaffected and works everywhere. Recovery on those
 platforms is the same manual deletion as for any lock whose owner cannot be
 established, and the message says so. No platform trades the guarantee for
 convenience.
 
-A lock is eligible for takeover in exactly one case: it is a plain file, its
-record parses, names this host, and its process is gone. Every other state is left
-in place and reported — an empty file, a record from an older Agent Bridge version, content
-that does not parse, a record naming another host, or a live process. An empty
-lock file is the state left behind when an owner is interrupted between claiming
-the lock and recording itself; it cannot be told apart from a live owner, so it
-is never cleared automatically. Contention always names the lock file and the
-recovery step. Deleting a lock file by hand is safe only when no Agent Bridge
-process is using that run or chat.
+A lock is eligible for takeover in exactly one case: it is a plain directory, its
+record is a plain file with one name, that record parses, names this host, and its
+process is gone. Every other state is left in place and reported — a lock naming
+no owner, a lock left by an older Agent Bridge version, which made the lock a file
+rather than a directory, content that does not parse, a record naming another
+host, or a live process. A lock naming no owner is the state left behind when an
+owner is interrupted between claiming the lock and recording itself; it cannot be
+told apart from a live owner, so it is never cleared automatically. Contention
+always names the lock and the recovery step. Deleting a lock by hand is safe only
+when no Agent Bridge process is using that run or chat.
 
 A process identifier is only meaningful on the machine that wrote it, so lock
 records carry a host name and a foreign host is never evaluated against the

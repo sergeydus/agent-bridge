@@ -1,6 +1,6 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 13, approved; slices 1 to 7 implemented
+Status: Contract revision 14, approved; slices 1 to 7 implemented
 
 Target release: 0.7.0
 
@@ -728,11 +728,11 @@ creates the empty-file window, and publishing by rename uses replacement
 semantics — [writePrivateFileAtomic](../src/filesystem.ts#L12) would silently
 overwrite a live lock, which is worse than the defect it was meant to fix.
 
-**Adopted protocol.** Exclusivity stays with `open(path, 'wx')`, and D6 is
+**Adopted protocol.** Exclusivity comes from creating the lock, and D6 is
 closed on the reader side instead:
 
-1. `open(path, 'wx')` creates the lock. Winning that call is what confers
-   ownership.
+1. Creating the lock is what confers ownership. Revision 14 makes that a
+   directory rather than a file; see below.
 2. The owner then writes a record containing the PID, hostname, a random
    ownership token, and the creation time.
 3. Any other process that finds the path occupied and reads empty or malformed
@@ -1329,6 +1329,48 @@ the same way there — are skipped on that platform and say why.
 Verified locally before handoff by forcing the flag to zero: the stale record was
 preserved, the symlink-swap target was untouched, a free lock path still worked,
 and the file was restored byte-identical afterwards.
+
+**Revision 14** makes the lock a directory, and fixes eight portability defects.
+
+The required Windows gate on PR #22 failed, and it was right to. Codex reduced the
+lock failure correctly: `open(path, 'wx')` carries no no-follow guarantee on
+Windows, which resolves a link at the path and creates its target. The Windows job
+proved it by acquiring a lock through a dangling link and writing that link's
+target. The refusal added in revision 13 covered only takeover, not initial
+acquisition — and since acquisition cannot be refused without disabling the
+product on Windows, the primitive itself had to change. An `lstat` before the open
+would only narrow the window.
+
+A lock is now a **directory**, and the record naming its owner is a file inside
+it. Creating a directory is atomic and never resolves a link at the name being
+created, on every platform and every filesystem, so publication is link-safe
+everywhere without needing a flag Windows lacks. The classification, the ownership
+token, the serialized in-place takeover, and the Windows takeover refusal are all
+unchanged in substance; they now read `owner.json` inside the lock, and the
+takeover marker moved inside it too, so it can no longer outlive its lock as loose
+litter. A lock left by an older build is a plain file at the lock path, which is
+recognised as such and reported for deletion rather than treated as corruption.
+
+The record file inside a freshly created lock keeps one documented residual where
+no no-follow open exists: exclusive create cannot overwrite anything, because it
+fails when the resolved name exists, so the exposure is limited to creating a file
+at a path that does not exist yet, and only for whoever can write into a directory
+that did not exist a moment earlier. It is detected immediately afterwards and
+refused rather than reported as a held lock.
+
+The other eight Windows failures were test portability, fixed without weakening
+any assertion:
+
+- Four content assertions saw CRLF, because Git for Windows rewrites line endings
+  on checkout by default. The fixture repositories now set `core.autocrlf=false`,
+  so the tests compare the bytes they wrote rather than each assertion tolerating
+  what the environment did.
+- One assertion built a `RegExp` from a Windows path, whose separators are escape
+  characters. It compares text now.
+- Three assertions required mode `0600`, which Windows does not implement and
+  reports as `0666`. They assert the mode only where the platform enforces it,
+  which is what `docs/security.md` has always promised with "where supported".
+  Every other assertion in those tests still runs on every platform.
 
 ## Questions for review
 

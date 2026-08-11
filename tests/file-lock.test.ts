@@ -3,6 +3,7 @@ import {
   chmod,
   link,
   lstat,
+  mkdir,
   mkdtemp,
   open,
   readFile,
@@ -58,16 +59,41 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-async function record(path: string): Promise<Record<string, unknown>> {
-  return JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+// A lock is a directory holding its owner record, so that a lock can be
+// published atomically without ever resolving a link at the name being created.
+const OWNER = 'owner.json';
+const MARKER = 'takeover';
+
+function ownerPath(lock: string): string {
+  return join(lock, OWNER);
+}
+
+async function record(lock: string): Promise<Record<string, unknown>> {
+  return JSON.parse(await readFile(ownerPath(lock), 'utf8')) as Record<
+    string,
+    unknown
+  >;
+}
+
+/** Seeds a lock whose record is exactly the given text. */
+async function seedLockText(lock: string, text: string): Promise<void> {
+  await mkdir(lock, { recursive: true, mode: 0o700 });
+  await writeFile(ownerPath(lock), text, { mode: 0o600 });
 }
 
 async function writeRecord(
-  path: string,
+  lock: string,
   fields: Record<string, unknown>,
 ): Promise<void> {
-  await writeFile(path, `${JSON.stringify(fields)}\n`, { mode: 0o600 });
+  await seedLockText(lock, `${JSON.stringify(fields)}\n`);
 }
+
+const STALE = {
+  pid: 999_999,
+  host: hostname(),
+  token: 'departed',
+  createdAt: '2026-08-11T00:00:00.000Z',
+};
 
 const ACTIVE = 'Run r is already active in another Agent Bridge process.';
 
@@ -102,41 +128,38 @@ test('a release whose lock file already vanished succeeds', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'r.lock');
     const lock = await acquireFileLock({ path, activeMessage: ACTIVE });
-    await rm(path);
+    await rm(path, { recursive: true });
     await lock.release();
   });
 });
 
-// D6, reproduced deterministically rather than by racing: the owner has won
-// `open(path, 'wx')` and has not yet written its record, so the file is 0
-// bytes. Against the previous implementation the second acquirer succeeded and
-// two processes believed they held the same lock.
+// D6, reproduced deterministically rather than by racing: the owner has claimed
+// the lock and has not yet recorded who it is. Against the original
+// implementation the second acquirer succeeded and two processes believed they
+// held the same lock.
 test('a lock claimed but not yet recorded is never taken over', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'r.lock');
-    const owner = await open(path, 'wx', 0o600);
-    try {
-      await assert.rejects(
-        acquireFileLock({ path, activeMessage: ACTIVE }),
-        (error: Error) => {
-          assert.match(error.message, /lock file is empty/);
-          assert.match(error.message, /interrupted/);
-          assert.ok(error.message.includes(path));
-          return true;
-        },
-      );
-      // The live owner's lock is still there.
-      assert.equal(await exists(path), true);
-    } finally {
-      await owner.close();
-    }
+    await mkdir(path, { mode: 0o700 });
+
+    await assert.rejects(
+      acquireFileLock({ path, activeMessage: ACTIVE }),
+      (error: Error) => {
+        assert.match(error.message, /names no owner/);
+        assert.match(error.message, /interrupted/);
+        assert.ok(error.message.includes(path));
+        return true;
+      },
+    );
+    // The live owner's lock is still there.
+    assert.equal(await exists(path), true);
   });
 });
 
 test('an unparseable lock record is never treated as stale', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'r.lock');
-    await writeFile(path, 'not json at all', { mode: 0o600 });
+    await seedLockText(path, 'not json at all');
 
     await assert.rejects(
       acquireFileLock({ path, activeMessage: ACTIVE }),
@@ -153,7 +176,7 @@ test('an unparseable lock record is never treated as stale', async () => {
 test('valid JSON that is not a lock record is never treated as stale', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'r.lock');
-    await writeFile(path, '"a string"', { mode: 0o600 });
+    await seedLockText(path, '"a string"');
 
     await assert.rejects(acquireFileLock({ path, activeMessage: ACTIVE }), {
       message: /cannot be read as an Agent Bridge lock/,
@@ -162,16 +185,17 @@ test('valid JSON that is not a lock record is never treated as stale', async () 
   });
 });
 
-// An older build wrote `pid` and `createdAt` and nothing else. It carries no
-// host, so its PID cannot be evaluated safely, and no token, so it cannot be
-// distinguished from a successor.
-test('an older build’s lock record is left in place and named as such', async () => {
+// An older build made the lock the file itself, and wrote `pid` and `createdAt`
+// and nothing else into it. It carries no host, so its PID cannot be evaluated
+// safely, and no token, so it cannot be distinguished from a successor.
+test('an older build’s lock is left in place and named as such', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'r.lock');
-    await writeRecord(path, {
-      pid: 999_999,
-      createdAt: new Date().toISOString(),
-    });
+    await writeFile(
+      path,
+      `${JSON.stringify({ pid: 999_999, createdAt: new Date().toISOString() })}\n`,
+      { mode: 0o600 },
+    );
 
     await assert.rejects(
       acquireFileLock({ path, activeMessage: ACTIVE }),
@@ -299,7 +323,7 @@ test(
       assert.equal((await stat(path)).ino, before);
       assert.equal((await record(path)).token, 'mine');
       assert.equal((await record(path)).pid, process.pid);
-      assert.equal(await exists(`${path}.takeover`), false);
+      assert.equal(await exists(join(path, MARKER)), false);
     });
   },
 );
@@ -363,7 +387,7 @@ test(
         token: 'departed',
         createdAt: new Date().toISOString(),
       });
-      const marker = await open(`${path}.takeover`, 'wx', 0o600);
+      const marker = await open(join(path, MARKER), 'wx', 0o600);
       try {
         const result = await takeOverStaleLock({
           path,
@@ -393,14 +417,14 @@ test(
         token: 'departed',
         createdAt: new Date().toISOString(),
       });
-      const marker = await open(`${path}.takeover`, 'wx', 0o600);
+      const marker = await open(join(path, MARKER), 'wx', 0o600);
       try {
         await assert.rejects(
           acquireFileLock({ path, activeMessage: ACTIVE }),
           (error: Error) => {
             assert.ok(error.message.startsWith(ACTIVE));
             assert.ok(error.message.includes(path));
-            assert.ok(error.message.includes(`${path}.takeover`));
+            assert.ok(error.message.includes(join(path, MARKER)));
             assert.match(error.message, /Try again/);
             return true;
           },
@@ -440,7 +464,7 @@ test(
       assert.equal(winners.length, 1);
       // The surviving record belongs to the winner, and no marker is left behind.
       assert.equal((await record(path)).pid, process.pid);
-      assert.equal(await exists(`${path}.takeover`), false);
+      assert.equal(await exists(join(path, MARKER)), false);
 
       await (winners[0] as PromiseFulfilledResult<FileLock>).value.release();
       assert.equal(await exists(path), false);
@@ -465,9 +489,10 @@ test('many contenders for a free lock path produce exactly one holder', async ()
   });
 });
 
-// A lock path that is a symbolic link is not a lock. Opening it with `r+`
-// followed the link and overwrote whatever it pointed at with a fresh ownership
-// record — a stale-looking target file was rewritten and acquisition succeeded.
+// A lock path that is a symbolic link is not a lock. While the lock was a file,
+// creating it resolved the link and wrote whatever it pointed at. Creating a
+// directory cannot: the name already exists, so the call fails without
+// resolving it.
 test(
   'a symlinked lock path is refused and its target is untouched',
   { skip: !canObserveLinks },
@@ -476,19 +501,14 @@ test(
       const target = join(directory, 'victim');
       const path = join(directory, 'r.lock');
       // Contents that would classify as a stale lock if read through the link.
-      const original = `${JSON.stringify({
-        pid: 999_999,
-        host: hostname(),
-        token: 'departed',
-        createdAt: '2026-08-11T00:00:00.000Z',
-      })}\n`;
+      const original = `${JSON.stringify(STALE)}\n`;
       await writeFile(target, original, { mode: 0o600 });
       await symlink(target, path);
 
       await assert.rejects(
         acquireFileLock({ path, activeMessage: ACTIVE }),
         (error: Error) => {
-          assert.match(error.message, /not a plain file/);
+          assert.match(error.message, /not a plain directory/);
           assert.ok(error.message.includes(path));
           return true;
         },
@@ -526,7 +546,7 @@ test('takeover is refused outright where links cannot be refused on open', async
     assert.deepEqual(result, { kind: 'unsupported' });
     // Untouched, and no marker created on the way to the refusal.
     assert.equal(await readFile(path, 'utf8'), original);
-    assert.equal(await exists(`${path}.takeover`), false);
+    assert.equal(await exists(join(path, MARKER)), false);
   });
 });
 
@@ -558,7 +578,7 @@ test(
       );
 
       assert.equal(await readFile(path, 'utf8'), original);
-      assert.equal(await exists(`${path}.takeover`), false);
+      assert.equal(await exists(join(path, MARKER)), false);
     });
   },
 );
@@ -598,45 +618,37 @@ test(
   async () => {
     await withDirectory(async (directory) => {
       const path = join(directory, 'r.lock');
-      await writeRecord(path, {
-        pid: 999_999,
-        host: hostname(),
-        token: 'departed',
-        createdAt: new Date().toISOString(),
-      });
-      // A lock file owned by another user reads as a permission error. Treating
+      await writeRecord(path, STALE);
+      // A record owned by another user reads as a permission error. Treating
       // that as "no lock" would hand out a lock someone else is holding.
-      await chmod(path, 0o000);
+      await chmod(ownerPath(path), 0o000);
 
       await assert.rejects(acquireFileLock({ path, activeMessage: ACTIVE }), {
         message: /cannot be read as an Agent Bridge lock/,
       });
-      assert.equal(await exists(path), true);
+      assert.equal(await exists(ownerPath(path)), true);
     });
   },
 );
 
 test(
-  'a hard-linked lock path is refused and neither name is rewritten',
+  'a hard-linked owner record is refused and neither name is rewritten',
   { skip: !canObserveLinks },
   async () => {
     await withDirectory(async (directory) => {
       const other = join(directory, 'also-here');
       const path = join(directory, 'r.lock');
-      const original = `${JSON.stringify({
-        pid: 999_999,
-        host: hostname(),
-        token: 'departed',
-        createdAt: '2026-08-11T00:00:00.000Z',
-      })}\n`;
-      await writeFile(path, original, { mode: 0o600 });
-      await link(path, other);
+      const original = `${JSON.stringify(STALE)}\n`;
+      await seedLockText(path, original);
+      // A second name for the record. Taking the lock over rewrites the record
+      // in place, which would rewrite that file too.
+      await link(ownerPath(path), other);
 
       await assert.rejects(acquireFileLock({ path, activeMessage: ACTIVE }), {
-        message: /not a plain file/,
+        message: /not a plain directory holding a plain record/,
       });
 
-      assert.equal(await readFile(path, 'utf8'), original);
+      assert.equal(await readFile(ownerPath(path), 'utf8'), original);
       assert.equal(await readFile(other, 'utf8'), original);
     });
   },
@@ -679,23 +691,18 @@ test(
   async () => {
     await withDirectory(async (directory) => {
       const path = join(directory, 'r.lock');
-      await writeRecord(path, {
-        pid: 999_999,
-        host: hostname(),
-        token: 'departed',
-        createdAt: new Date().toISOString(),
-      });
-      // A lock directory that cannot be written to cannot hold the takeover
-      // marker either. That is an environment fault, not contention, and it is
+      await writeRecord(path, STALE);
+      // A lock that cannot be written to cannot hold the takeover marker
+      // either. That is an environment fault, not contention, and it is
       // reported as itself rather than as a held lock.
-      await chmod(directory, 0o500);
+      await chmod(path, 0o500);
       try {
         await assert.rejects(acquireFileLock({ path, activeMessage: ACTIVE }), {
           code: 'EACCES',
         });
         assert.equal((await record(path)).token, 'departed');
       } finally {
-        await chmod(directory, 0o700);
+        await chmod(path, 0o700);
       }
     });
   },
@@ -729,7 +736,7 @@ test('release leaves a lock whose record became unreadable', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'r.lock');
     const lock = await acquireFileLock({ path, activeMessage: ACTIVE });
-    await writeFile(path, 'corrupted', { mode: 0o600 });
+    await writeFile(ownerPath(path), 'corrupted', { mode: 0o600 });
 
     await lock.release();
 
@@ -744,16 +751,12 @@ test('a lock file larger than the read bound is unidentified, not stale', async 
     const path = join(directory, 'r.lock');
     // A valid record padded past the bounded read: the truncated prefix cannot
     // parse, so the lock is left alone rather than assumed dead.
-    await writeFile(
-      path,
-      `${JSON.stringify({
-        pid: 999_999,
-        host: hostname(),
-        token: 'x'.repeat(20_000),
-        createdAt: new Date().toISOString(),
-      })}\n`,
-      { mode: 0o600 },
-    );
+    await writeRecord(path, {
+      pid: 999_999,
+      host: hostname(),
+      token: 'x'.repeat(20_000),
+      createdAt: new Date().toISOString(),
+    });
 
     await assert.rejects(acquireFileLock({ path, activeMessage: ACTIVE }), {
       message: /cannot be read as an Agent Bridge lock/,
@@ -801,27 +804,32 @@ test('terminal escapes in a foreign host record cannot reach the message', async
   });
 });
 
-// A dangling symlink occupies the path without resolving to anything:
-// `open(path, 'wx')` on it fails with EEXIST while its target does not exist. It
-// must not be mistaken for a free path, and the retry must not spin.
-test('a lock path that is occupied but resolves to nothing is refused, not spun on', async () => {
-  await withDirectory(async (directory) => {
-    const path = join(directory, 'r.lock');
-    await symlink(join(directory, 'no-such-target'), path);
+// A dangling symlink occupies the path without resolving to anything. This is
+// the case the Windows CI job caught: creating the lock as a file resolved the
+// link and created its target, so acquisition succeeded and no rejection came.
+// Creating it as a directory fails on the existing name instead.
+test(
+  'a lock path that is occupied but resolves to nothing is refused, not spun on',
+  { skip: !canObserveLinks },
+  async () => {
+    await withDirectory(async (directory) => {
+      const path = join(directory, 'r.lock');
+      await symlink(join(directory, 'no-such-target'), path);
 
-    await assert.rejects(
-      acquireFileLock({ path, activeMessage: ACTIVE }),
-      (error: Error) => {
-        assert.ok(error.message.startsWith(ACTIVE));
-        assert.match(error.message, /not a plain file/);
-        assert.ok(error.message.includes(path));
-        return true;
-      },
-    );
-    assert.equal(await exists(path), false);
-    assert.equal((await lstat(path)).isSymbolicLink(), true);
-  });
-});
+      await assert.rejects(
+        acquireFileLock({ path, activeMessage: ACTIVE }),
+        (error: Error) => {
+          assert.ok(error.message.startsWith(ACTIVE));
+          assert.match(error.message, /not a plain directory/);
+          assert.ok(error.message.includes(path));
+          return true;
+        },
+      );
+      assert.equal(await exists(path), false);
+      assert.equal((await lstat(path)).isSymbolicLink(), true);
+    });
+  },
+);
 
 test('a record carrying the new fields but an invalid pid is corruption, not an old record', async () => {
   await withDirectory(async (directory) => {

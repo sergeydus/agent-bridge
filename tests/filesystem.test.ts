@@ -47,6 +47,19 @@ test('an interrupted production leaves nothing at the destination', async () => 
   });
 });
 
+// Windows does not implement POSIX permission bits and reports 0o666 for every
+// file. The guarantee is owner-only access "where supported", so the mode is
+// asserted only where the platform can enforce it; every other assertion about
+// the file still runs everywhere.
+const enforcesFileModes = process.platform !== 'win32';
+
+async function assertOwnerOnly(path: string): Promise<void> {
+  if (!enforcesFileModes) {
+    return;
+  }
+  assert.equal((await lstat(path)).mode & 0o777, 0o600);
+}
+
 test('a produced file is owner-only and complete when it appears', async () => {
   await withDirectory(async (directory) => {
     const destination = join(directory, 'artifact.patch');
@@ -58,7 +71,7 @@ test('a produced file is owner-only and complete when it appears', async () => {
 
     assert.equal(published, true);
     assert.equal(await readFile(destination, 'utf8'), 'complete\n');
-    assert.equal((await lstat(destination)).mode & 0o777, 0o600);
+    await assertOwnerOnly(destination);
     assert.deepEqual(await readdir(directory), ['artifact.patch']);
   });
 });
@@ -88,7 +101,7 @@ test('an interrupted string write leaves an existing file untouched', async () =
     await writePrivateFileAtomic(destination, 'second\n');
 
     assert.equal(await readFile(destination, 'utf8'), 'second\n');
-    assert.equal((await lstat(destination)).mode & 0o777, 0o600);
+    await assertOwnerOnly(destination);
     assert.deepEqual(await readdir(directory), ['transcript.md']);
   });
 });
