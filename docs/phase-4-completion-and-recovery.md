@@ -1,6 +1,6 @@
 # Phase 4: completion and recovery hardening
 
-Status: Contract revision 12, approved; slices 1 to 7 implemented
+Status: Contract revision 13, approved; slices 1 to 7 implemented
 
 Target release: 0.7.0
 
@@ -1289,9 +1289,7 @@ A lock path must now be a plain file with exactly one name. Classification
 hard-linked file is refused too. The takeover additionally opens with
 `O_NOFOLLOW`, checks the opened handle with `fstat`, and re-reads the record
 through that same handle before writing to it, so the object verified is the
-object overwritten. On Windows `O_NOFOLLOW` does not exist and resolves to zero,
-so there the path classification is the only protection and the window between
-classifying and opening stays open; this is recorded rather than claimed closed.
+object overwritten.
 
 Record writes now account for `bytesWritten` in a loop. Ignoring a short write
 could have left a truncated record at a path this process then reported as owned —
@@ -1304,6 +1302,33 @@ the through-the-handle record confirmation, and the `O_NOFOLLOW` error mapping c
 only fire if the path changes between classifying and opening it. They are the
 defense for that race and are reported as uncovered rather than presented as
 proven.
+
+**Revision 13** refuses automatic takeover where links cannot be refused on open.
+
+Revision 12 recorded the Windows window as a known residual while `docs/security.md`
+promised that a link is never written through. Codex is right that those cannot
+both stand, and that the resolution is the conservative one: `O_NOFOLLOW` does not
+exist on Windows, so a lock path can turn into a link between being classified and
+being opened, and the overwrite would land on whatever it points at.
+
+Automatic takeover is now refused outright wherever that flag is unavailable,
+before the takeover marker is even created, and the contention message says the
+lock was left behind, that it is untouched, and to delete it. Losing automatic
+recovery from a crashed run costs one deletion; overwriting an unrelated file
+costs that file. The guarantee in `docs/security.md` now holds on every platform.
+
+The capability is an injected parameter defaulting to the platform value, so the
+refusal is tested everywhere rather than only where the flag is missing. Two
+Windows-only tests assert the native behaviour in CI, which already runs
+`windows-latest`: a stale record survives acquisition with a message naming the
+recovery, and 32 concurrent contenders leave it byte-identical with no winner. The
+tests that require takeover to succeed, and the two link tests — symbolic links
+need a privilege Windows CI does not grant, and hard-link counts are not reported
+the same way there — are skipped on that platform and say why.
+
+Verified locally before handoff by forcing the flag to zero: the stale record was
+preserved, the symlink-swap target was untouched, a free lock path still worked,
+and the file was restored byte-identical afterwards.
 
 ## Questions for review
 

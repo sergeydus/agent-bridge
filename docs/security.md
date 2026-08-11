@@ -109,6 +109,14 @@ written to, because writing through it would modify whatever it refers to. The
 check is made against the path and again against the opened handle, and the record
 is confirmed through that same handle before anything is written to it.
 
+That guarantee needs an open that refuses to follow a link, which POSIX provides
+and Windows does not. Where it is unavailable, automatic takeover of a stale lock
+is refused outright rather than performed with a weaker check, because a path can
+turn into a link between being classified and being opened. Recovery on those
+platforms is the same manual deletion as for any lock whose owner cannot be
+established, and the message says so. No platform trades the guarantee for
+convenience.
+
 A lock is eligible for takeover in exactly one case: it is a plain file, its
 record parses, names this host, and its process is gone. Every other state is left
 in place and reported — an empty file, a record from an older Agent Bridge version, content

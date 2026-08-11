@@ -58,7 +58,9 @@ ownership token: a lock that cannot be attributed to a dead local process is
 never taken over, and a lock is released only by the holder whose token still
 matches. Taking over a dead process's lock happens under an exclusively created
 marker and overwrites the record in place, so the path is never free mid-takeover
-and no process unlinks a lock file it does not own.
+and no process unlinks a lock file it does not own. Takeover requires an open that
+refuses to follow a link; where the platform has none, it is refused rather than
+weakened.
 
 The CLI composes modules but does not decide turn order. The orchestrator does
 not know Codex or Claude command-line syntax. Provider adapters do not decide

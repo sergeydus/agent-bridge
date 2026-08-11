@@ -28,6 +28,16 @@ import {
 const canObserveUnlinkFailure =
   process.platform !== 'win32' && process.getuid?.() !== 0;
 
+// Automatic takeover of a stale lock needs an open that refuses to follow a
+// link. Windows has no such flag, so takeover is refused there by design and the
+// tests that expect it to succeed do not apply. The refusal itself is tested on
+// every platform through the injected capability, and again natively below.
+const takeoverSupported = process.platform !== 'win32';
+
+// Creating a symbolic link needs a privilege on Windows that CI does not grant,
+// and hard-link counts are not reported the same way there.
+const canObserveLinks = process.platform !== 'win32';
+
 async function withDirectory(
   run: (directory: string) => Promise<void>,
 ): Promise<void> {
@@ -218,24 +228,28 @@ test('a live local process keeps its lock', async () => {
   });
 });
 
-test('a local record whose process is gone is stale and replaced', async () => {
-  await withDirectory(async (directory) => {
-    const path = join(directory, 'r.lock');
-    await writeRecord(path, {
-      pid: 999_999,
-      host: hostname(),
-      token: 'departed',
-      createdAt: new Date().toISOString(),
+test(
+  'a local record whose process is gone is stale and replaced',
+  { skip: !takeoverSupported },
+  async () => {
+    await withDirectory(async (directory) => {
+      const path = join(directory, 'r.lock');
+      await writeRecord(path, {
+        pid: 999_999,
+        host: hostname(),
+        token: 'departed',
+        createdAt: new Date().toISOString(),
+      });
+
+      const lock = await acquireFileLock({ path, activeMessage: ACTIVE });
+
+      const written = await record(path);
+      assert.equal(written.pid, process.pid);
+      assert.notEqual(written.token, 'departed');
+      await lock.release();
     });
-
-    const lock = await acquireFileLock({ path, activeMessage: ACTIVE });
-
-    const written = await record(path);
-    assert.equal(written.pid, process.pid);
-    assert.notEqual(written.token, 'departed');
-    await lock.release();
-  });
-});
+  },
+);
 
 // Codex's ABA case. The first holder's lock is removed as stale and the path is
 // taken by another process; the first holder must not unlink the successor.
@@ -261,154 +275,178 @@ test('release does not unlink a successor’s lock', async () => {
 
 // The takeover happens in place under an exclusive marker, so the lock path is
 // never briefly free. Same inode, new owner.
-test('taking over a stale lock never leaves the path free', async () => {
-  await withDirectory(async (directory) => {
-    const path = join(directory, 'r.lock');
-    await writeRecord(path, {
-      pid: 999_999,
-      host: hostname(),
-      token: 'departed',
-      createdAt: new Date().toISOString(),
-    });
-    const before = (await stat(path)).ino;
+test(
+  'taking over a stale lock never leaves the path free',
+  { skip: !takeoverSupported },
+  async () => {
+    await withDirectory(async (directory) => {
+      const path = join(directory, 'r.lock');
+      await writeRecord(path, {
+        pid: 999_999,
+        host: hostname(),
+        token: 'departed',
+        createdAt: new Date().toISOString(),
+      });
+      const before = (await stat(path)).ino;
 
-    const result = await takeOverStaleLock({
-      path,
-      judged: { token: 'departed' },
-      token: 'mine',
-    });
-
-    assert.deepEqual(result, { kind: 'owned' });
-    assert.equal((await stat(path)).ino, before);
-    assert.equal((await record(path)).token, 'mine');
-    assert.equal((await record(path)).pid, process.pid);
-    assert.equal(await exists(`${path}.takeover`), false);
-  });
-});
-
-// The ABA case one step earlier: the lock judged stale was already taken over
-// while this contender was deciding. It must report the current owner and touch
-// nothing.
-test('a takeover of a lock that was already re-taken is lost, not forced', async () => {
-  await withDirectory(async (directory) => {
-    const path = join(directory, 'r.lock');
-    await writeRecord(path, {
-      pid: 999_999,
-      host: hostname(),
-      token: 'successor',
-      createdAt: new Date().toISOString(),
-    });
-
-    const result = await takeOverStaleLock({
-      path,
-      judged: { token: 'departed' },
-      token: 'mine',
-    });
-
-    assert.equal(result.kind, 'lost');
-    assert.equal((await record(path)).token, 'successor');
-  });
-});
-
-test('a takeover of a lock that vanished reports that, and claims nothing', async () => {
-  await withDirectory(async (directory) => {
-    const path = join(directory, 'r.lock');
-
-    const result = await takeOverStaleLock({
-      path,
-      judged: { token: 'departed' },
-      token: 'mine',
-    });
-
-    assert.deepEqual(result, { kind: 'vanished' });
-    assert.equal(await exists(path), false);
-  });
-});
-
-test('a takeover blocked by another takeover in progress claims nothing', async () => {
-  await withDirectory(async (directory) => {
-    const path = join(directory, 'r.lock');
-    await writeRecord(path, {
-      pid: 999_999,
-      host: hostname(),
-      token: 'departed',
-      createdAt: new Date().toISOString(),
-    });
-    const marker = await open(`${path}.takeover`, 'wx', 0o600);
-    try {
       const result = await takeOverStaleLock({
         path,
         judged: { token: 'departed' },
         token: 'mine',
       });
 
-      assert.deepEqual(result, { kind: 'blocked' });
-      // Untouched: the process inside the section is the one entitled to it.
-      assert.equal((await record(path)).token, 'departed');
-    } finally {
-      await marker.close();
-    }
-  });
-});
-
-test('a blocked takeover names the lock file and the takeover marker', async () => {
-  await withDirectory(async (directory) => {
-    const path = join(directory, 'r.lock');
-    await writeRecord(path, {
-      pid: 999_999,
-      host: hostname(),
-      token: 'departed',
-      createdAt: new Date().toISOString(),
+      assert.deepEqual(result, { kind: 'owned' });
+      assert.equal((await stat(path)).ino, before);
+      assert.equal((await record(path)).token, 'mine');
+      assert.equal((await record(path)).pid, process.pid);
+      assert.equal(await exists(`${path}.takeover`), false);
     });
-    const marker = await open(`${path}.takeover`, 'wx', 0o600);
-    try {
-      await assert.rejects(
-        acquireFileLock({ path, activeMessage: ACTIVE }),
-        (error: Error) => {
-          assert.ok(error.message.startsWith(ACTIVE));
-          assert.ok(error.message.includes(path));
-          assert.ok(error.message.includes(`${path}.takeover`));
-          assert.match(error.message, /Try again/);
-          return true;
-        },
-      );
-    } finally {
-      await marker.close();
-    }
-  });
-});
+  },
+);
+
+// The ABA case one step earlier: the lock judged stale was already taken over
+// while this contender was deciding. It must report the current owner and touch
+// nothing.
+test(
+  'a takeover of a lock that was already re-taken is lost, not forced',
+  { skip: !takeoverSupported },
+  async () => {
+    await withDirectory(async (directory) => {
+      const path = join(directory, 'r.lock');
+      await writeRecord(path, {
+        pid: 999_999,
+        host: hostname(),
+        token: 'successor',
+        createdAt: new Date().toISOString(),
+      });
+
+      const result = await takeOverStaleLock({
+        path,
+        judged: { token: 'departed' },
+        token: 'mine',
+      });
+
+      assert.equal(result.kind, 'lost');
+      assert.equal((await record(path)).token, 'successor');
+    });
+  },
+);
+
+test(
+  'a takeover of a lock that vanished reports that, and claims nothing',
+  { skip: !takeoverSupported },
+  async () => {
+    await withDirectory(async (directory) => {
+      const path = join(directory, 'r.lock');
+
+      const result = await takeOverStaleLock({
+        path,
+        judged: { token: 'departed' },
+        token: 'mine',
+      });
+
+      assert.deepEqual(result, { kind: 'vanished' });
+      assert.equal(await exists(path), false);
+    });
+  },
+);
+
+test(
+  'a takeover blocked by another takeover in progress claims nothing',
+  { skip: !takeoverSupported },
+  async () => {
+    await withDirectory(async (directory) => {
+      const path = join(directory, 'r.lock');
+      await writeRecord(path, {
+        pid: 999_999,
+        host: hostname(),
+        token: 'departed',
+        createdAt: new Date().toISOString(),
+      });
+      const marker = await open(`${path}.takeover`, 'wx', 0o600);
+      try {
+        const result = await takeOverStaleLock({
+          path,
+          judged: { token: 'departed' },
+          token: 'mine',
+        });
+
+        assert.deepEqual(result, { kind: 'blocked' });
+        // Untouched: the process inside the section is the one entitled to it.
+        assert.equal((await record(path)).token, 'departed');
+      } finally {
+        await marker.close();
+      }
+    });
+  },
+);
+
+test(
+  'a blocked takeover names the lock file and the takeover marker',
+  { skip: !takeoverSupported },
+  async () => {
+    await withDirectory(async (directory) => {
+      const path = join(directory, 'r.lock');
+      await writeRecord(path, {
+        pid: 999_999,
+        host: hostname(),
+        token: 'departed',
+        createdAt: new Date().toISOString(),
+      });
+      const marker = await open(`${path}.takeover`, 'wx', 0o600);
+      try {
+        await assert.rejects(
+          acquireFileLock({ path, activeMessage: ACTIVE }),
+          (error: Error) => {
+            assert.ok(error.message.startsWith(ACTIVE));
+            assert.ok(error.message.includes(path));
+            assert.ok(error.message.includes(`${path}.takeover`));
+            assert.match(error.message, /Try again/);
+            return true;
+          },
+        );
+      } finally {
+        await marker.close();
+      }
+    });
+  },
+);
 
 // D6 under concurrency, which is what the first implementation of this slice
 // got wrong. Comparing the ownership token and then unlinking let several
 // contenders authorize their own removal from the same observation: the first
 // unlinked the stale lock and claimed a new one, and the next deleted that new
 // lock. Thirty-two contenders produced four to six winners. Exactly one may win.
-test('many contenders against one stale lock produce exactly one holder', async () => {
-  await withDirectory(async (directory) => {
-    const path = join(directory, 'r.lock');
-    await writeRecord(path, {
-      pid: 999_999,
-      host: hostname(),
-      token: 'departed',
-      createdAt: new Date().toISOString(),
+test(
+  'many contenders against one stale lock produce exactly one holder',
+  { skip: !takeoverSupported },
+  async () => {
+    await withDirectory(async (directory) => {
+      const path = join(directory, 'r.lock');
+      await writeRecord(path, {
+        pid: 999_999,
+        host: hostname(),
+        token: 'departed',
+        createdAt: new Date().toISOString(),
+      });
+
+      const results = await Promise.allSettled(
+        Array.from({ length: 32 }, () =>
+          acquireFileLock({ path, activeMessage: ACTIVE }),
+        ),
+      );
+
+      const winners = results.filter((result) => result.status === 'fulfilled');
+      assert.equal(winners.length, 1);
+      // The surviving record belongs to the winner, and no marker is left behind.
+      assert.equal((await record(path)).pid, process.pid);
+      assert.equal(await exists(`${path}.takeover`), false);
+
+      await (winners[0] as PromiseFulfilledResult<FileLock>).value.release();
+      assert.equal(await exists(path), false);
     });
-
-    const results = await Promise.allSettled(
-      Array.from({ length: 32 }, () =>
-        acquireFileLock({ path, activeMessage: ACTIVE }),
-      ),
-    );
-
-    const winners = results.filter((result) => result.status === 'fulfilled');
-    assert.equal(winners.length, 1);
-    // The surviving record belongs to the winner, and no marker is left behind.
-    assert.equal((await record(path)).pid, process.pid);
-    assert.equal(await exists(`${path}.takeover`), false);
-
-    await (winners[0] as PromiseFulfilledResult<FileLock>).value.release();
-    assert.equal(await exists(path), false);
-  });
-});
+  },
+);
 
 test('many contenders for a free lock path produce exactly one holder', async () => {
   await withDirectory(async (directory) => {
@@ -430,33 +468,129 @@ test('many contenders for a free lock path produce exactly one holder', async ()
 // A lock path that is a symbolic link is not a lock. Opening it with `r+`
 // followed the link and overwrote whatever it pointed at with a fresh ownership
 // record — a stale-looking target file was rewritten and acquisition succeeded.
-test('a symlinked lock path is refused and its target is untouched', async () => {
+test(
+  'a symlinked lock path is refused and its target is untouched',
+  { skip: !canObserveLinks },
+  async () => {
+    await withDirectory(async (directory) => {
+      const target = join(directory, 'victim');
+      const path = join(directory, 'r.lock');
+      // Contents that would classify as a stale lock if read through the link.
+      const original = `${JSON.stringify({
+        pid: 999_999,
+        host: hostname(),
+        token: 'departed',
+        createdAt: '2026-08-11T00:00:00.000Z',
+      })}\n`;
+      await writeFile(target, original, { mode: 0o600 });
+      await symlink(target, path);
+
+      await assert.rejects(
+        acquireFileLock({ path, activeMessage: ACTIVE }),
+        (error: Error) => {
+          assert.match(error.message, /not a plain file/);
+          assert.ok(error.message.includes(path));
+          return true;
+        },
+      );
+
+      assert.equal(await readFile(target, 'utf8'), original);
+      assert.equal((await lstat(path)).isSymbolicLink(), true);
+    });
+  },
+);
+
+// Where a file cannot be opened with "do not follow links", classifying the path
+// and then opening it leaves a window in which the path can become a link, and
+// the overwrite would land on whatever it points at. Takeover is refused outright
+// there. Driven through the injected capability so it is proven on every
+// platform, not only the one that lacks the flag.
+test('takeover is refused outright where links cannot be refused on open', async () => {
   await withDirectory(async (directory) => {
-    const target = join(directory, 'victim');
     const path = join(directory, 'r.lock');
-    // Contents that would classify as a stale lock if read through the link.
     const original = `${JSON.stringify({
       pid: 999_999,
       host: hostname(),
       token: 'departed',
       createdAt: '2026-08-11T00:00:00.000Z',
     })}\n`;
-    await writeFile(target, original, { mode: 0o600 });
-    await symlink(target, path);
+    await writeFile(path, original, { mode: 0o600 });
 
-    await assert.rejects(
-      acquireFileLock({ path, activeMessage: ACTIVE }),
-      (error: Error) => {
-        assert.match(error.message, /not a plain file/);
-        assert.ok(error.message.includes(path));
-        return true;
-      },
-    );
+    const result = await takeOverStaleLock({
+      path,
+      judged: { token: 'departed' },
+      token: 'mine',
+      canRefuseLinkOnOpen: false,
+    });
 
-    assert.equal(await readFile(target, 'utf8'), original);
-    assert.equal((await lstat(path)).isSymbolicLink(), true);
+    assert.deepEqual(result, { kind: 'unsupported' });
+    // Untouched, and no marker created on the way to the refusal.
+    assert.equal(await readFile(path, 'utf8'), original);
+    assert.equal(await exists(`${path}.takeover`), false);
   });
 });
+
+// The native counterpart, which runs only where the flag is genuinely missing.
+// The stale record must survive rather than be overwritten, and the message must
+// say what to do instead.
+test(
+  'a stale lock is preserved rather than taken over on this platform',
+  { skip: takeoverSupported },
+  async () => {
+    await withDirectory(async (directory) => {
+      const path = join(directory, 'r.lock');
+      const original = `${JSON.stringify({
+        pid: 999_999,
+        host: hostname(),
+        token: 'departed',
+        createdAt: '2026-08-11T00:00:00.000Z',
+      })}\n`;
+      await writeFile(path, original, { mode: 0o600 });
+
+      await assert.rejects(
+        acquireFileLock({ path, activeMessage: ACTIVE }),
+        (error: Error) => {
+          assert.ok(error.message.startsWith(ACTIVE));
+          assert.match(error.message, /cannot open a file while refusing/);
+          assert.ok(error.message.includes(path));
+          return true;
+        },
+      );
+
+      assert.equal(await readFile(path, 'utf8'), original);
+      assert.equal(await exists(`${path}.takeover`), false);
+    });
+  },
+);
+
+test(
+  'many contenders against a stale lock never overwrite it on this platform',
+  { skip: takeoverSupported },
+  async () => {
+    await withDirectory(async (directory) => {
+      const path = join(directory, 'r.lock');
+      const original = `${JSON.stringify({
+        pid: 999_999,
+        host: hostname(),
+        token: 'departed',
+        createdAt: '2026-08-11T00:00:00.000Z',
+      })}\n`;
+      await writeFile(path, original, { mode: 0o600 });
+
+      const results = await Promise.allSettled(
+        Array.from({ length: 32 }, () =>
+          acquireFileLock({ path, activeMessage: ACTIVE }),
+        ),
+      );
+
+      assert.equal(
+        results.filter((result) => result.status === 'fulfilled').length,
+        0,
+      );
+      assert.equal(await readFile(path, 'utf8'), original);
+    });
+  },
+);
 
 test(
   'a lock file that cannot be read is never treated as absent',
@@ -482,27 +616,31 @@ test(
   },
 );
 
-test('a hard-linked lock path is refused and neither name is rewritten', async () => {
-  await withDirectory(async (directory) => {
-    const other = join(directory, 'also-here');
-    const path = join(directory, 'r.lock');
-    const original = `${JSON.stringify({
-      pid: 999_999,
-      host: hostname(),
-      token: 'departed',
-      createdAt: '2026-08-11T00:00:00.000Z',
-    })}\n`;
-    await writeFile(path, original, { mode: 0o600 });
-    await link(path, other);
+test(
+  'a hard-linked lock path is refused and neither name is rewritten',
+  { skip: !canObserveLinks },
+  async () => {
+    await withDirectory(async (directory) => {
+      const other = join(directory, 'also-here');
+      const path = join(directory, 'r.lock');
+      const original = `${JSON.stringify({
+        pid: 999_999,
+        host: hostname(),
+        token: 'departed',
+        createdAt: '2026-08-11T00:00:00.000Z',
+      })}\n`;
+      await writeFile(path, original, { mode: 0o600 });
+      await link(path, other);
 
-    await assert.rejects(acquireFileLock({ path, activeMessage: ACTIVE }), {
-      message: /not a plain file/,
+      await assert.rejects(acquireFileLock({ path, activeMessage: ACTIVE }), {
+        message: /not a plain file/,
+      });
+
+      assert.equal(await readFile(path, 'utf8'), original);
+      assert.equal(await readFile(other, 'utf8'), original);
     });
-
-    assert.equal(await readFile(path, 'utf8'), original);
-    assert.equal(await readFile(other, 'utf8'), original);
-  });
-});
+  },
+);
 
 test('a record write that reports partial progress still writes every byte', async () => {
   const chunks: Array<{ offset: number; length: number; position: number }> =

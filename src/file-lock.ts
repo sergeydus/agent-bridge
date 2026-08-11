@@ -48,11 +48,20 @@ type LockUnidentifiedReason = 'empty' | 'legacy' | 'unreadable' | 'irregular';
 
 /**
  * `O_NOFOLLOW` makes opening fail rather than traverse a symbolic link at the
- * final path component. It does not exist on Windows, where the flag resolves to
- * zero: there the `lstat` classification is the only protection, so the window
- * between classifying a path and opening it stays open on that platform.
+ * final path component. It does not exist on Windows.
  */
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
+
+/**
+ * Whether a path can be opened in a way that refuses to follow a link.
+ *
+ * Without it, classifying the path and then opening it leaves a window in which
+ * the path can become a link, and the write would land on whatever it points at.
+ * Automatic takeover is therefore refused entirely where this is unavailable:
+ * losing automatic recovery from a crashed run costs the user one deletion, while
+ * overwriting an unrelated file costs them that file.
+ */
+const CAN_REFUSE_LINK_ON_OPEN = NOFOLLOW !== 0;
 
 /** The part of a `FileHandle` a record write needs, so tests can supply one. */
 export interface LockRecordWriter {
@@ -255,7 +264,8 @@ type TakeoverResult =
   | { kind: 'vanished' }
   | { kind: 'lost'; state: LockState }
   | { kind: 'blocked' }
-  | { kind: 'irregular' };
+  | { kind: 'irregular' }
+  | { kind: 'unsupported' };
 
 /**
  * Takes over a lock judged stale, without ever unlinking it.
@@ -272,16 +282,26 @@ type TakeoverResult =
  * at most one process is ever inside it, and the stale record is overwritten in
  * place rather than removed and recreated, so the lock path is never briefly
  * free for a fourth process to claim. No foreign lock file is ever unlinked.
+ *
+ * `canRefuseLinkOnOpen` defaults to what the platform supports and exists so the
+ * refusal taken on platforms without a no-follow open is testable everywhere.
  */
 export async function takeOverStaleLock({
   path,
   judged,
   token,
+  canRefuseLinkOnOpen = CAN_REFUSE_LINK_ON_OPEN,
 }: {
   path: string;
   judged: { token: string };
   token: string;
+  canRefuseLinkOnOpen?: boolean;
 }): Promise<TakeoverResult> {
+  if (!canRefuseLinkOnOpen) {
+    // Refused before the marker is even created: there is nothing to clean up,
+    // and the lock is left exactly as it was found.
+    return { kind: 'unsupported' };
+  }
   const takeoverPath = takeoverPathFor(path);
   let marker;
   try {
@@ -499,6 +519,18 @@ export async function acquireFileLock({
           }
           if (takeover.kind === 'vanished') {
             continue;
+          }
+          if (takeover.kind === 'unsupported') {
+            throw new Error(
+              `${activeMessage} It was left behind by a process that is no ` +
+                `longer running, but this platform cannot open a file while ` +
+                `refusing to follow a link, so taking the lock over ` +
+                `automatically could write through a link put in its place and ` +
+                `modify an unrelated file. The lock is left untouched. The lock ` +
+                `file is ${path}. If no other Agent Bridge process is running, ` +
+                `delete that file and try again.`,
+              { cause: error },
+            );
           }
           if (takeover.kind === 'blocked') {
             throw new Error(
