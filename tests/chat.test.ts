@@ -163,6 +163,35 @@ function providersWithRun(run: AgentProvider['run']): ProviderMap {
   return { codex: provider('codex'), claude: provider('claude') };
 }
 
+/**
+ * A repository whose `/edit` flow asks all three of its confirmations: a dirty
+ * tracked file draws the committed-HEAD acknowledgement, and a configured
+ * verification command draws the approval question before the start question.
+ */
+async function editingProjectWithVerification(): Promise<string> {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-git-'));
+  await execFileAsync('git', ['init'], { cwd: project });
+  await execFileAsync('git', ['config', 'user.email', 'test@example.com'], {
+    cwd: project,
+  });
+  await execFileAsync('git', ['config', 'user.name', 'Test User'], {
+    cwd: project,
+  });
+  await writeFile(join(project, 'tracked.txt'), 'committed\n');
+  await execFileAsync('git', ['add', 'tracked.txt'], { cwd: project });
+  await execFileAsync('git', ['commit', '-m', 'initial'], { cwd: project });
+  await writeFile(join(project, 'tracked.txt'), 'local change\n');
+  await writeFile(
+    join(project, '.agent-bridge.json'),
+    JSON.stringify({
+      version: 1,
+      verification: [{ command: 'npm', args: ['test'] }],
+      protectedPaths: [],
+    }),
+  );
+  return project;
+}
+
 function fakeProviders(
   prompts: string[],
   optionsSeen: ProviderRunOptions[],
@@ -1194,6 +1223,248 @@ test('chat editing preflight carries explicit dirty and verification approvals',
     assert.match(output, /starts from committed HEAD/);
     assert.match(output, /npm test/);
     assert.match(output, /Workflow preview/);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+/**
+ * End of input is not consent. Each case stops the scripted input exactly at
+ * one confirmation, and the confirmation under test must be the last thing the
+ * session asks: anything after it means end of input was answered rather than
+ * obeyed. The start question is the case that mattered most, because its
+ * default is yes and folding end of input into it launched an editing workflow.
+ */
+for (const confirmation of [
+  {
+    name: 'the dirty-tree acknowledgement',
+    answers: [] as string[],
+    prompt: /Continue explicitly from committed HEAD/,
+  },
+  {
+    name: 'the verification-command approval',
+    answers: ['yes'],
+    prompt: /Allow these commands to run after edits/,
+  },
+  {
+    name: 'the workflow start question',
+    answers: ['yes', 'yes'],
+    prompt: /Start this workflow/,
+  },
+]) {
+  test(`end of input at ${confirmation.name} pauses without editing`, async () => {
+    const project = await editingProjectWithVerification();
+    const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+    const launches: WorkflowLaunchRequest[] = [];
+    try {
+      const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+      const terminal = new ScriptedTerminal([
+        'Implement the change',
+        '/edit',
+        ...confirmation.answers,
+      ]);
+      await runInteractiveChat({
+        options: parseArgs(['chat', '--cwd', project], {
+          initialCwd: '/',
+          defaultOutput: paths.runsDirectory,
+        }),
+        appPaths: paths,
+        providers: fakeProviders([], []),
+        terminal,
+        launchWorkflow: async (request) => {
+          launches.push(request);
+          return 0;
+        },
+      });
+
+      assert.equal(launches.length, 0);
+      assert.match(
+        terminal.prompts.at(-1) ?? '',
+        confirmation.prompt,
+        'the session kept asking after end of input',
+      );
+      assert.match(terminal.output.join(''), /Chat saved\. Resume with:/);
+      const saved = await new ChatSessionStore(paths.chatsDirectory).latest();
+      assert.equal(saved?.status, 'paused');
+    } finally {
+      await rm(project, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+}
+
+test('end of input at the automatic-conversation question runs no exchanges', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  let calls = 0;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const providers = providersWithRun(async () => {
+      calls += 1;
+      return { text: `answer ${calls}`, decision: 'continue' as const };
+    });
+    const terminal = new ScriptedTerminal(['Discuss this', '/auto']);
+
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+        initialCwd: project,
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers,
+      terminal,
+    });
+
+    // Only the opening exchange for the typed message; the confirmation that
+    // would have authorized up to six more never received an answer.
+    assert.equal(calls, 2);
+    assert.match(terminal.prompts.at(-1) ?? '', /Start automatic conversation/);
+    const saved = await new ChatSessionStore(paths.chatsDirectory).latest();
+    assert.equal(saved?.status, 'paused');
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+/**
+ * `/done` with unfinished provider work defaults to no, so end of input was
+ * already safe here by accident rather than by rule. Asserting it directly
+ * means a later change to that default cannot quietly turn a closed stdin into
+ * a completed chat that discards the exchange as abandoned.
+ */
+test('end of input at the /done confirmation abandons nothing', async () => {
+  const project = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-project-'));
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  let calls = 0;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const providers = providersWithRun(async () => {
+      calls += 1;
+      // Two `done` responses reach the reciprocal-confirmation stage; the
+      // third call is interrupted, so the exchange stays pending.
+      if (calls === 3) {
+        throw new ProcessAbortError();
+      }
+      return { text: `done answer ${calls}`, decision: 'done' as const };
+    });
+    const terminal = new ScriptedTerminal(['Discuss this', '/done']);
+
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--cwd', project, '--ui', 'plain'], {
+        initialCwd: project,
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers,
+      terminal,
+    });
+
+    const saved = await new ChatSessionStore(paths.chatsDirectory).latest();
+    assert.equal(saved?.status, 'paused');
+    assert.equal(saved?.pendingExchange?.stage, 'awaiting-confirmation');
+    assert.equal(saved?.latestPairedExchange, undefined);
+    assert.match(
+      terminal.prompts.at(-1) ?? '',
+      /Complete this chat without Codex's reciprocal confirmation/,
+    );
+    // Paused at the question rather than falling through its "no" branch.
+    assert.doesNotMatch(terminal.output.join(''), /Completion cancelled/);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('an unrecognized confirmation answer is re-asked, not read as no', async () => {
+  const project = await editingProjectWithVerification();
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const launches: WorkflowLaunchRequest[] = [];
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const terminal = new ScriptedTerminal([
+      'Implement the change',
+      '/edit',
+      'maybe', // not y or n: asked again rather than cancelling
+      'yes', // continue from committed HEAD
+      'no', // verification commands stay unapproved
+      'later', // not y or n: asked again rather than starting
+      'y', // start the workflow
+      '/done',
+    ]);
+
+    await runInteractiveChat({
+      options: parseArgs(['chat', '--cwd', project], {
+        initialCwd: '/',
+        defaultOutput: paths.runsDirectory,
+      }),
+      appPaths: paths,
+      providers: fakeProviders([], []),
+      terminal,
+      launchWorkflow: async (request) => {
+        launches.push(request);
+        return 0;
+      },
+    });
+
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0]?.options.fromHead, true);
+    assert.equal(launches[0]?.options.trustProjectConfig, false);
+    assert.equal(
+      terminal.prompts.filter((prompt) =>
+        prompt.startsWith('Please enter y or n.'),
+      ).length,
+      2,
+    );
+  } finally {
+    await rm(project, { recursive: true, force: true });
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('an empty confirmation answer still takes the stated default', async () => {
+  const project = await editingProjectWithVerification();
+  const home = await mkdtemp(join(tmpdir(), 'agent-bridge-chat-home-'));
+  const launches: WorkflowLaunchRequest[] = [];
+  let calls = 0;
+  try {
+    const paths = getAppPaths({ env: { AGENT_BRIDGE_HOME: home } });
+    const providers = providersWithRun(async () => {
+      calls += 1;
+      return { text: `answer ${calls}`, decision: 'continue' as const };
+    });
+    // The dirty-tree question defaults to no, so an empty answer cancels
+    // editing; the automatic-conversation question defaults to yes, so an
+    // empty answer starts its single permitted exchange.
+    const terminal = new ScriptedTerminal([
+      'Implement the change',
+      '/edit',
+      '',
+      '/auto',
+      '',
+    ]);
+
+    await runInteractiveChat({
+      options: parseArgs(
+        ['chat', '--cwd', project, '--ui', 'plain', '--max-auto-rounds', '1'],
+        { initialCwd: '/', defaultOutput: paths.runsDirectory },
+      ),
+      appPaths: paths,
+      providers,
+      terminal,
+      launchWorkflow: async (request) => {
+        launches.push(request);
+        return 0;
+      },
+    });
+
+    assert.equal(launches.length, 0);
+    const output = terminal.output.join('');
+    assert.match(output, /Editing cancelled/);
+    // Two calls for the opening exchange, two more for the accepted round.
+    assert.equal(calls, 4);
+    assert.match(output, /Automatic exchange limit reached/);
   } finally {
     await rm(project, { recursive: true, force: true });
     await rm(home, { recursive: true, force: true });
