@@ -3,6 +3,7 @@ import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
+  AGENT_NAMES,
   errorMessage,
   isTransientAgentFailure,
   type AgentName,
@@ -503,7 +504,7 @@ export class ProviderAvailabilityError extends Error {
 export async function assertProvidersAvailable(
   providers: ProviderMap,
 ): Promise<void> {
-  const agents = ['codex', 'claude'] as const;
+  const agents = AGENT_NAMES;
   const checks = await Promise.allSettled(
     agents.map(async (agent) => {
       await providers[agent].version();

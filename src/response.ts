@@ -1,4 +1,8 @@
-import type { AgentDecision } from './core.ts';
+import {
+  AGENT_DECISIONS,
+  isAgentDecision,
+  type AgentDecision,
+} from './core.ts';
 import { hasOnlyKeys, isRecord } from './validation.ts';
 
 export type ResponseKind = 'turn' | 'synthesis';
@@ -14,7 +18,7 @@ export const TURN_RESPONSE_SCHEMA = {
   properties: {
     decision: {
       type: 'string',
-      enum: ['done', 'continue'],
+      enum: [...AGENT_DECISIONS],
       description:
         'done only when no actionable work or unresolved disagreement remains',
     },
@@ -81,7 +85,7 @@ export function parseProviderResponse(
     }
     if (
       hasOnlyKeys(parsed, ['decision', 'text']) &&
-      (parsed.decision === 'done' || parsed.decision === 'continue')
+      isAgentDecision(parsed.decision)
     ) {
       return {
         text: parsed.text.trim(),

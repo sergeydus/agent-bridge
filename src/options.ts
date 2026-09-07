@@ -6,9 +6,13 @@ import type {
   CompletionInstruction,
   ReasoningEffort,
 } from './core.ts';
-import { COMPLETION_INSTRUCTIONS } from './core.ts';
+import {
+  COMPLETION_INSTRUCTIONS,
+  isAgentName,
+  isReasoningEffort,
+} from './core.ts';
 import { getAppPaths } from './paths.ts';
-import type { UiMode } from './terminal-capabilities.ts';
+import { isUiMode, type UiMode } from './terminal-capabilities.ts';
 
 export interface BridgeOptions {
   chat: boolean;
@@ -382,7 +386,7 @@ export function parseArgs(
   ) {
     throw new Error('--timeout-minutes must be an integer from 1 to 180');
   }
-  if (!['codex', 'claude'].includes(options.judge)) {
+  if (!isAgentName(options.judge)) {
     throw new Error('--judge must be codex or claude');
   }
   if (!COMPLETION_INSTRUCTIONS.includes(options.onComplete)) {
@@ -427,16 +431,10 @@ export function parseArgs(
       );
     }
   }
-  if (
-    options.implementer &&
-    !['codex', 'claude'].includes(options.implementer)
-  ) {
+  if (options.implementer && !isAgentName(options.implementer)) {
     throw new Error('--implementer must be codex or claude');
   }
-  if (
-    options.collaborative &&
-    !['codex', 'claude'].includes(options.collaborative)
-  ) {
+  if (options.collaborative && !isAgentName(options.collaborative)) {
     throw new Error('--collaborative must be codex or claude');
   }
   if (options.implementer && options.collaborative) {
@@ -455,16 +453,15 @@ export function parseArgs(
       'Interactive chat editing always uses the isolated workflow; remove --no-isolation and --allow-dirty',
     );
   }
-  const validEfforts = ['low', 'medium', 'high', 'xhigh', 'max'];
-  if (options.codexEffort && !validEfforts.includes(options.codexEffort)) {
+  if (options.codexEffort && !isReasoningEffort(options.codexEffort)) {
     throw new Error('--codex-effort must be low, medium, high, xhigh, or max');
   }
   // Which levels a given model accepts is the provider's decision, not a fixed
   // list here: Claude's xhigh support varies by model.
-  if (options.claudeEffort && !validEfforts.includes(options.claudeEffort)) {
+  if (options.claudeEffort && !isReasoningEffort(options.claudeEffort)) {
     throw new Error('--claude-effort must be low, medium, high, xhigh, or max');
   }
-  if (!['plain', 'enhanced', 'auto'].includes(options.ui)) {
+  if (!isUiMode(options.ui)) {
     throw new Error('--ui must be plain, enhanced, or auto');
   }
   if (

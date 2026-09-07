@@ -40,7 +40,9 @@ location of Agent Bridge itself.
 - `terminal-capabilities.ts` owns UI mode selection and process-free capability
   checks.
 - `orchestrator.ts` owns the provider-independent state machine.
-- `core.ts` contains shared workflow types and deterministic helpers.
+- `core.ts` contains shared workflow types and deterministic helpers. Closed
+  vocabularies are declared there as value arrays with the type derived from
+  them, so a validator and a CLI flag cannot disagree about the members.
 - `response.ts` owns structured response schemas and parsing.
 - `providers.ts` translates the provider-independent contract into CLI flags.
 - `provider-events.ts` incrementally normalizes safe provider stream events.

@@ -2,6 +2,7 @@ import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { planWorkspaceRemoval } from './artifacts.ts';
+import { isFinishedRunStatus } from './core.ts';
 import { removeIsolatedWorktree } from './git.ts';
 import type { SavedRun } from './state.ts';
 import { RunStateStore } from './state.ts';
@@ -66,7 +67,7 @@ export async function discardRunWorkspace({
   if (!run.workspace) {
     throw new Error(`Run ${run.id} has no retained workspace.`);
   }
-  if (!['completed', 'cancelled'].includes(run.status)) {
+  if (!isFinishedRunStatus(run.status)) {
     throw new Error(
       `Run ${run.id} is ${run.status}. Only completed or cancelled workspaces can be discarded.`,
     );
@@ -111,7 +112,7 @@ export async function pruneCompletedRuns({
   let skippedWorkspaces = 0;
   for (const run of await store.list()) {
     if (
-      !['completed', 'cancelled'].includes(run.status) ||
+      !isFinishedRunStatus(run.status) ||
       Date.parse(run.updatedAt) > cutoff
     ) {
       continue;
