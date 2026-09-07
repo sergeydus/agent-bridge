@@ -277,6 +277,16 @@ export function describePairedExchangeStatus(
   }
 }
 
+/**
+ * The human-readable name for an agent. A deterministic enum label like
+ * `describePairedExchangeStatus`, not a rendering decision: both terminal
+ * renderers, the reporter, and the workflow preview must all spell an agent the
+ * same way, so there is one definition rather than one per presenter.
+ */
+export function agentLabel(agent: AgentName): string {
+  return agent === 'codex' ? 'Codex' : 'Claude';
+}
+
 export function otherAgent(agent: AgentName): AgentName {
   return agent === 'codex' ? 'claude' : 'codex';
 }

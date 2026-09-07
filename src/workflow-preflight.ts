@@ -1,6 +1,5 @@
 import type { ChatWorkflowMode } from './chat-state.ts';
-import { agentLabel } from './presentation.ts';
-import { estimateCalls, type AgentName } from './core.ts';
+import { agentLabel, estimateCalls, type AgentName } from './core.ts';
 import type { BridgeOptions } from './options.ts';
 import { loadProjectConfig, type ProjectConfig } from './project-config.ts';
 import { workingTreeStatus } from './snapshot.ts';

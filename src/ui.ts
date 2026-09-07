@@ -1,13 +1,11 @@
 import {
+  agentLabel,
   formatDuration,
   type AgentName,
   type ChangeSummary,
   type RunOutcome,
 } from './core.ts';
 import { sanitizeTerminalText } from './terminal-text.ts';
-
-const agentLabel = (agent: AgentName): string =>
-  agent === 'codex' ? 'Codex' : 'Claude';
 
 export class ProgressReporter {
   #startedAt = Date.now();

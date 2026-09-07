@@ -1,7 +1,7 @@
 import {
+  agentLabel,
   describePairedExchangeStatus,
   formatDuration,
-  type AgentName,
 } from './core.ts';
 import type { TerminalRenderer } from './presentation.ts';
 import type {
@@ -197,10 +197,6 @@ function wrapTextTail(
     visible[0] = `…${clipLine(visible[0] ?? '', Math.max(0, width - 1))}`;
   }
   return visible;
-}
-
-function agentLabel(agent: AgentName): string {
-  return agent === 'codex' ? 'Codex' : 'Claude';
 }
 
 function messageLabel(message: PresentedMessage): string {

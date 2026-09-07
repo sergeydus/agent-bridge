@@ -4,9 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { ChatSession, ChatWorkflowMode } from './chat-state.ts';
-import type { AgentName } from './core.ts';
+import { agentLabel, type AgentName } from './core.ts';
 import type { BridgeOptions } from './options.ts';
-import { agentLabel } from './presentation.ts';
 import { boundedChatHistory, CHAT_HISTORY_METADATA_NOTE } from './prompts.ts';
 
 export interface WorkflowLaunchRequest {

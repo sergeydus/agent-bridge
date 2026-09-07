@@ -23,6 +23,7 @@ import {
 } from './chat-workflow.ts';
 import { UserConfigStore } from './config.ts';
 import {
+  agentLabel,
   deriveCurrentPairedExchangeStatus,
   describePairedExchangeStatus,
   errorMessage,
@@ -34,7 +35,6 @@ import { loadInstructionContext } from './instructions.ts';
 import type { BridgeOptions } from './options.ts';
 import type { AppPaths } from './paths.ts';
 import {
-  agentLabel,
   createPlainTerminalRenderer,
   formatAgentResponse,
   PresentationController,
