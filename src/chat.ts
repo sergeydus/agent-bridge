@@ -25,6 +25,7 @@ import { UserConfigStore } from './config.ts';
 import {
   deriveCurrentPairedExchangeStatus,
   describePairedExchangeStatus,
+  errorMessage,
   makeRunId,
   otherAgent,
   type AgentName,
@@ -74,10 +75,6 @@ import {
   formatWorkflowPreflight,
   inspectWorkflowPreflight,
 } from './workflow-preflight.ts';
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 const ACTIVITY_TICK_INTERVAL_MS = 250;
 

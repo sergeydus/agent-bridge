@@ -3,6 +3,7 @@ import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import {
+  errorMessage,
   isTransientAgentFailure,
   type AgentName,
   type ReasoningEffort,
@@ -497,10 +498,6 @@ export class ProviderAvailabilityError extends Error {
     super(message);
     this.name = 'ProviderAvailabilityError';
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export async function assertProvidersAvailable(
