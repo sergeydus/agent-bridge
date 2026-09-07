@@ -15,6 +15,7 @@ import { acquireFileLock, FileLock } from './file-lock.ts';
 import { readFilePrefixBytes, writePrivateFileAtomic } from './filesystem.ts';
 import type { UiMode } from './terminal-capabilities.ts';
 import { sanitizeTerminalText } from './terminal-text.ts';
+import { hasOnlyKeys, isIsoDateTime, isRecord } from './validation.ts';
 
 const MAX_CHAT_FILE_BYTES = 50_000_000;
 const MAX_CHAT_MESSAGES = 10_000;
@@ -110,27 +111,6 @@ export interface ChatSession {
 }
 
 export { FileLock as ChatLock };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasOnlyKeys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
-}
-
-function isIsoDateTime(value: unknown): value is string {
-  if (typeof value !== 'string') {
-    return false;
-  }
-  const timestamp = Date.parse(value);
-  return (
-    !Number.isNaN(timestamp) && new Date(timestamp).toISOString() === value
-  );
-}
 
 function isAgent(value: unknown): value is AgentName {
   return value === 'codex' || value === 'claude';

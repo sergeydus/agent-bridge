@@ -56,6 +56,9 @@ location of Agent Bridge itself.
   persisted format goes through it instead of writing files directly.
 - `file-lock.ts` owns the single exclusive-lock primitive, including stale-owner
   detection, shared by run checkpoints and chat sessions.
+- `validation.ts` owns the predicates every runtime validator shares, so
+  checkpoints, chat sessions, project configuration, and provider responses
+  agree on what an object, an allow-listed key set, and a timestamp are.
 - `runs.ts` owns run listing and conservative artifact deletion.
 - `run-management.ts` maps CLI history actions to run operations.
 - `task.ts` loads task input and bounded Git review evidence.

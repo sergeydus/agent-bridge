@@ -43,14 +43,18 @@ bin/agent-bridge.mjs
       ├─ checkpoints + history ─── state.ts, runs.ts
       │                              run-management.ts
       ├─ transcripts ───────────── transcript.ts
-      ├─ shared primitives ─────── filesystem.ts, file-lock.ts
+      ├─ shared primitives ─────── filesystem.ts, file-lock.ts,
+      │                           validation.ts
       └─ diagnostics ───────────── doctor.ts
 ```
 
-Three primitives are deliberately shared rather than reimplemented per
+Four primitives are deliberately shared rather than reimplemented per
 subsystem. `terminal-text.ts` is the only sanitizer for untrusted text reaching
 a terminal. `filesystem.ts` is the only writer of persisted state, so every
-format gets the same atomic rename and owner-only mode. `file-lock.ts` is the
+format gets the same atomic rename and owner-only mode. `validation.ts` is the
+only source of the predicates each runtime validator is built from, because a
+copied predicate that is quietly weakened still typechecks at every call site.
+`file-lock.ts` is the
 only exclusive lock, so run checkpoints and chat sessions share one definition
 of ownership and one stale-owner check. A lock is a directory holding its owner
 record, because creating a directory is atomic and never resolves a link at the

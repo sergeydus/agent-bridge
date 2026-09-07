@@ -22,6 +22,7 @@ import {
   type VerificationCommand,
 } from './project-config.ts';
 import { sanitizeTerminalText } from './terminal-text.ts';
+import { hasOnlyKeys, isIsoDateTime, isRecord } from './validation.ts';
 
 const MAX_RUN_STATE_BYTES = 50_000_000;
 
@@ -110,27 +111,6 @@ export const RUN_STATE_VERSION = 3;
 
 function isString(value: unknown): value is string {
   return typeof value === 'string';
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasOnlyKeys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
-}
-
-function isIsoDateTime(value: unknown): value is string {
-  if (typeof value !== 'string') {
-    return false;
-  }
-  const timestamp = Date.parse(value);
-  return (
-    !Number.isNaN(timestamp) && new Date(timestamp).toISOString() === value
-  );
 }
 
 function isAgentDecision(value: unknown): value is AgentDecision {
