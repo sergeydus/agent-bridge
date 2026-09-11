@@ -146,8 +146,10 @@ opening another exchange after confirmation. A migrated legacy pair with two
 implementation and review with Claude first; `/edit codex` changes the first
 writer. Before anything can edit, Agent Bridge shows the project, roles,
 isolated workspace, dirty-tree handling, verification commands, cycle and
-provider-call limits, and asks once for confirmation. `/implement` and
-`/collaborate` remain advanced role controls and use the same preflight.
+provider-call limits, and asks for confirmation. Empty input accepts the
+displayed default, unrecognized answers are re-prompted, and Ctrl+D pauses
+without accepting the default. `/implement` and `/collaborate` remain advanced
+role controls and use the same preflight.
 
 Pause with `/pause` or Ctrl+D, then reopen any saved session—including a
 completed one—with:
