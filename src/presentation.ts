@@ -1,4 +1,5 @@
 import {
+  agentLabel,
   describePairedExchangeStatus,
   formatDuration,
   type AgentDecision,
@@ -240,10 +241,6 @@ export function resolvePresentation(
     return { screenReader, color: input.color && isTty };
   }
   return { screenReader, color: isTty && !hasNoColor(environment) };
-}
-
-export function agentLabel(agent: AgentName): string {
-  return agent === 'codex' ? 'Codex' : 'Claude';
 }
 
 function coloredAgentLabel(

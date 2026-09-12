@@ -2,19 +2,27 @@ import { readdir, rm } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 
 import {
+  AGENT_NAMES,
   deriveHistoricalPairedExchangeStatus,
   describePairedExchangeStatus,
+  isAgentDecision,
+  isAgentName,
+  isProjectKind,
+  isReasoningEffort,
   isSafeRunId,
+  isWorkflowKind,
   recordedExchangeFinalSequence,
   type AgentDecision,
   type AgentName,
   type ProjectKind,
   type ReasoningEffort,
+  type WorkflowKind,
 } from './core.ts';
 import { acquireFileLock, FileLock } from './file-lock.ts';
 import { readFilePrefixBytes, writePrivateFileAtomic } from './filesystem.ts';
-import type { UiMode } from './terminal-capabilities.ts';
+import { isUiMode, type UiMode } from './terminal-capabilities.ts';
 import { sanitizeTerminalText } from './terminal-text.ts';
+import { hasOnlyKeys, isIsoDateTime, isRecord } from './validation.ts';
 
 const MAX_CHAT_FILE_BYTES = 50_000_000;
 const MAX_CHAT_MESSAGES = 10_000;
@@ -23,9 +31,36 @@ const MAX_CHAT_MESSAGE_CHARS = 2_000_000;
 export const LEGACY_PENDING_EXCHANGE_WARNING =
   'An unfinished exchange from an older version was discarded; send a message to start a new one.';
 
-export type ChatStatus = 'active' | 'paused' | 'completed';
-export type ChatRole = 'user' | 'codex' | 'claude' | 'system';
-export type ChatWorkflowMode = 'review' | 'fixed' | 'collaborative';
+export const CHAT_STATUSES = ['active', 'paused', 'completed'] as const;
+export type ChatStatus = (typeof CHAT_STATUSES)[number];
+
+/** The agents, plus the two non-agent speakers a transcript can attribute. */
+export const CHAT_ROLES = ['user', ...AGENT_NAMES, 'system'] as const;
+export type ChatRole = (typeof CHAT_ROLES)[number];
+
+/** Chat launches the same workflows the one-shot CLI runs, not a parallel set. */
+export type ChatWorkflowMode = WorkflowKind;
+
+/**
+ * How a finished exchange stands. `abandoned` is recorded separately, because
+ * only a settled pair can still be reopened by a later confirmation.
+ */
+export const SETTLED_EXCHANGE_OUTCOMES = ['open', 'confirmed'] as const;
+export type SettledExchangeOutcome = (typeof SETTLED_EXCHANGE_OUTCOMES)[number];
+
+function isChatStatus(value: unknown): value is ChatStatus {
+  return CHAT_STATUSES.includes(value as ChatStatus);
+}
+
+function isChatRole(value: unknown): value is ChatRole {
+  return CHAT_ROLES.includes(value as ChatRole);
+}
+
+function isSettledExchangeOutcome(
+  value: unknown,
+): value is SettledExchangeOutcome {
+  return SETTLED_EXCHANGE_OUTCOMES.includes(value as SettledExchangeOutcome);
+}
 
 export interface ChatMessage {
   sequence: number;
@@ -65,7 +100,7 @@ export interface SettledChatExchange {
   firstMessageSequence: number;
   secondMessageSequence: number;
   confirmationMessageSequence?: number;
-  outcome: 'open' | 'confirmed';
+  outcome: SettledExchangeOutcome;
 }
 
 export interface AbandonedChatExchange {
@@ -111,35 +146,6 @@ export interface ChatSession {
 
 export { FileLock as ChatLock };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasOnlyKeys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
-}
-
-function isIsoDateTime(value: unknown): value is string {
-  if (typeof value !== 'string') {
-    return false;
-  }
-  const timestamp = Date.parse(value);
-  return (
-    !Number.isNaN(timestamp) && new Date(timestamp).toISOString() === value
-  );
-}
-
-function isAgent(value: unknown): value is AgentName {
-  return value === 'codex' || value === 'claude';
-}
-
-function isEffort(value: unknown): value is ReasoningEffort {
-  return ['low', 'medium', 'high', 'xhigh', 'max'].includes(String(value));
-}
-
 function isMessage(value: unknown): value is ChatMessage {
   if (!isRecord(value)) {
     return false;
@@ -149,15 +155,15 @@ function isMessage(value: unknown): value is ChatMessage {
   ) {
     return false;
   }
-  const isAgentRole = value.role === 'codex' || value.role === 'claude';
+  const isAgentRole = isAgentName(value.role);
   const hasValidDecision = isAgentRole
-    ? value.decision === 'done' || value.decision === 'continue'
+    ? isAgentDecision(value.decision)
     : value.decision === undefined;
   return (
     Number.isInteger(value.sequence) &&
     Number(value.sequence) >= 1 &&
     isIsoDateTime(value.createdAt) &&
-    ['user', 'codex', 'claude', 'system'].includes(String(value.role)) &&
+    isChatRole(value.role) &&
     typeof value.text === 'string' &&
     value.text.length > 0 &&
     value.text.length <= MAX_CHAT_MESSAGE_CHARS &&
@@ -186,10 +192,10 @@ function isWorkflowEvent(value: unknown): value is ChatWorkflowEvent {
     Number(value.sequence) >= 1 &&
     isIsoDateTime(value.startedAt) &&
     isIsoDateTime(value.completedAt) &&
-    ['review', 'fixed', 'collaborative'].includes(String(value.mode)) &&
+    isWorkflowKind(value.mode) &&
     (value.mode === 'review'
       ? value.firstAgent === undefined
-      : isAgent(value.firstAgent)) &&
+      : isAgentName(value.firstAgent)) &&
     Date.parse(String(value.completedAt)) >=
       Date.parse(String(value.startedAt)) &&
     Number.isInteger(value.exitCode) &&
@@ -242,8 +248,8 @@ function referencedMessage(
 
 function hasValidExchangeAgents(value: Record<string, unknown>): boolean {
   return (
-    isAgent(value.firstAgent) &&
-    isAgent(value.secondAgent) &&
+    isAgentName(value.firstAgent) &&
+    isAgentName(value.secondAgent) &&
     value.firstAgent !== value.secondAgent
   );
 }
@@ -334,7 +340,7 @@ function isRecordedExchange(
     );
   }
   if (
-    (value.outcome !== 'open' && value.outcome !== 'confirmed') ||
+    !isSettledExchangeOutcome(value.outcome) ||
     !hasOnlyKeys(value, [
       'firstAgent',
       'secondAgent',
@@ -399,11 +405,11 @@ function hasValidCommonSessionFields(value: Record<string, unknown>): boolean {
     isSafeRunId(session.id) &&
     isIsoDateTime(session.createdAt) &&
     isIsoDateTime(session.updatedAt) &&
-    ['active', 'paused', 'completed'].includes(String(session.status)) &&
+    isChatStatus(session.status) &&
     typeof session.projectRoot === 'string' &&
     Boolean(session.projectRoot) &&
     isAbsolute(session.projectRoot) &&
-    (session.projectKind === 'git' || session.projectKind === 'directory') &&
+    isProjectKind(session.projectKind) &&
     Number.isInteger(session.maxAutoRounds) &&
     (session.maxAutoRounds ?? 0) >= 1 &&
     (session.maxAutoRounds ?? 21) <= 20 &&
@@ -420,14 +426,17 @@ function hasValidCommonSessionFields(value: Record<string, unknown>): boolean {
     (session.screenReader === undefined ||
       typeof session.screenReader === 'boolean') &&
     (session.color === undefined || typeof session.color === 'boolean') &&
-    ['plain', 'enhanced', 'auto'].includes(String(session.ui)) &&
+    isUiMode(session.ui) &&
     (session.codexModel === undefined ||
       typeof session.codexModel === 'string') &&
     (session.claudeModel === undefined ||
       typeof session.claudeModel === 'string') &&
-    (session.codexEffort === undefined || isEffort(session.codexEffort)) &&
-    (session.claudeEffort === undefined || isEffort(session.claudeEffort)) &&
-    (session.nextFirstAgent === undefined || isAgent(session.nextFirstAgent)) &&
+    (session.codexEffort === undefined ||
+      isReasoningEffort(session.codexEffort)) &&
+    (session.claudeEffort === undefined ||
+      isReasoningEffort(session.claudeEffort)) &&
+    (session.nextFirstAgent === undefined ||
+      isAgentName(session.nextFirstAgent)) &&
     Array.isArray(session.messages) &&
     session.messages.length <= MAX_CHAT_MESSAGES &&
     session.messages.every(isMessage) &&

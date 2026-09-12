@@ -1,4 +1,9 @@
-import type { AgentDecision } from './core.ts';
+import {
+  AGENT_DECISIONS,
+  isAgentDecision,
+  type AgentDecision,
+} from './core.ts';
+import { hasOnlyKeys, isRecord } from './validation.ts';
 
 export type ResponseKind = 'turn' | 'synthesis';
 
@@ -13,7 +18,7 @@ export const TURN_RESPONSE_SCHEMA = {
   properties: {
     decision: {
       type: 'string',
-      enum: ['done', 'continue'],
+      enum: [...AGENT_DECISIONS],
       description:
         'done only when no actionable work or unresolved disagreement remains',
     },
@@ -42,17 +47,6 @@ export const SYNTHESIS_RESPONSE_SCHEMA = {
 
 export function schemaFor(kind: ResponseKind): object {
   return kind === 'turn' ? TURN_RESPONSE_SCHEMA : SYNTHESIS_RESPONSE_SCHEMA;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasOnlyKeys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
 }
 
 function parseJson(value: string): unknown {
@@ -91,7 +85,7 @@ export function parseProviderResponse(
     }
     if (
       hasOnlyKeys(parsed, ['decision', 'text']) &&
-      (parsed.decision === 'done' || parsed.decision === 'continue')
+      isAgentDecision(parsed.decision)
     ) {
       return {
         text: parsed.text.trim(),

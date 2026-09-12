@@ -40,7 +40,9 @@ location of Agent Bridge itself.
 - `terminal-capabilities.ts` owns UI mode selection and process-free capability
   checks.
 - `orchestrator.ts` owns the provider-independent state machine.
-- `core.ts` contains shared workflow types and deterministic helpers.
+- `core.ts` contains shared workflow types and deterministic helpers. Closed
+  vocabularies are declared there as value arrays with the type derived from
+  them, so a validator and a CLI flag cannot disagree about the members.
 - `response.ts` owns structured response schemas and parsing.
 - `providers.ts` translates the provider-independent contract into CLI flags.
 - `provider-events.ts` incrementally normalizes safe provider stream events.
@@ -56,6 +58,9 @@ location of Agent Bridge itself.
   persisted format goes through it instead of writing files directly.
 - `file-lock.ts` owns the single exclusive-lock primitive, including stale-owner
   detection, shared by run checkpoints and chat sessions.
+- `validation.ts` owns the predicates every runtime validator shares, so
+  checkpoints, chat sessions, project configuration, and provider responses
+  agree on what an object, an allow-listed key set, and a timestamp are.
 - `runs.ts` owns run listing and conservative artifact deletion.
 - `run-management.ts` maps CLI history actions to run operations.
 - `task.ts` loads task input and bounded Git review evidence.

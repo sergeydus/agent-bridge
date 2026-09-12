@@ -1,4 +1,9 @@
-export type UiMode = 'plain' | 'enhanced' | 'auto';
+export const UI_MODES = ['plain', 'enhanced', 'auto'] as const;
+export type UiMode = (typeof UI_MODES)[number];
+
+export function isUiMode(value: unknown): value is UiMode {
+  return UI_MODES.includes(value as UiMode);
+}
 export type ResolvedUiMode = 'plain' | 'enhanced';
 
 export interface TerminalCapabilities {

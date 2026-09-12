@@ -23,8 +23,10 @@ import {
 } from './chat-workflow.ts';
 import { UserConfigStore } from './config.ts';
 import {
+  agentLabel,
   deriveCurrentPairedExchangeStatus,
   describePairedExchangeStatus,
+  errorMessage,
   makeRunId,
   otherAgent,
   type AgentName,
@@ -33,7 +35,6 @@ import { loadInstructionContext } from './instructions.ts';
 import type { BridgeOptions } from './options.ts';
 import type { AppPaths } from './paths.ts';
 import {
-  agentLabel,
   createPlainTerminalRenderer,
   formatAgentResponse,
   PresentationController,
@@ -74,10 +75,6 @@ import {
   formatWorkflowPreflight,
   inspectWorkflowPreflight,
 } from './workflow-preflight.ts';
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
 
 const ACTIVITY_TICK_INTERVAL_MS = 250;
 
@@ -852,22 +849,60 @@ export async function runInteractiveChat({
       supplementalOutputOpen = false;
       presenter.resume();
     };
+    /**
+     * Ends the session exactly as `/pause` does. Shared by the `/paste`
+     * collector and every confirmation, so end of input always leaves a saved
+     * chat the user is told how to resume.
+     */
+    const pauseAndLeave = async (): Promise<void> => {
+      setPresentedStatus(session, presenter, 'paused');
+      await store.save(session);
+      presenter.stop();
+      terminal.write(
+        `\nChat saved. Resume with:\n  agent-bridge chat --resume ${session.id}\n`,
+      );
+    };
+
+    /**
+     * A confirmation has three outcomes, not two.
+     *
+     * End of input is not consent. Folding it into the default answered every
+     * `[Y/n]` question with yes, so a closed or exhausted stdin could start an
+     * automatic conversation or launch an editing workflow with nobody at the
+     * terminal to see the preview it had just printed. It now ends the session
+     * instead, which is what end of input already means at the main prompt.
+     *
+     * An unrecognized non-empty answer is re-asked rather than read as "no",
+     * matching the wizard. The two novice entry points ask the user the same
+     * questions and must not interpret a typo differently.
+     */
     const confirm = async (
       prompt: string,
       defaultYes: boolean,
-    ): Promise<boolean> => {
-      const answer = (
-        (await terminal.prompt(prompt, abortController.signal)) ?? ''
-      )
-        .trim()
-        .toLowerCase();
-      if (abortController.signal.aborted) {
-        return false;
+    ): Promise<'yes' | 'no' | 'end-of-input'> => {
+      let asked = prompt;
+      while (true) {
+        const answer = await terminal.prompt(asked, abortController.signal);
+        // Cancellation stays distinct from end of input: the loop condition and
+        // the abort recovery path already own that message.
+        if (abortController.signal.aborted) {
+          return 'no';
+        }
+        if (answer === null) {
+          return 'end-of-input';
+        }
+        const normalized = answer.trim().toLowerCase();
+        if (!normalized) {
+          return defaultYes ? 'yes' : 'no';
+        }
+        if (normalized === 'y' || normalized === 'yes') {
+          return 'yes';
+        }
+        if (normalized === 'n' || normalized === 'no') {
+          return 'no';
+        }
+        asked = `Please enter y or n.\n${prompt}`;
       }
-      if (!answer) {
-        return defaultYes;
-      }
-      return answer === 'y' || answer === 'yes';
     };
 
     try {
@@ -1088,12 +1123,7 @@ export async function runInteractiveChat({
               abortController.signal,
             );
             if (line === null) {
-              setPresentedStatus(session, presenter, 'paused');
-              await store.save(session);
-              presenter.stop();
-              terminal.write(
-                `\nChat saved. Resume with:\n  agent-bridge chat --resume ${session.id}\n`,
-              );
+              await pauseAndLeave();
               return;
             }
             if (line === '.') {
@@ -1133,12 +1163,7 @@ export async function runInteractiveChat({
           continue;
         }
         if (command.kind === 'pause') {
-          setPresentedStatus(session, presenter, 'paused');
-          await store.save(session);
-          presenter.stop();
-          terminal.write(
-            `\nChat saved. Resume with:\n  agent-bridge chat --resume ${session.id}\n`,
-          );
+          await pauseAndLeave();
           return;
         }
         if (command.kind === 'done') {
@@ -1150,12 +1175,15 @@ export async function runInteractiveChat({
               pending.stage === 'awaiting-peer'
                 ? `${missingAgent}'s peer response`
                 : `${missingAgent}'s reciprocal confirmation`;
-            if (
-              !(await confirm(
-                `Complete this chat without ${missingStage}? [y/N]: `,
-                false,
-              ))
-            ) {
+            const completeAnyway = await confirm(
+              `Complete this chat without ${missingStage}? [y/N]: `,
+              false,
+            );
+            if (completeAnyway === 'end-of-input') {
+              await pauseAndLeave();
+              return;
+            }
+            if (completeAnyway === 'no') {
               writeSupplemental(
                 'Completion cancelled. The unfinished exchange remains saved.\n',
               );
@@ -1230,7 +1258,15 @@ ${
       : ''
 }
 `);
-          if (!(await confirm('Start automatic conversation? [Y/n]: ', true))) {
+          const startAutomatic = await confirm(
+            'Start automatic conversation? [Y/n]: ',
+            true,
+          );
+          if (startAutomatic === 'end-of-input') {
+            await pauseAndLeave();
+            return;
+          }
+          if (startAutomatic === 'no') {
             writeSupplemental('Automatic conversation cancelled.\n');
             continue;
           }
@@ -1319,12 +1355,15 @@ ${
 This project has uncommitted changes. A safe isolated workspace cannot include
 them; it starts from committed HEAD and leaves those changes untouched.
 `);
-            if (
-              !(await confirm(
-                'Continue explicitly from committed HEAD? [y/N]: ',
-                false,
-              ))
-            ) {
+            const fromHead = await confirm(
+              'Continue explicitly from committed HEAD? [y/N]: ',
+              false,
+            );
+            if (fromHead === 'end-of-input') {
+              await pauseAndLeave();
+              return;
+            }
+            if (fromHead === 'no') {
               writeSupplemental(
                 'Editing cancelled. Commit or stash those changes, then use /edit again.\n',
               );
@@ -1344,10 +1383,15 @@ them; it starts from committed HEAD and leaves those changes untouched.
                 `  • ${[verification.command, ...verification.args].join(' ')}\n`,
               );
             }
-            workflowOptions.trustProjectConfig = await confirm(
+            const trustVerification = await confirm(
               'Allow these commands to run after edits? [y/N]: ',
               false,
             );
+            if (trustVerification === 'end-of-input') {
+              await pauseAndLeave();
+              return;
+            }
+            workflowOptions.trustProjectConfig = trustVerification === 'yes';
           }
           writeSupplemental(
             `\n${formatWorkflowPreflight({
@@ -1357,7 +1401,15 @@ them; it starts from committed HEAD and leaves those changes untouched.
               preflight,
             })}\n`,
           );
-          if (!(await confirm('Start this workflow? [Y/n]: ', true))) {
+          const startWorkflow = await confirm(
+            'Start this workflow? [Y/n]: ',
+            true,
+          );
+          if (startWorkflow === 'end-of-input') {
+            await pauseAndLeave();
+            return;
+          }
+          if (startWorkflow === 'no') {
             writeSupplemental(
               'Workflow cancelled. The chat is still active and no files were changed.\n',
             );

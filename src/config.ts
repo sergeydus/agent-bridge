@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 
 import { writePrivateFileAtomic } from './filesystem.ts';
-import type { UiMode } from './terminal-capabilities.ts';
+import { isUiMode, type UiMode } from './terminal-capabilities.ts';
 
 const MAX_RECENT_PROJECTS = 8;
 
@@ -44,7 +44,7 @@ function isPresentationPreferences(
     ) &&
     typeof candidate.screenReader === 'boolean' &&
     (candidate.color === undefined || typeof candidate.color === 'boolean') &&
-    ['plain', 'enhanced', 'auto'].includes(String(candidate.ui))
+    isUiMode(candidate.ui)
   );
 }
 
@@ -70,7 +70,7 @@ function migratePresentation(
     ) ||
     typeof candidate.screenReader !== 'boolean' ||
     typeof candidate.noColor !== 'boolean' ||
-    !['plain', 'enhanced', 'auto'].includes(String(candidate.ui))
+    !isUiMode(candidate.ui)
   ) {
     return undefined;
   }

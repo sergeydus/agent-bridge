@@ -119,8 +119,16 @@ paired result until another pair begins. The transcript's latest-pair field is
 historical and continues to report the stored completed or abandoned record.
 
 Completed sessions remain reopenable. `/pause`, Ctrl+D, and idle interruption
-leave the session resumable. Ctrl+C during active provider work cancels that
-operation and returns to the saved chat; a second idle Ctrl+C pauses it.
+leave the session resumable. Ctrl+D pauses at every prompt, including each
+confirmation: end of input is never read as consent, so it can neither approve
+a question that defaults to yes nor answer one that defaults to no. Ctrl+C
+during active provider work cancels that operation and returns to the saved
+chat; a second idle Ctrl+C pauses it.
+
+Every confirmation accepts `y`, `yes`, `n`, `no`, or an empty answer that takes
+the stated default. Any other non-empty answer is asked again rather than being
+read as a refusal, matching the wizard so the two novice entry points cannot
+interpret the same typo differently.
 `/done` marks it complete. With unfinished provider work it first asks whether
 to record the exchange as abandoned, defaulting to no. With `--no-transcript`,
 the active checkpoint still exists for recovery but both files are deleted

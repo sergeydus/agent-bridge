@@ -1,6 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve, win32 } from 'node:path';
 
+import { hasOnlyKeys, isRecord, isStringArray } from './validation.ts';
+
 export interface VerificationCommand {
   command: string;
   args: string[];
@@ -23,23 +25,6 @@ const EMPTY_PROJECT_CONFIG: ProjectConfig = {
   verification: [],
   protectedPaths: [],
 };
-
-function isStringArray(value: unknown): value is string[] {
-  return (
-    Array.isArray(value) && value.every((item) => typeof item === 'string')
-  );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasOnlyKeys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
-}
 
 export function isSafeProtectedPath(value: unknown): value is string {
   if (

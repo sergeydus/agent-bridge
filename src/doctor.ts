@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 
+import { errorMessage } from './core.ts';
 import type { AppPaths } from './paths.ts';
 import { combinedProcessOutput, runProcess } from './process.ts';
 import {
@@ -27,10 +28,6 @@ async function settle<T>(
   } catch (reason) {
     return { status: 'rejected', reason };
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 export async function runDoctor({

@@ -2,9 +2,22 @@ import { randomUUID } from 'node:crypto';
 
 import { sanitizeTerminalText } from './terminal-text.ts';
 
-export type AgentName = 'codex' | 'claude';
-export type WorkflowKind = 'review' | 'fixed' | 'collaborative';
-export type AgentDecision = 'done' | 'continue';
+/**
+ * Closed vocabularies are declared once as a value and the type is derived from
+ * it, rather than the reverse. Runtime validators need the list at runtime —
+ * checkpoints, chat sessions, and CLI flags all re-check these at their
+ * boundaries — and a hand-written union beside a hand-written array drifts
+ * silently: the type still compiles while a validator rejects a value the CLI
+ * accepts. Adding a member here reaches every check that uses these.
+ */
+export const AGENT_NAMES = ['codex', 'claude'] as const;
+export type AgentName = (typeof AGENT_NAMES)[number];
+
+export const WORKFLOW_KINDS = ['review', 'fixed', 'collaborative'] as const;
+export type WorkflowKind = (typeof WORKFLOW_KINDS)[number];
+
+export const AGENT_DECISIONS = ['done', 'continue'] as const;
+export type AgentDecision = (typeof AGENT_DECISIONS)[number];
 export type PairedExchangeStatus =
   | 'none'
   | 'pending-peer'
@@ -14,23 +27,49 @@ export type PairedExchangeStatus =
   | 'confirmed'
   | 'abandoned';
 export type PendingExchangeStage = 'awaiting-peer' | 'awaiting-confirmation';
-export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-export type ProjectKind = 'git' | 'directory';
+/**
+ * Which levels a given model actually accepts is the provider's decision, not
+ * this list's. These are the levels Agent Bridge will pass through.
+ */
+export const REASONING_EFFORTS = [
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+export const PROJECT_KINDS = ['git', 'directory'] as const;
+export type ProjectKind = (typeof PROJECT_KINDS)[number];
 export type RunOutcome =
   | 'agreed'
   | 'completed-fixed-rounds'
   | 'agreement-cap-reached'
   | 'failed'
   | 'cancelled';
-export type RunStatus =
-  | 'created'
-  | 'planning'
-  | 'implementing'
-  | 'reviewing'
-  | 'synthesizing'
-  | 'completed'
-  | 'failed'
-  | 'cancelled';
+export const RUN_STATUSES = [
+  'created',
+  'planning',
+  'implementing',
+  'reviewing',
+  'synthesizing',
+  'completed',
+  'failed',
+  'cancelled',
+] as const;
+export type RunStatus = (typeof RUN_STATUSES)[number];
+
+/**
+ * A run that will not continue. Resume refuses one, run management may delete
+ * or prune one, and `latestIncomplete` skips one — three decisions that must
+ * agree on which statuses are terminal.
+ */
+const FINISHED_RUN_STATUSES: readonly RunStatus[] = ['completed', 'cancelled'];
+
+export function isFinishedRunStatus(status: RunStatus): boolean {
+  return FINISHED_RUN_STATUSES.includes(status);
+}
 
 /** How a run's own completion step resolved. */
 export type CompletionOutcome =
@@ -277,8 +316,42 @@ export function describePairedExchangeStatus(
   }
 }
 
+export function isAgentName(value: unknown): value is AgentName {
+  return AGENT_NAMES.includes(value as AgentName);
+}
+
+export function isAgentDecision(value: unknown): value is AgentDecision {
+  return AGENT_DECISIONS.includes(value as AgentDecision);
+}
+
+export function isWorkflowKind(value: unknown): value is WorkflowKind {
+  return WORKFLOW_KINDS.includes(value as WorkflowKind);
+}
+
+export function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return REASONING_EFFORTS.includes(value as ReasoningEffort);
+}
+
+export function isProjectKind(value: unknown): value is ProjectKind {
+  return PROJECT_KINDS.includes(value as ProjectKind);
+}
+
+export function isRunStatus(value: unknown): value is RunStatus {
+  return RUN_STATUSES.includes(value as RunStatus);
+}
+
 export function otherAgent(agent: AgentName): AgentName {
   return agent === 'codex' ? 'claude' : 'codex';
+}
+
+/**
+ * The human-readable name for an agent. A deterministic enum label like
+ * `describePairedExchangeStatus`, not a rendering decision: both terminal
+ * renderers, the reporter, and the workflow preview must all spell an agent the
+ * same way, so there is one definition rather than one per presenter.
+ */
+export function agentLabel(agent: AgentName): string {
+  return agent === 'codex' ? 'Codex' : 'Claude';
 }
 
 export function editorForRound(

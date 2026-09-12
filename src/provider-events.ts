@@ -1,5 +1,6 @@
 import type { ResponseKind } from './response.ts';
 import { parseProviderResponse, type AgentResponse } from './response.ts';
+import { isRecord } from './validation.ts';
 
 const MAX_JSONL_LINE_CHARS = 2_000_000;
 
@@ -16,10 +17,6 @@ export type ProviderEvent =
     };
 
 export type ProviderEventSink = (event: ProviderEvent) => void;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
 
 function parseJsonLine(line: string): Record<string, unknown> {
   let value: unknown;

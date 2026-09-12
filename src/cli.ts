@@ -8,8 +8,10 @@ import { fileURLToPath } from 'node:url';
 import { finishIsolatedRun, recordRunCompletion } from './artifacts.ts';
 import { runInteractiveChat } from './chat.ts';
 import {
+  AGENT_NAMES,
   completionOutcomeFailed,
   errorMessage,
+  isFinishedRunStatus,
   makeRunId,
   summarizePorcelainStatus,
   type AgentName,
@@ -125,7 +127,7 @@ async function main(): Promise<void> {
     if (!resumedRun) {
       throw new Error('There is no incomplete run to continue.');
     }
-    if (['completed', 'cancelled'].includes(resumedRun.status)) {
+    if (isFinishedRunStatus(resumedRun.status)) {
       throw new Error(`Run ${resumedRun.id} is already ${resumedRun.status}.`);
     }
     options.task = resumedRun.task;
@@ -668,7 +670,7 @@ continue from its actual state instead of repeating changes blindly.`;
                 await loadInstructionContext(originalCwd)
               ).files.map((file) => file.path),
               verificationCommands,
-              providers: ['codex', 'claude'],
+              providers: [...AGENT_NAMES],
             },
             null,
             2,

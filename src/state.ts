@@ -3,8 +3,15 @@ import { join } from 'node:path';
 
 import {
   completionOutcomeRequiresReason,
+  isAgentDecision,
+  isAgentName,
   isCompletionOutcome,
+  isFinishedRunStatus,
+  isProjectKind,
+  isReasoningEffort,
+  isRunStatus,
   isSafeRunId,
+  isWorkflowKind,
   MAX_COMPLETION_REASON_CHARS,
   type AgentDecision,
   type AgentName,
@@ -22,6 +29,7 @@ import {
   type VerificationCommand,
 } from './project-config.ts';
 import { sanitizeTerminalText } from './terminal-text.ts';
+import { hasOnlyKeys, isIsoDateTime, isRecord } from './validation.ts';
 
 const MAX_RUN_STATE_BYTES = 50_000_000;
 
@@ -112,31 +120,6 @@ function isString(value: unknown): value is string {
   return typeof value === 'string';
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
-
-function hasOnlyKeys(
-  value: Record<string, unknown>,
-  allowed: readonly string[],
-): boolean {
-  return Object.keys(value).every((key) => allowed.includes(key));
-}
-
-function isIsoDateTime(value: unknown): value is string {
-  if (typeof value !== 'string') {
-    return false;
-  }
-  const timestamp = Date.parse(value);
-  return (
-    !Number.isNaN(timestamp) && new Date(timestamp).toISOString() === value
-  );
-}
-
-function isAgentDecision(value: unknown): value is AgentDecision {
-  return value === 'done' || value === 'continue';
-}
-
 function isSavedRound(value: unknown): value is SavedRound {
   if (!isRecord(value)) {
     return false;
@@ -190,7 +173,7 @@ function isPendingReview(value: unknown): value is PendingReview {
   return (
     Number.isInteger(pending.round) &&
     (pending.round ?? 0) >= 1 &&
-    (pending.implementer === 'codex' || pending.implementer === 'claude') &&
+    isAgentName(pending.implementer) &&
     isString(pending.implementerResponse) &&
     (pending.implementerDecision === undefined ||
       isAgentDecision(pending.implementerDecision)) &&
@@ -266,10 +249,8 @@ function hasValidWorkflow(
       'firstAgent',
       'maxRounds',
     ]) &&
-    ['review', 'fixed', 'collaborative'].includes(workflow?.kind ?? '') &&
-    (workflow?.firstAgent === undefined ||
-      workflow.firstAgent === 'codex' ||
-      workflow.firstAgent === 'claude') &&
+    isWorkflowKind(workflow?.kind) &&
+    (workflow?.firstAgent === undefined || isAgentName(workflow.firstAgent)) &&
     Number.isInteger(workflow?.maxRounds) &&
     (workflow?.maxRounds ?? 0) >= 1 &&
     (workflow?.maxRounds ?? 0) <= 20
@@ -282,17 +263,7 @@ function hasValidBaseFields(run: Partial<SavedRun>): boolean {
     isSafeRunId(run.id) &&
     isIsoDateTime(run.createdAt) &&
     isIsoDateTime(run.updatedAt) &&
-    isString(run.status) &&
-    [
-      'created',
-      'planning',
-      'implementing',
-      'reviewing',
-      'synthesizing',
-      'completed',
-      'failed',
-      'cancelled',
-    ].includes(run.status) &&
+    isRunStatus(run.status) &&
     isString(run.task) &&
     isString(run.originalCwd) &&
     isString(run.agentCwd) &&
@@ -358,18 +329,16 @@ export function isSavedRun(value: unknown): value is SavedRun {
     run.version === RUN_STATE_VERSION &&
     hasValidBaseFields(run) &&
     hasConsistentCompletion(run) &&
-    (run.projectKind === 'git' || run.projectKind === 'directory') &&
+    isProjectKind(run.projectKind) &&
     isString(run.outputDirectory) &&
     (run.recoveryPatchPath === undefined || isString(run.recoveryPatchPath)) &&
     (run.baseRevision === undefined || isString(run.baseRevision)) &&
     (run.currentRevision === undefined || isString(run.currentRevision)) &&
-    (run.judge === 'codex' || run.judge === 'claude') &&
+    isAgentName(run.judge) &&
     (run.codexModel === undefined || isString(run.codexModel)) &&
     (run.claudeModel === undefined || isString(run.claudeModel)) &&
-    (run.codexEffort === undefined ||
-      ['low', 'medium', 'high', 'xhigh', 'max'].includes(run.codexEffort)) &&
-    (run.claudeEffort === undefined ||
-      ['low', 'medium', 'high', 'xhigh', 'max'].includes(run.claudeEffort)) &&
+    (run.codexEffort === undefined || isReasoningEffort(run.codexEffort)) &&
+    (run.claudeEffort === undefined || isReasoningEffort(run.claudeEffort)) &&
     Number.isInteger(run.retries) &&
     (run.retries ?? -1) >= 0 &&
     (run.retries ?? 4) <= 3 &&
@@ -530,9 +499,6 @@ export class RunStateStore {
 
   async latestIncomplete(): Promise<SavedRun | null> {
     const runs = await this.list();
-    return (
-      runs.find((run) => !['completed', 'cancelled'].includes(run.status)) ??
-      null
-    );
+    return runs.find((run) => !isFinishedRunStatus(run.status)) ?? null;
   }
 }
