@@ -9,26 +9,18 @@ import { sanitizeTerminalText } from './terminal-text.ts';
 
 export class ProgressReporter {
   #startedAt = Date.now();
-  #verbose: boolean;
   #silent: boolean;
   #screenReader: boolean;
 
   constructor({
-    verbose = false,
     silent = false,
     screenReader = false,
   }: {
-    verbose?: boolean;
     silent?: boolean;
     screenReader?: boolean;
   } = {}) {
-    this.#verbose = verbose;
     this.#silent = silent;
     this.#screenReader = screenReader;
-  }
-
-  get verbose(): boolean {
-    return this.#verbose;
   }
 
   write(text: string): void {
@@ -83,6 +75,12 @@ export class ProgressReporter {
 
   agentAction(agent: AgentName, action: string): void {
     this.phase(`${agentLabel(agent)} ${action}`);
+  }
+
+  agentResponse(agent: AgentName, text: string): void {
+    this.write(
+      `\n${agentLabel(agent)} response:\n${sanitizeTerminalText(text)}\n`,
+    );
   }
 
   elapsed(): string {

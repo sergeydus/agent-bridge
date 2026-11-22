@@ -104,7 +104,7 @@ Options:
   --resume <id|latest>    Continue a run, or reopen a chat in chat mode
   --retries <number>      Retry transient read-only failures, default: 1
   --timeout-minutes <n>   Per-agent call timeout, default: 30
-  --verbose               Show provider diagnostic output
+  --verbose               Show provider diagnostics; full responses are always shown
   --judge codex|claude    Synthesis agent, default: codex
   --codex-model <name>    Optional Codex model override
   --claude-model <name>   Optional Claude model override

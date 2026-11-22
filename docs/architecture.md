@@ -89,6 +89,13 @@ progress formatting lives outside provider orchestration, while provider
 adapters receive only the accessibility capability they need to construct
 their own CLI arguments.
 
+The one-shot orchestrator reports complete final responses after checkpointing
+each planning round or implementation/review cycle. `ProgressReporter` emits
+each response as one speaker-labeled block through the shared terminal
+sanitizer and honors silent and screen-reader output. Conversation visibility
+does not depend on `--verbose`, which controls provider diagnostics. Enabling
+it does not add a second copy of the final response blocks.
+
 Interactive chat dispatches semantic presentation events into an in-memory,
 renderer-neutral view model. The current plain renderer consumes those same
 events to preserve append-only and screen-reader output. The model is bounded,
