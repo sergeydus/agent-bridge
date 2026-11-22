@@ -103,6 +103,78 @@ test('real chat terminal queues complete lines until the next prompt', async () 
   }
 });
 
+const CURSOR_UP = '\u001B[1A';
+const REPAINT_DRAFT_HERE = '\u001B[1G\u001B[0J\nYou > draft';
+
+test('prompt repaint after coordinator output keeps the output intact', async () => {
+  const input = new PassThrough();
+  const output = Object.assign(new PassThrough(), {
+    isTTY: true,
+    columns: 80,
+    rows: 24,
+  });
+  const written: Buffer[] = [];
+  output.on('data', (chunk: Buffer) => written.push(chunk));
+  const terminal = createChatTerminal({ input, output });
+  try {
+    void terminal.prompt('\nYou > ');
+    input.write('draft');
+    await waitForImmediate();
+    // A multi-row prompt repaint makes readline remember that the cursor sits
+    // one row below where the repaint started.
+    terminal.redrawPrompt();
+    written.length = 0;
+
+    terminal.write('\nStatus: active\nPresentation: enhanced terminal\n');
+    terminal.redrawPrompt();
+    const repaint = Buffer.concat(written).toString();
+    const afterOutput = repaint.slice(
+      repaint.indexOf('Presentation: enhanced terminal\n') +
+        'Presentation: enhanced terminal\n'.length,
+    );
+
+    // Moving up before clearing would erase "Presentation:" on a real
+    // terminal, while a byte-transparent PTY would still show it in the log.
+    assert.equal(afterOutput.includes(CURSOR_UP), false);
+    assert.equal(afterOutput.startsWith(REPAINT_DRAFT_HERE), true, afterOutput);
+  } finally {
+    terminal.close();
+  }
+});
+
+test('queued prompt labels do not leave a stale repaint offset', async () => {
+  const input = new PassThrough();
+  const output = Object.assign(new PassThrough(), {
+    isTTY: true,
+    columns: 80,
+    rows: 24,
+  });
+  const written: Buffer[] = [];
+  output.on('data', (chunk: Buffer) => written.push(chunk));
+  const terminal = createChatTerminal({ input, output });
+  try {
+    const first = terminal.prompt('\nYou > ');
+    input.write('/help\r');
+    assert.equal(await first, '/help');
+    // Typed while no prompt is pending: one queued line and a partial draft,
+    // whose repaint leaves readline one row below where it started.
+    input.write('/status\r');
+    input.write('draft');
+    await waitForImmediate();
+    terminal.redrawPrompt();
+    written.length = 0;
+
+    // The queued line is answered without readline painting its label.
+    assert.equal(await terminal.prompt('\nYou > '), '/status');
+    terminal.redrawPrompt();
+    const repaint = Buffer.concat(written).toString();
+    assert.equal(repaint.includes(CURSOR_UP), false, repaint);
+    assert.equal(repaint, `\nYou > ${REPAINT_DRAFT_HERE}\u001B[12G`);
+  } finally {
+    terminal.close();
+  }
+});
+
 test('chat terminal delegates active prompt lifecycle to readline', async () => {
   const harness = createFakeTerminal();
   const controller = new AbortController();

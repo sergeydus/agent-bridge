@@ -48,8 +48,11 @@ enhanced frame repaints that owned buffer, and reopening the next prompt
 preserves its cursor rather than moving insertion to the start of the line.
 Suspending the enhanced renderer suppresses prompt repaint until supplemental
 normal-screen output finishes, after which the next prompt restores the partial
-line below that block. Real-PTY tests cover that ordering, resize, Ctrl+C,
-Ctrl+D, and alternate-screen restoration.
+line below that block. Any coordinator output written outside readline resets
+readline's record of where it last painted the prompt, so the next repaint
+starts at the cursor instead of climbing into, and erasing, the final line of
+that output. Real-PTY tests cover that ordering, resize, Ctrl+C, Ctrl+D, and
+alternate-screen restoration.
 
 If interruption occurs after the first response, the checkpoint records the
 pending peer and exact saved message. If it occurs after two provisional
@@ -237,8 +240,9 @@ The enhanced renderer has compact, stacked, and wide layouts. It redraws on
 resize, coalesces text-delta redraws, uses low-frequency activity animation,
 shows current model, phase, elapsed time, available token usage, paired-exchange
 state, queued-input count, and safety mode, neutralizes control sequences from
-conversation text, leaves one terminal row for the existing readline prompt,
-and never captures the mouse.
+conversation text, leaves the bottom two terminal rows for the existing
+readline prompt (whose label starts with a separating newline), and never
+captures the mouse.
 After an exchange, it prints the complete responses on the normal screen so
 native terminal scrollback remains available, then reconstructs its live frame
 before the next agent starts. It also suspends and restores the normal screen

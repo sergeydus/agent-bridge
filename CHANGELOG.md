@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Fixed the chat prompt repaint erasing the last line of output written just
+  before it, such as the `Presentation:` line of `/status` while partial input
+  was pending. Readline's record of where it last painted the prompt is now
+  reset whenever the coordinator writes outside readline. The enhanced frame
+  now leaves two rows for the prompt so a full frame no longer scrolls its
+  heading away on repaint. Real-PTY tests assert on a replayed screen model,
+  which makes them reliable under Windows ConPTY.
 - Advanced interactive chat checkpoints to version 4 with validated staged
   pending exchanges and explicit open, confirmed, or abandoned exchange
   provenance. Versions 1 through 3 migrate conservatively; ambiguous legacy
