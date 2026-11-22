@@ -52,48 +52,53 @@ function initializeCommittedRepository(repository: string): void {
 // enabled at startup; it only stops what this file spawns from reporting.
 delete process.env.NODE_V8_COVERAGE;
 
-test('collaborative dry run plans read-only and alternates write access', () => {
-  const repository = mkdtempSync(`${tmpdir()}/agent-bridge-cli-`);
-  const bridgeHome = mkdtempSync(`${tmpdir()}/agent-bridge-home-`);
-  try {
-    initializeCommittedRepository(repository);
+for (const verbose of [false, true]) {
+  test(`collaborative dry run prints full responses with verbose=${verbose} and alternates write access`, () => {
+    const repository = mkdtempSync(`${tmpdir()}/agent-bridge-cli-`);
+    const bridgeHome = mkdtempSync(`${tmpdir()}/agent-bridge-home-`);
+    try {
+      initializeCommittedRepository(repository);
 
-    const result = spawnSync(
-      process.execPath,
-      [
-        'bin/agent-bridge.mjs',
-        '--task',
-        'Implement a harmless test change',
-        '--cwd',
-        repository,
-        '--collaborative',
-        'claude',
-        '--max-rounds',
-        '2',
-        '--dry-run',
-        '--verbose',
-      ],
-      {
-        cwd: bridgeRoot,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          AGENT_BRIDGE_HOME: bridgeHome,
+      const result = spawnSync(
+        process.execPath,
+        [
+          'bin/agent-bridge.mjs',
+          '--task',
+          'Implement a harmless test change',
+          '--cwd',
+          repository,
+          '--collaborative',
+          'claude',
+          '--max-rounds',
+          '2',
+          '--dry-run',
+          ...(verbose ? ['--verbose'] : []),
+        ],
+        {
+          cwd: bridgeRoot,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            AGENT_BRIDGE_HOME: bridgeHome,
+          },
         },
-      },
-    );
+      );
 
-    assert.equal(result.status, 0, result.stderr);
-    assert.match(result.stdout, /Planning round 1\/2/);
-    assert.match(result.stdout, /--sandbox read-only/);
-    assert.match(result.stdout, /--sandbox workspace-write/);
-    assert.match(result.stdout, /Claude is editing/);
-    assert.match(result.stdout, /Codex is editing/);
-  } finally {
-    rmSync(repository, { recursive: true, force: true });
-    rmSync(bridgeHome, { recursive: true, force: true });
-  }
-});
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(result.stdout, /Planning round 1\/2/);
+      assert.match(result.stdout, /--sandbox read-only/);
+      assert.match(result.stdout, /--sandbox workspace-write/);
+      assert.match(result.stdout, /Claude is editing/);
+      assert.match(result.stdout, /Codex is editing/);
+      assert.equal(result.stdout.match(/Codex response:/g)?.length, 4);
+      assert.equal(result.stdout.match(/Claude response:/g)?.length, 4);
+      assert.equal(result.stdout.match(/Decision: CONTINUE/g)?.length, 8);
+    } finally {
+      rmSync(repository, { recursive: true, force: true });
+      rmSync(bridgeHome, { recursive: true, force: true });
+    }
+  });
+}
 
 test('scripted isolated editing requires explicit acknowledgement of dirty HEAD', () => {
   const repository = mkdtempSync(`${tmpdir()}/agent-bridge-cli-dirty-`);

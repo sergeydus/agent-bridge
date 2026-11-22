@@ -95,6 +95,11 @@ each text update into a complete, speaker-labeled block so their output cannot
 interleave. The final schema-validated response is still the only result that
 can drive agreement or workflow state.
 
+Planning, implementation, and review workflows also print both agents' complete
+final responses after each completed planning round or cycle, with speaker
+labels and structured decisions. This includes screen-reader output.
+`--verbose` adds provider diagnostics; it is not needed to read full responses.
+
 Inside the chat:
 
 ```text
@@ -585,7 +590,7 @@ chat                     Open interactive human-guided chat mode
 --discard-workspace <id> Safely remove a completed run's isolated worktree
 --prune-runs <days>      Prune old safe-to-delete runs
 --dry-run                Show provider commands without calling agents
---verbose                Show provider diagnostic output
+--verbose                Show provider diagnostics; full responses are always shown
 --doctor                 Check versions, auth, storage, and required features
 ```
 

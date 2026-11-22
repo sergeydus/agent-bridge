@@ -12,7 +12,6 @@ import {
 } from './prompts.ts';
 import type { AgentResponse, ResponseKind } from './response.ts';
 import type { PendingReview, SavedRound } from './state.ts';
-import { sanitizeTerminalText } from './terminal-text.ts';
 import type { ProgressReporter } from './ui.ts';
 
 export interface OrchestrationCheckpoint {
@@ -187,12 +186,8 @@ ${task}`;
       codexPrevious = codex;
       claudePrevious = claude;
       await save('planning');
-      reporter.success(`Codex: ${conciseAnswer(codex)}`);
-      reporter.success(`Claude: ${conciseAnswer(claude)}`);
-      if (reporter.verbose) {
-        console.log('\nCodex plan:\n', sanitizeTerminalText(codex));
-        console.log('\nClaude plan:\n', sanitizeTerminalText(claude));
-      }
+      reporter.agentResponse('codex', codex);
+      reporter.agentResponse('claude', claude);
     }
 
     handoff = `Final planning responses:
@@ -412,12 +407,8 @@ ${verification}`,
     claudePrevious = claude;
     await save('reviewing');
 
-    reporter.success(`Codex: ${conciseAnswer(codex)}`);
-    reporter.success(`Claude: ${conciseAnswer(claude)}`);
-    if (reporter.verbose) {
-      console.log('\nCodex:\n', sanitizeTerminalText(codex));
-      console.log('\nClaude:\n', sanitizeTerminalText(claude));
-    }
+    reporter.agentResponse('codex', codex);
+    reporter.agentResponse('claude', claude);
 
     if (
       untilAgreement &&

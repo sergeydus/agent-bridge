@@ -304,7 +304,6 @@ async function main(): Promise<void> {
   let ownsRunState = options.dryRun;
   let completionRecorded = false;
   const reporter = new ProgressReporter({
-    verbose: options.verbose,
     screenReader: options.screenReader,
   });
   const abortController = new AbortController();
