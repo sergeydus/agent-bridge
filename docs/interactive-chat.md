@@ -104,7 +104,8 @@ Every active session has:
 - saved project type, provider settings, retry limit, and timeout;
 - saved screen-reader, color, and interface preferences;
 - independent automatic-chat and editing-workflow limits;
-- linked workflow results.
+- linked workflow metadata: sequence, timestamps, mode, optional first agent,
+  and exit code; structured run results and artifact links are not stored today.
 
 Chat checkpoints use format version 4, whose exchange records distinguish
 pending peer work, pending confirmation work, settled results, and explicit
