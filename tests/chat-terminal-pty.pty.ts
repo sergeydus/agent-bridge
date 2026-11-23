@@ -220,10 +220,13 @@ function promptFollowedByInput(prompt: string, input: string): RegExp {
  * render pass, so text drawn and then erased may never reach the stream.
  * Asserting on the rendered screen holds for both kinds of PTY.
  */
+/** One screen row; `wrapped` marks a row that continues on the next one. */
+type ScreenRow = string[] & { wrapped?: boolean };
+
 class TerminalScreen {
   #size: ScreenSize;
-  #main: string[][];
-  #alternate: string[][] | undefined;
+  #main: ScreenRow[];
+  #alternate: ScreenRow[] | undefined;
   #savedCursor: { row: number; column: number } | undefined;
   #row = 0;
   #column = 0;
@@ -242,16 +245,39 @@ class TerminalScreen {
     return this.#lines.map((line) => line.join('').trimEnd());
   }
 
+  /**
+   * Rows joined where the terminal wrapped a line that was too long for the
+   * width, so a long value reads as the one line the application wrote.
+   */
+  logicalLines(): string[] {
+    const logical: string[] = [];
+    let current = '';
+    for (const line of this.#lines) {
+      current += line.join('');
+      if (!line.wrapped) {
+        logical.push(current.trimEnd());
+        current = '';
+      }
+    }
+    if (current) {
+      logical.push(current.trimEnd());
+    }
+    return logical;
+  }
+
   text(): string {
     return this.lines().join('\n');
   }
 
   resize(size: ScreenSize): void {
-    const fit = (lines: string[][]): string[][] =>
+    const fit = (lines: ScreenRow[]): ScreenRow[] =>
       Array.from({ length: size.rows }, (_, row) =>
-        Array.from(
-          { length: size.columns },
-          (_, column) => lines[row]?.[column] ?? ' ',
+        Object.assign(
+          Array.from(
+            { length: size.columns },
+            (_, column) => lines[row]?.[column] ?? ' ',
+          ),
+          { wrapped: lines[row]?.wrapped },
         ),
       );
     this.#size = { ...size };
@@ -280,18 +306,22 @@ class TerminalScreen {
     }
   }
 
-  static #blankLines(size: ScreenSize): string[][] {
+  static #blankLines(size: ScreenSize): ScreenRow[] {
     return Array.from({ length: size.rows }, () =>
       Array.from({ length: size.columns }, () => ' '),
     );
   }
 
-  get #lines(): string[][] {
+  get #lines(): ScreenRow[] {
     return this.#alternate ?? this.#main;
   }
 
   #print(character: string): void {
     if (this.#pendingWrap) {
+      const wrapping = this.#lines[this.#row];
+      if (wrapping) {
+        wrapping.wrapped = true;
+      }
       this.#column = 0;
       this.#lineFeed();
     }
@@ -333,6 +363,9 @@ class TerminalScreen {
     const line = this.#lines[row];
     for (let column = from; line && column < to; column += 1) {
       line[column] = ' ';
+    }
+    if (line && to >= this.#size.columns) {
+      line.wrapped = false;
     }
   }
 
@@ -511,6 +544,35 @@ test('screen model applies erasing, wrapping, scrolling, and resizing', () => {
   assert.deepEqual(screen.lines(), ['', ' xy', 'abcd', 'efg']);
 });
 
+test('screen model joins rows the terminal wrapped, not rows ended by newline', () => {
+  const screen = new TerminalScreen({ columns: 10, rows: 5 });
+  screen.write('Project: /var/folders/x (directory)\r\nMsgs: 2');
+  assert.deepEqual(screen.lines(), [
+    'Project: /',
+    'var/folder',
+    's/x (direc',
+    'tory)',
+    'Msgs: 2',
+  ]);
+  assert.deepEqual(screen.logicalLines(), [
+    'Project: /var/folders/x (directory)',
+    'Msgs: 2',
+  ]);
+
+  // Clearing a wrapped row's tail ends the continuation.
+  screen.write('\u001B[1;1H\u001B[K');
+  assert.deepEqual(screen.logicalLines(), [
+    '',
+    'var/folders/x (directory)',
+    'Msgs: 2',
+  ]);
+
+  // An exactly full row only wraps when more text follows it.
+  const exact = new TerminalScreen({ columns: 5, rows: 3 });
+  exact.write('12345\r\nnext');
+  assert.deepEqual(exact.logicalLines(), ['12345', 'next', '']);
+});
+
 test('PTY prompt matching does not cross an earlier submitted command', () => {
   const promptWithCursorSpacing = 'You >\r\n\r\ndraft';
   const submittedCommandThenInput = 'You > /status\r\n\r\ndraft';
@@ -654,7 +716,7 @@ ptyTest(
         session,
         'the complete status block with the partial input below it',
         (current) => {
-          const lines = current.lines();
+          const lines = current.logicalLines();
           const last = lastStatusLine(lines);
           return (
             last >= 0 &&
@@ -662,7 +724,9 @@ ptyTest(
           );
         },
       );
-      const lines = screen.lines();
+      // A long project path can wrap at the terminal width, as macOS temp
+      // paths do; read the block as the lines the application wrote.
+      const lines = screen.logicalLines();
       const first = lines.findIndex((line) => line.startsWith('Session: '));
       const last = lastStatusLine(lines);
       // The block is on the restored normal screen, intact and contiguous,
