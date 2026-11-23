@@ -55,6 +55,12 @@ export interface ChatReadlineOptions {
 export interface ChatReadline {
   readonly line: string;
   readonly cursor: number;
+  /**
+   * Node's readline records how many rows above the cursor its last prompt
+   * repaint started, and the next repaint moves up that far before clearing.
+   * The record is only true while nothing else has written to the terminal.
+   */
+  prevRows?: number;
   on(event: 'line', listener: (line: string) => void): this;
   on(event: 'close' | 'SIGINT', listener: () => void): this;
   setPrompt(prompt: string): void;
@@ -307,6 +313,18 @@ export function createChatTerminal({
   const queuedLines: string[] = [];
   let queueObserver: ((count: number) => void) | undefined;
   const reportQueue = (): void => queueObserver?.(queuedLines.length);
+  /**
+   * Output that bypasses readline moves the cursor away from the prompt
+   * readline last painted. Its next repaint would then climb into that output
+   * and erase its final line, so forget the old prompt's rows: the prompt is
+   * repainted from wherever the coordinator's text left the cursor.
+   */
+  const writeOutsideReadline = (text: string): void => {
+    output.write(text);
+    if (interface_.prevRows !== undefined) {
+      interface_.prevRows = 0;
+    }
+  };
   let closed = false;
   let promptInitialized = false;
   let pending:
@@ -346,7 +364,7 @@ export function createChatTerminal({
       if (queued !== undefined) {
         interface_.setPrompt(label);
         promptInitialized = true;
-        output.write(label);
+        writeOutsideReadline(label);
         reportQueue();
         return Promise.resolve(queued);
       }
@@ -379,7 +397,7 @@ export function createChatTerminal({
       });
     },
     write(text) {
-      output.write(text);
+      writeOutsideReadline(text);
     },
     redrawPrompt() {
       if (promptInitialized && !closed) {

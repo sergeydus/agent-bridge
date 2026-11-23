@@ -88,6 +88,35 @@ test('measures graphemes and neutralizes untrusted terminal controls', () => {
   );
 });
 
+test('a full frame leaves the separator and prompt rows to readline', () => {
+  const model = createTerminalViewModel({
+    session: {
+      id: 'chat-20260729-abcdef12',
+      projectLabel: 'sample-project',
+      status: 'active',
+    },
+    messages: Array.from({ length: 60 }, (_, index) => ({
+      sequence: index + 1,
+      createdAt: new Date(0).toISOString(),
+      role: 'user' as const,
+      text: `Message ${index + 1}`,
+    })),
+  });
+  for (const dimensions of [
+    { columns: 40, rows: 20 },
+    { columns: 80, rows: 24 },
+    { columns: 120, rows: 30 },
+  ]) {
+    const lines = visibleLines(renderEnhancedFrame(model, dimensions));
+    // The frame ends with a newline and the prompt label starts with one, so
+    // a long conversation must stop two rows short of the bottom; otherwise
+    // the prompt repaint scrolls the heading away.
+    assert.ok(lines.length <= dimensions.rows - 2);
+    assert.ok(lines.length >= dimensions.rows - 3);
+    assert.match(lines[0] ?? '', /^Agent Bridge/);
+  }
+});
+
 test('renders compact, stacked, and wide frames within terminal bounds', () => {
   const model = viewModel();
   for (const dimensions of [
@@ -97,12 +126,16 @@ test('renders compact, stacked, and wide frames within terminal bounds', () => {
     { columns: 10, rows: 3 },
   ]) {
     const lines = visibleLines(renderEnhancedFrame(model, dimensions));
-    assert.ok(lines.length <= dimensions.rows - 1);
+    // The prompt label starts with a newline: a blank separator row and the
+    // prompt row stay below the frame so repainting it never scrolls.
+    assert.ok(lines.length <= Math.max(1, dimensions.rows - 2));
     assert.ok(
       lines.every((line) => printableWidth(line) <= dimensions.columns),
     );
     assert.match(lines.join('\n'), /Agent Brid/);
-    assert.match(lines.join('\n'), /Claude/);
+    if (dimensions.rows > 3) {
+      assert.match(lines.join('\n'), /Claude/);
+    }
   }
 
   assert.doesNotMatch(

@@ -17,6 +17,13 @@ const LEAVE_ALTERNATE_SCREEN = '\u001B[?1049l';
 const CLEAR_AND_HOME = '\u001B[2J\u001B[H';
 const HOME = '\u001B[H';
 const ERASE_DISPLAY_BELOW = '\u001B[J';
+/**
+ * Rows below the frame that belong to readline: the chat prompt label starts
+ * with a newline, so it occupies a blank separator row and then its own row.
+ * A frame that used either of them would scroll its heading off the screen
+ * every time the prompt is repainted beneath it.
+ */
+const PROMPT_ROWS = 2;
 const STREAM_REDRAW_INTERVAL_MS = 50;
 const ACTIVITY_FRAME_INTERVAL_MS = 250;
 const ACTIVITY_FRAMES = ['⠋', '⠙', '⠹', '⠸'] as const;
@@ -379,24 +386,24 @@ function sessionHeading(model: TerminalViewModel): string {
 function compactFrame(
   model: TerminalViewModel,
   width: number,
-  rows: number,
+  frameRows: number,
 ): string[] {
-  const conversationRows = Math.max(1, rows - 4);
+  const conversationRows = Math.max(1, frameRows - 3);
   return [
     clipLine(sessionHeading(model), width),
     ...conversationLines(model, width, conversationRows),
     ...activityLines(model.activity, width, 1),
     statusLine(model, width),
-  ].slice(0, rows - 1);
+  ].slice(0, frameRows);
 }
 
 function stackedFrame(
   model: TerminalViewModel,
   width: number,
-  rows: number,
+  frameRows: number,
 ): string[] {
   const divider = '─'.repeat(width);
-  const conversationRows = Math.max(1, rows - 10);
+  const conversationRows = Math.max(1, frameRows - 9);
   return [
     fitLine(sessionHeading(model), width),
     divider,
@@ -407,17 +414,17 @@ function stackedFrame(
     ...activityLines(model.activity, width, 2),
     divider,
     statusLine(model, width),
-  ].slice(0, rows - 1);
+  ].slice(0, frameRows);
 }
 
 function wideFrame(
   model: TerminalViewModel,
   width: number,
-  rows: number,
+  frameRows: number,
 ): string[] {
   const leftWidth = Math.max(40, Math.floor(width * 0.68));
   const rightWidth = width - leftWidth - 3;
-  const bodyRows = Math.max(1, rows - 5);
+  const bodyRows = Math.max(1, frameRows - 4);
   const left = [
     'Conversation',
     ...conversationLines(model, leftWidth, bodyRows - 1),
@@ -438,7 +445,7 @@ function wideFrame(
     ...body,
     '─'.repeat(width),
     statusLine(model, width),
-  ].slice(0, rows - 1);
+  ].slice(0, frameRows);
 }
 
 export function renderEnhancedFrame(
@@ -453,12 +460,13 @@ export function renderEnhancedFrame(
     Number.isFinite(dimensions.rows) && dimensions.rows > 0
       ? Math.max(2, Math.floor(dimensions.rows))
       : 24;
+  const frameRows = Math.max(1, rows - PROMPT_ROWS);
   const lines =
     width < 60 || rows < 12
-      ? compactFrame(model, width, rows)
+      ? compactFrame(model, width, frameRows)
       : width < 100
-        ? stackedFrame(model, width, rows)
-        : wideFrame(model, width, rows);
+        ? stackedFrame(model, width, frameRows)
+        : wideFrame(model, width, frameRows);
   return `${CLEAR_AND_HOME}${lines.join('\n')}\n`;
 }
 

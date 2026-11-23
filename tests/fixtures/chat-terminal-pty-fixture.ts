@@ -59,6 +59,9 @@ async function runSignalFixture(): Promise<void> {
   };
   process.once('SIGINT', onSignal);
   try {
+    // Normal-screen text that only survives if the frame used the alternate
+    // screen and leaving it restored the normal one.
+    terminal.write('__AB_MAIN__\r\n');
     terminal.write(renderer.start(model));
     terminal.write('__AB_READY__');
     await signal;

@@ -103,6 +103,117 @@ test('real chat terminal queues complete lines until the next prompt', async () 
   }
 });
 
+const CURSOR_UP = '\u001B[1A';
+const REPAINT_DRAFT_HERE = '\u001B[1G\u001B[0J\nYou > draft';
+
+/**
+ * Runs against real readline on a capable TTY. Readline reads TERM on every
+ * prompt and skips its repaint path entirely when TERM is "dumb", so TERM is
+ * pinned for the whole test and restored afterwards; the caller's environment
+ * must not decide which code path these tests exercise.
+ */
+async function withRealReadline(
+  run: (harness: {
+    input: PassThrough;
+    output: () => string;
+    clearOutput: () => void;
+    terminal: ReturnType<typeof createChatTerminal>;
+  }) => Promise<void>,
+): Promise<void> {
+  const previousTerm = process.env.TERM;
+  process.env.TERM = 'xterm-256color';
+  const input = new PassThrough();
+  const output = Object.assign(new PassThrough(), {
+    isTTY: true,
+    columns: 80,
+    rows: 24,
+  });
+  const written: Buffer[] = [];
+  output.on('data', (chunk: Buffer) => written.push(chunk));
+  const terminal = createChatTerminal({ input, output });
+  try {
+    await run({
+      input,
+      output: () => Buffer.concat(written).toString(),
+      clearOutput: () => {
+        written.length = 0;
+      },
+      terminal,
+    });
+  } finally {
+    terminal.close();
+    if (previousTerm === undefined) {
+      delete process.env.TERM;
+    } else {
+      process.env.TERM = previousTerm;
+    }
+  }
+}
+
+test('prompt repaint after coordinator output keeps the output intact', async () => {
+  await withRealReadline(async ({ input, output, clearOutput, terminal }) => {
+    void terminal.prompt('\nYou > ');
+    input.write('draft');
+    await waitForImmediate();
+    // A multi-row prompt repaint makes readline remember that the cursor sits
+    // one row below where the repaint started.
+    terminal.redrawPrompt();
+    clearOutput();
+
+    terminal.write('\nStatus: active\nPresentation: enhanced terminal\n');
+    terminal.redrawPrompt();
+    const repaint = output();
+    const afterOutput = repaint.slice(
+      repaint.indexOf('Presentation: enhanced terminal\n') +
+        'Presentation: enhanced terminal\n'.length,
+    );
+
+    // Moving up before clearing would erase "Presentation:" on a real
+    // terminal, while a byte-transparent PTY would still show it in the log.
+    assert.equal(afterOutput.includes(CURSOR_UP), false);
+    assert.equal(afterOutput.startsWith(REPAINT_DRAFT_HERE), true, afterOutput);
+  });
+});
+
+test('queued prompt labels do not leave a stale repaint offset', async () => {
+  await withRealReadline(async ({ input, output, clearOutput, terminal }) => {
+    const first = terminal.prompt('\nYou > ');
+    input.write('/help\r');
+    assert.equal(await first, '/help');
+    // Typed while no prompt is pending: one queued line and a partial draft,
+    // whose repaint leaves readline one row below where it started.
+    input.write('/status\r');
+    input.write('draft');
+    await waitForImmediate();
+    terminal.redrawPrompt();
+    clearOutput();
+
+    // The queued line is answered without readline painting its label.
+    assert.equal(await terminal.prompt('\nYou > '), '/status');
+    terminal.redrawPrompt();
+    const repaint = output();
+    assert.equal(repaint.includes(CURSOR_UP), false, repaint);
+    assert.equal(repaint, `\nYou > ${REPAINT_DRAFT_HERE}\u001B[12G`);
+  });
+});
+
+test('real readline tests restore the caller TERM', async () => {
+  const previousTerm = process.env.TERM;
+  process.env.TERM = 'dumb';
+  try {
+    await withRealReadline(async () => {
+      assert.equal(process.env.TERM, 'xterm-256color');
+    });
+    assert.equal(process.env.TERM, 'dumb');
+  } finally {
+    if (previousTerm === undefined) {
+      delete process.env.TERM;
+    } else {
+      process.env.TERM = previousTerm;
+    }
+  }
+});
+
 test('chat terminal delegates active prompt lifecycle to readline', async () => {
   const harness = createFakeTerminal();
   const controller = new AbortController();

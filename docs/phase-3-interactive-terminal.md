@@ -564,6 +564,17 @@ permission level as the test process, and the PTY test and fixture are excluded
 from the published package. The full matrix has proved installation and real
 PTY execution, so the dedicated step is now the cross-platform release gate.
 
+PTY assertions about what the user sees are made against a small VT screen
+model that replays the captured output, not against the raw byte stream.
+Byte-transparent PTYs forward the application's escape sequences, but Windows
+ConPTY interprets them into its own buffer and emits repaints: depending on
+the Windows build it may never forward `ESC[?1049h`/`ESC[?1049l`, and text
+written and erased within one render pass never reaches the stream. A raw-byte
+assertion therefore passed on Linux and macOS while hiding a prompt repaint
+that erased real output, and flaked on Windows. Alternate-screen restoration is
+proved by its effect: normal-screen text written before the frame is visible
+again after the frame is gone.
+
 The CI workflow runs `npm run test:pty` on Ubuntu with the minimum supported
 Node release and the current Node release, and on macOS and Windows with the
 current Node release. Those steps set `AGENT_BRIDGE_REQUIRE_PTY=1`; in that mode
